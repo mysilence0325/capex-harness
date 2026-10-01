@@ -1,0 +1,51 @@
+# Agent Note: Client browser floor
+
+Status: implemented
+
+English | [中文](2026-09-30-client-browser-floor.zh.md)
+
+## Problem
+
+The Web client assumed a current engine. Client artifacts compiled at ES2022/ES2024 targets, the shell's stylesheets shipped through a Vite pipeline that adds neither vendor prefixes nor a target, and client code called post-ES2021 APIs directly. Chromium 90, the oldest engine the product supports, parses neither the whole syntax set nor those APIs, and the gaps land on the boot path: `Array.prototype.at`, `Object.hasOwn`, `structuredClone`, `Promise.withResolvers`, `Array.prototype.findLast/toSorted/toReversed`, `AbortSignal.any`, `AbortSignal.timeout`, and `AbortSignal.prototype.throwIfAborted` are called by the module loader, the transport, the session stores, and every cancellable request path. A missing API throws at its call site, so one gap is a blank page rather than a degraded one, and the same engine renders `color-mix()`, `dvh`, and unprefixed `mask-image` as nothing at all.
+
+## Decision
+
+**Chromium 90 is the client's browser floor, stated once and consumed by both client build paths.** [scripts/client-browser-floor.ts](../../../../scripts/client-browser-floor.ts) exports the script target (`chrome90`) and the Lightning CSS style targets (the same release); Vite compiles the shell and the statically linked client libraries, and [tsdown.client.ts](../../../../packages/client/tsdown.client.ts) compiles the dynamic plugin bundles from them.
+
+**Scripts:** both paths emit at the floor target, and [compat.ts](../../../../packages/client/web/src/compat.ts) installs the standard APIs that release lacks. Its side-effect entry [compat-install.ts](../../../../packages/client/web/src/compat.ts) is the shell entry's first import, which puts the install ahead of every other module in the graph, including the plugin bundles the loader evaluates afterwards. Each entry is feature-detected, so engines that ship the API keep their native implementation, and each one has a product call site: the client mints identifiers through `@deepseek-ai/dsh-util-crypto`, whose reason to exist is that `crypto.randomUUID` is secure-context-only, so the floor does not install it. Browser workers are separate realms and are not covered.
+
+**A compiler runtime helper never becomes a sibling chunk.** Lowering class fields to the floor's target makes the bundler emit a helper the entry and a dynamic chunk of the same package can share, and Rolldown publishes a shared helper as its own chunk file. The shell hands every factory a synchronous `require` that answers platform seeds and registered factories only, so that edge throws when the plugin materializes. [tsdown.client.ts](../../../../packages/client/tsdown.client.ts) rewrites each sibling require into an inline module object carrying the helper and the modules it imports, and drops the chunk file: the package-local chunk graph stays flat whatever the bundler decides to share, and the expression renders on one line so no other source-map mapping moves. The Host's boot-readiness tail script in [injections.ts](../../../../packages/host/webserver/src/injections.ts) builds its deferred from `new Promise` for the same reason the compat install exists — that inline script runs before any client module.
+
+**Styles:** both paths compile with Lightning CSS at the style targets, which supplies the floor's vendor prefixes (for example the `-webkit-mask-*` family), flattens nesting, and minifies. Two features have no compiler lowering and are rewritten from source by `downlevelClientCss`. `color-mix()` resolves against the theme's own token sheets and becomes a custom property whose per-theme literal the sheet defines, with the original expression reinstated behind `@supports` for engines that implement it; a mix the token sheets or a same-stylesheet declaration cannot resolve stays as written. Each dynamic viewport unit gets a static `vh`/`vw` fallback declaration ahead of the original.
+
+**A rule that depends on what a component renders reads a data attribute the component sets.** Components state what they already know — the checkbox's `data-disabled`, the compaction row's `data-open`, the tool item's `data-only-code`, the code block's `data-code-block-banner-wrap`, the markdown heading's `data-followed-by-list`, the chat seat's `data-chat-followed-by-input`, the preview body's `data-preview-kind` — and the conversation shell mirrors an elected view's composer-overlay mark onto `[data-conversation-shell]`. Both engines then read the same fact, which the component suites pin.
+
+**Selector and at-rule features that cannot be lowered stay in source and are dropped whole by the floor:** container queries, anchor positioning, `@starting-style`, `field-sizing`, `scrollbar-gutter`, `accent-color`, and `:nth-child(An+B of S)`. Seventeen `:has()` rules remain, each because the DOM is the only source of its fact: a renderer's own empty output (the chat flow seats), a descendant's hover or keyboard focus (trajectory and shortcut rows, the question bubble, the onboarding card), a slot-contributed part (the conversation header's tabs, the composer seat's trigger menu, dockkit's menu population), `html`-level state published by another package (the Windows titlebar collapse, dockkit's pointer), a two-column grid neighbour, and compact markdown's KaTeX containment.
+
+## Verification
+
+[compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) removes each API from the realm, pins the install list in order, pins idempotence and the all-native pass, and drives every installed implementation. [client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) pins the resolved literals, the definition block, the fallback declarations, the untouched forms, and one corpus invariant: every `color-mix()` in `packages/client/**/*.css` resolves.
+
+A Chromium 90.0.4430.0 snapshot build (revision 857891) reports every polyfilled API absent and every rewritten CSS feature unsupported, and boots the served client through the sidebar, workspace list, composer, and settings.
+
+## Alternatives considered
+
+**A runtime `:has()` shim.** Rejected: it would rewrite selectors in every injected stylesheet and re-evaluate them on each mutation of a streaming conversation tree, on an engine the repository's browser lanes cannot run.
+
+**Hand-rewriting each `color-mix()` and `dvh` site.** Rejected: 89 mixes and 9 unit sites across 57 stylesheets, and the literals would have to be re-derived on every token change.
+
+**Writing the literal fallback next to each `color-mix()` by hand.** Rejected: the theme owns the values, so a per-site literal drifts from the token sheet it mirrors.
+
+**Teaching the module loader to fetch a sibling chunk synchronously.** Rejected: the require handed to a factory is synchronous by design, and every registered chunk row is keyed by the loader's own id, so the loader would have to grow a fetch-on-require path that its documented contract excludes.
+
+**Lowering every client artifact further, to ES2017.** Rejected: the floor parses ES2021 and class instance fields, so the extra lowering would cost bytes and readable output for engines the product does not support.
+
+**Downgrading the shell's stylesheets to PostCSS with autoprefixer.** Rejected: Lightning CSS already compiles every plugin bundle stylesheet, and one transformer covers prefixes, nesting, and minification for both.
+
+## Consequences
+
+Chromium 90 boots and renders the client; the shell's CSS class names now follow Lightning CSS's pattern (`<hash>_<local>`) in the Vite pipeline, and tests that select by class substring are unaffected because the local name survives.
+
+A shared compiler runtime helper is inlined into each chunk that needs it, so such a package ships it once per consumer.
+
+What the floor gives up is visible: container queries do not apply, so narrow-container column collapses keep their base styles, and the seventeen remaining `:has()` rules drop out — descendant hover and keyboard-focus highlights, the conversation header's tab spacing, dockkit's empty-menu suppression, the plugin grid's neighbour alignment, and compact markdown's KaTeX overflow; `field-sizing` leaves its two textareas at their stated min-height, which those rules already carry as the documented fallback; anchor-positioned menu backings are macOS-only and lose their alignment; and a signal combined through the polyfilled `AbortSignal.any` reports the engine's default abort reason because Chromium 90 has no `signal.reason`, which the transport already treats as an abort.

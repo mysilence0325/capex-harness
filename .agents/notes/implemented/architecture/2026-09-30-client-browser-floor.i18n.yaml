@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for 2026-09-30-client-browser-floor.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-30-client-browser-floor.md
+/agent-note-client-browser-floor:
+  en: 8e03eb4bf665730a
+  zh: 9be002b2594b7a3d
+/agent-note-client-browser-floor/problem:
+  en: 1601970b338b383d
+  zh: f9a1578d1bbcb51d
+/agent-note-client-browser-floor/decision:
+  en: 10fe7c41f609e3d0
+  zh: 2c7488530e0159b4
+/agent-note-client-browser-floor/verification:
+  en: cfd6239e96951558
+  zh: c882c4bdc166123c
+/agent-note-client-browser-floor/alternatives-considered:
+  en: ef314ca63e05e538
+  zh: 3697ad2e5ae4a8cc
+/agent-note-client-browser-floor/consequences:
+  en: 20ee0feeb0ac0d03
+  zh: f2f27a19a6078b23
