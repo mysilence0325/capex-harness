@@ -30,7 +30,7 @@ Web 客户端此前假定运行环境是较新的引擎。客户端产物按 ES2
 
 [compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及两条语料不变量：客户端样式表中每个 `color-mix()` 都能解析；源码语料固定为记录在案的九类被整条丢弃特性的处数——十三条 `:has()` 规则、无容器查询、无 `scrollbar-gutter` 声明，以及锚点定位、`@starting-style`、`field-sizing`、`accent-color`、`text-wrap` 与 `:nth-child(An+B of S)` 各自的处数——因此它们都不会悄悄扩散。
 
-Chromium 90.0.4430.0 快照构建（revision 857891）实测报告：所有被 polyfill 的 API 均缺失，所有被改写的 CSS 特性均不支持；它能启动服务端提供的客户端，并渲染出侧栏、工作区列表、输入框与设置。
+Chromium 90.0.4430.0 快照构建（revision 857891）实测报告：所有被 polyfill 的 API 均缺失，所有被改写的 CSS 特性均不支持；它能启动服务端提供的客户端，并渲染出侧栏、工作区列表、输入框与设置。该构建由工作站的 CDP 驱动，对着源码启动的服务器运行，这就是本下限的验证通道：部署目标是被浏览器访问的局域网服务器，因此 CI 能守住的是产物门禁与下面的语料棘轮，行为回归则通过重跑该通道发现。
 
 [verify-client-browser-floor.ts](../../../../scripts/verify-client-browser-floor.ts) 会解析每个浏览器产物，以及其中以文本内嵌的每一段 JavaScript 载荷——字符串字面量会对外层文件的扫描隐藏其内容。它与其他产物级门禁一起注册，并且会让降级之前出厂的那个产物失败：`lib/client.pdf.js:29:982202: class static block (embedded payload)`。
 
@@ -54,4 +54,4 @@ Chromium 90 可以启动并渲染客户端；Vite 管线中 shell 的 CSS 类名
 
 被共享的编译器运行时辅助函数会内联进每个需要它的 chunk，因此这类包会按消费方各带一份。
 
-代价是可见的：其余十三条 `:has()` 规则会被丢弃——子元素的 hover 与键盘焦点高亮、输入座位上的触发器菜单间距，以及 `html` 级的标题栏与指针状态；`field-sizing` 让它的两个 textarea 停在声明的最小高度，相关规则本就把这写成文档化的回退；锚点定位的菜单底层只用于 macOS，会失去对齐；经 polyfill 的 `AbortSignal.any` 合成的信号报告引擎默认的中止原因，因为 Chromium 90 没有 `signal.reason`，而传输层本就把它当作中止处理。
+代价是可见的：其余十三条 `:has()` 规则会被丢弃——子元素的 hover 与键盘焦点高亮、输入座位上的触发器菜单间距，以及 `html` 级的标题栏与指针状态；`field-sizing` 让它的两个 textarea 停在声明的最小高度，相关规则本就把这写成文档化的回退；锚点定位的菜单底层只用于 macOS，会失去对齐；`accent-color` 让五个着色控件回到平台默认色，`text-wrap` 使插件卡片失去均衡换行，`@starting-style` 让悬停卡片失去进场过渡，`:nth-child(An+B of S)` 让聊天流的尾部间距停在基础规则——这四项都选择接受而非改写：界面仍然可读，而仅限 macOS 的锚点路径根本不会作用于本下限面向的局域网浏览器；经 polyfill 的 `AbortSignal.any` 合成的信号报告引擎默认的中止原因，因为 Chromium 90 没有 `signal.reason`，而传输层本就把它当作中止处理。
