@@ -122,7 +122,8 @@ function presetLabel(preset: AgentPresetGroup, t: Translate, presetName: (preset
 
 /** One expandable plugin card; the caller owns the trailing status content. */
 function PluginCard({
-  rowKey, moduleName, title, description, metadataError, entryId, trailing, ariaLabel, failed, expanded, onToggle, children,
+  rowKey, moduleName, title, description, metadataError, entryId, trailing, ariaLabel, failed, expanded, followedByOpen, onToggle,
+  children,
 }: {
   readonly rowKey: string
   readonly moduleName: string
@@ -134,6 +135,7 @@ function PluginCard({
   readonly ariaLabel: string
   readonly failed: boolean
   readonly expanded: string | null
+  readonly followedByOpen: boolean
   readonly onToggle: (key: string) => void
   readonly children: ReactNode
 }): ReactNode {
@@ -147,6 +149,9 @@ function PluginCard({
       data-plugin-module={moduleName}
       data-failed={failed ? 'true' : undefined}
       data-open={open ? 'true' : undefined}
+      // The grid draws the gap between an open card and the one before it, which
+      // is a fact about this card rather than something a selector can ask for.
+      data-followed-by-open={followedByOpen ? 'true' : undefined}
     >
       <button
         className={css.cardContent}
@@ -327,7 +332,7 @@ export function PluginInventorySettingsTab(
   }
 
   /** Trailing status and detail facts for one row of the selected preset. */
-  const presetRowCard = (preset: AgentPresetGroup, row: AgentPresetRow, index: number): ReactNode => {
+  const presetRowCard = (preset: AgentPresetGroup, row: AgentPresetRow, index: number, followerKey: string | null): ReactNode => {
     const key = `preset:${preset.id}:${String(index)}`
     const { title, description } = pluginText(row, resolveText)
     const failed = row.fiberPhase === 'failed'
@@ -346,6 +351,7 @@ export function PluginInventorySettingsTab(
         entryId={row.entryId}
         failed={failed}
         expanded={expanded}
+        followedByOpen={followerKey !== null && expanded === followerKey}
         onToggle={toggleRow}
         ariaLabel={cardLabel(title, row.entryId, stateText)}
         trailing={(
@@ -375,6 +381,7 @@ export function PluginInventorySettingsTab(
   /** One global-plane row; a preset-provided row carries the presets that enable it. */
   const globalRowCard = (
     entry: PluginInventoryEntry,
+    followedByOpen: boolean,
     providers?: readonly [AgentPresetGroup, ...AgentPresetGroup[]],
   ): ReactNode => {
     const key = `global:${entry.entryId}`
@@ -395,6 +402,7 @@ export function PluginInventorySettingsTab(
         entryId={entry.entryId}
         failed={failed}
         expanded={expanded}
+        followedByOpen={followedByOpen}
         onToggle={toggleRow}
         ariaLabel={cardLabel(title, entry.entryId, stateText)}
         trailing={(
@@ -540,7 +548,8 @@ export function PluginInventorySettingsTab(
                   ) : null}
                   {selectedRows.length > 0 ? (
                     <ul className={css.cards}>
-                      {selectedRows.map((row, index) => presetRowCard(selected, row, index))}
+                      {selectedRows.map((row, index) => presetRowCard(selected, row, index,
+                        index + 1 < selectedRows.length ? `preset:${selected.id}:${String(index + 1)}` : null))}
                     </ul>
                   ) : null}
                   {otherMatchCount > 0 ? (
@@ -586,11 +595,17 @@ export function PluginInventorySettingsTab(
               </p>
               {globalEffectiveOpen && globalCount > 0 ? (
                 <ul className={css.cards} id={`${sectionId}-global`}>
-                  {filteredFailed.map(entry => globalRowCard(entry))}
-                  {filteredRegular.map(entry => globalRowCard(
-                    entry,
-                    entry.enabled ? undefined : enabledIn.get(entry.moduleName),
-                  ))}
+                  {filteredFailed.map((entry, index) => globalRowCard(entry,
+                    filteredFailed[index + 1] !== undefined
+                    || expanded === `global:${filteredRegular[0]?.entryId ?? ''}`))}
+                  {filteredRegular.map((entry, index) => {
+                    const follower = filteredRegular[index + 1]
+                    return globalRowCard(
+                      entry,
+                      follower !== undefined && expanded === `global:${follower.entryId}`,
+                      entry.enabled ? undefined : enabledIn.get(entry.moduleName),
+                    )
+                  })}
                 </ul>
               ) : null}
             </section>

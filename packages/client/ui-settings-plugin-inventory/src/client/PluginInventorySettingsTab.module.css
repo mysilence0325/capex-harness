@@ -117,7 +117,7 @@
    `.cards` declares, where each row starts at an odd position, and must change
    with that count; in one column the matched card sits alone in its row. */
 .card:nth-child(odd)[data-open='true'] + .card,
-.card:nth-child(odd):has(+ .card[data-open='true']) {
+.card:nth-child(odd)[data-followed-by-open='true'] {
   align-self: start;
 }
 
