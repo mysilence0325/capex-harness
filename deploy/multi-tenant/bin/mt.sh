@@ -10,6 +10,10 @@
 #   bin/mt.sh url                print every entry URL
 #   bin/mt.sh smoke              run the isolation smoke test
 #   bin/mt.sh accept <args>      run the end-to-end acceptance (model catalog → prompt → reply)
+#   bin/mt.sh doctor             preflight and health check of this deployment
+#   bin/mt.sh backup [args]      back up every tenant's data + control-plane state
+#   bin/mt.sh restore <archive>  restore a backup (current data is moved aside, not deleted)
+#   bin/mt.sh publish-image      build the runtime image from an uploaded local-source overlay
 #   bin/mt.sh list               list tenants from the registry
 #   bin/mt.sh add <id> [...]     add a tenant (see bin/registry.js)
 #   bin/mt.sh passwd <id> <user> set a tenant password
@@ -51,6 +55,8 @@ cmd_up() {
   # 经典构建器直接使用本地已有的 node:22-bookworm-slim。
   DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build gateway
   "${COMPOSE[@]}" up -d
+  # 重建容器会换掉租户的 bridge 地址，网关缓存里可能还是旧的；重启一次让它从零开始。
+  docker restart mt-gateway >/dev/null 2>&1 || true
   cmd_wait
   cmd_url
 }
@@ -156,6 +162,10 @@ case "${1:-}" in
   wait)    cmd_wait ;;
   smoke)   shift; cmd_smoke "$@" ;;
   accept)  shift; cmd_accept "$@" ;;
+  doctor)  bash bin/doctor.sh ;;
+  backup)  shift; bash bin/backup.sh "$@" ;;
+  restore) shift; bash bin/restore.sh "$@" ;;
+  publish-image) shift; bash bin/publish-image.sh "$@" ;;
   model)   cmd_model ;;
   render)  shift; node_run bin/render.js "$@" ;;
   list)    node_run bin/registry.js list ;;

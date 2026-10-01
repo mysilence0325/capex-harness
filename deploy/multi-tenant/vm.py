@@ -27,6 +27,28 @@ import paramiko
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+
+def load_local_env() -> None:
+    """Load KEY=VALUE lines from ./local.env beside this script.
+
+    The file is gitignored and holds this operator's connection facts, so no
+    host or password lives in the tracked source. Real environment variables
+    always win.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local.env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped == "" or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+load_local_env()
+
 HOST = os.environ["VM_HOST"]
 USER = os.environ.get("VM_USER", "root")
 PASSWORD = os.environ["VM_PASS"]

@@ -383,59 +383,86 @@ async function proxyRequest(req, res, session) {
     return
   }
 
-  const upstream = http.request({
-    host: address,
-    port: tenant.internalPort,
-    method: req.method,
-    path: req.url,
-    headers,
-    // No upstream keep-alive: a pooled socket the tenant closes while idle
-    // surfaces as ECONNRESET on the next request, which is noise for a proxy
-    // that already opens one connection per client request.
-    agent: false,
-  }, (response) => {
-    const status = response.statusCode ?? 502
-    audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status, ms: Date.now() - started })
+  let attempts = 0
+  const sendUpstream = () => {
+    const upstream = http.request({
+      host: address,
+      port: tenant.internalPort,
+      method: req.method,
+      path: req.url,
+      headers,
+      // No upstream keep-alive: a pooled socket the tenant closes while idle
+      // surfaces as ECONNRESET on the next request, which is noise for a proxy
+      // that already opens one connection per client request.
+      agent: false,
+    }, (response) => {
+      const status = response.statusCode ?? 502
+      audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status, ms: Date.now() - started })
 
-    if (status === 401) {
-      response.resume()
-      if (activation !== undefined) {
-        // We just completed the exchange and the runtime still refused it.
-        audit({ tenant: tenant.id, user: session.user, url: req.url, status: 503, note: 'activation-rejected' })
-        send(res, 503, { 'content-type': 'text/html; charset=utf-8' },
-          errorPage(503, '租户运行时拒绝了激活，可能仍在启动中。请稍后刷新重试。'))
+      if (status === 401) {
+        response.resume()
+        if (activation !== undefined) {
+          // We just completed the exchange and the runtime still refused it.
+          audit({ tenant: tenant.id, user: session.user, url: req.url, status: 503, note: 'activation-rejected' })
+          send(res, 503, { 'content-type': 'text/html; charset=utf-8' },
+            errorPage(503, '租户运行时拒绝了激活，可能仍在启动中。请稍后刷新重试。'))
+          return
+        }
+        // The browser held a cookie this runtime no longer accepts: force one
+        // refresh, then fail instead of looping.
+        audit({ tenant: tenant.id, user: session.user, url: req.url, status: 303, note: 'refresh-cookie' })
+        const target = new URL(req.url ?? '/', 'http://gateway.invalid')
+        target.searchParams.set('mt_refresh', '1')
+        send(res, 303, { location: `${target.pathname}${target.search}`, 'cache-control': 'no-store' }, '')
         return
       }
-      // The browser held a cookie this runtime no longer accepts: force one
-      // refresh, then fail instead of looping.
-      audit({ tenant: tenant.id, user: session.user, url: req.url, status: 303, note: 'refresh-cookie' })
-      const target = new URL(req.url ?? '/', 'http://gateway.invalid')
-      target.searchParams.set('mt_refresh', '1')
-      send(res, 303, { location: `${target.pathname}${target.search}`, 'cache-control': 'no-store' }, '')
-      return
-    }
 
-    const responseHeaders = { ...response.headers }
-    if (activation !== undefined) {
-      const existing = responseHeaders['set-cookie']
-      responseHeaders['set-cookie'] = existing === undefined
-        ? [activation.setCookie]
-        : [...(Array.isArray(existing) ? existing : [existing]), activation.setCookie]
-    }
-    res.writeHead(status, responseHeaders)
-    response.pipe(res)
-  })
+      const responseHeaders = { ...response.headers }
+      if (activation !== undefined) {
+        const existing = responseHeaders['set-cookie']
+        responseHeaders['set-cookie'] = existing === undefined
+          ? [activation.setCookie]
+          : [...(Array.isArray(existing) ? existing : [existing]), activation.setCookie]
+      }
+      res.writeHead(status, responseHeaders)
+      response.pipe(res)
+    })
 
-  upstream.on('error', (error) => {
-    audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status: 502, ms: Date.now() - started, error: error.message })
-    if (!res.headersSent) {
-      send(res, 502, { 'content-type': 'text/plain; charset=utf-8' }, `tenant runtime unreachable: ${error.message}\n`)
-    } else {
-      res.destroy()
-    }
-  })
+    upstream.on('error', (error) => {
+      // A recreated tenant container gets a new address, so a cached one goes
+      // stale the moment the runtime is redeployed. Drop it and retry a
+      // bodyless request once instead of failing the first navigation after a
+      // deploy.
+      addressCache.delete(tenant.id)
+      const bodyless = req.method === 'GET' || req.method === 'HEAD'
+      if (bodyless && attempts === 0) {
+        attempts += 1
+        tenantAddress(tenant).then((fresh) => {
+          address = fresh
+          sendUpstream()
+        }).catch((retryError) => {
+          audit({ tenant: tenant.id, user: session.user, url: req.url, status: 502, error: retryError.message })
+          if (!res.headersSent) {
+            send(res, 502, { 'content-type': 'text/plain; charset=utf-8' },
+              `tenant runtime unreachable: ${retryError.message}\n`)
+          } else {
+            res.destroy()
+          }
+        })
+        return
+      }
+      audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status: 502, ms: Date.now() - started, error: error.message })
+      if (!res.headersSent) {
+        send(res, 502, { 'content-type': 'text/plain; charset=utf-8' }, `tenant runtime unreachable: ${error.message}\n`)
+      } else {
+        res.destroy()
+      }
+    })
 
-  req.pipe(upstream)
+    req.pipe(upstream)
+  }
+
+  sendUpstream()
 }
 
 /** Replace or append one cookie in a Cookie header value. */

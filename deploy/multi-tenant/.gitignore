@@ -1,5 +1,6 @@
 # 部署实例的私密与运行时数据：不进版本库
 .env
+local.env
 model.env
 tenants.json
 tenants/

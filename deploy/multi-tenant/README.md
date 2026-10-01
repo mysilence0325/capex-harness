@@ -30,6 +30,32 @@ bin/mt.sh url                     # 打印入口地址
 前置条件：宿主已装 Docker 与 compose v2；有一个可用的 DSH 运行时镜像（见 `.env` 的 `DSH_IMAGE`，
 例如从 npm 安装构建：`node:22-bookworm-slim` + `npm i -g @deepseek-ai/dsh@<版本>`）。
 
+## 0.1 用本地源码构建运行时镜像
+
+默认的 `DSH_IMAGE` 是 npm 发行版。要让部署跑**你改过的源码**，把本地构建产物做成覆盖层叠到基础镜像上：
+
+```bash
+# ① 源码检出里：构建三个面（宿主 lib、客户端 bundle、Web dist）
+pnpm run build:lib && pnpm run build:web        # 或 Windows 上的 build-dsh.ps1
+
+# ② 生成覆盖层（目录结构 = 容器内安装路径）
+node deploy/multi-tenant/bin/make-image-overlay.mjs --src . --out image-overlay
+tar -czf image-overlay.tar.gz -C image-overlay .
+
+# ③ 上传到部署机并发布镜像
+scp image-overlay.tar.gz root@<主机>:/tmp/
+ssh root@<主机> 'cd /opt/dsh-mt && bin/mt.sh publish-image "" /tmp/image-overlay.tar.gz'
+
+# ④ 切换租户到新镜像
+ssh root@<主机> 'cd /opt/dsh-mt && bin/mt.sh up'
+```
+
+`publish-image.sh` 会在构建后**核对镜像内的 `index.html` 哈希与覆盖层一致**，不一致直接失败——
+避免出现"以为部署了新代码、其实没有"。
+
+刻意不做的事：原生插件（`build:native-system`）产出的是构建机的 `.node`，不能跨平台塞进 Linux 容器；
+Electron 桌面包与 Web 部署无关。两者都不影响 Web GUI。
+
 ## 1. 隔离模型
 
 | 维度 | 隔离方式 |
@@ -61,6 +87,7 @@ bin/mt.sh url                     # 打印入口地址
 ```bash
 bin/mt.sh up                       # 渲染 + 构建 + 启动 + 等待就绪 + 打印入口
 bin/mt.sh status                   # 容器状态 + 就绪情况
+bin/mt.sh doctor                   # 自检：前置条件/配置/租户/控制面/防火墙/模型/资源/备份
 bin/mt.sh url                      # 打印入口地址
 bin/mt.sh logs alpha               # 看某个租户的运行日志
 bin/mt.sh add delta --user dave --title "Delta 团队" --edge-port 8094
@@ -68,7 +95,26 @@ bin/mt.sh passwd alpha alice       # 重置密码（会打印新密码）
 bin/mt.sh remove delta             # 从注册表移除（数据目录保留，需手动删除）
 bin/mt.sh key alpha sk-xxxx        # 写入该租户的模型 key，然后 bin/mt.sh up
 bin/mt.sh smoke --tenant alpha --user alice --password <pw>   # 隔离性冒烟测试
+bin/mt.sh accept --tenant alpha --user alice --password <pw>  # 端到端验收（含一次真实模型调用）
+bin/mt.sh backup                   # 备份全部租户数据 + 控制面状态（默认冻结快照）
+bin/mt.sh restore <归档>           # 恢复；现有数据挪到 restore-aside-<时间戳>/ 而不删除
+bin/mt.sh publish-image            # 用已上传的覆盖层构建本地源码镜像
 ```
+
+### 备份与恢复
+
+```bash
+bin/mt.sh backup                       # → backups/dsh-mt-<UTC 时间戳>.tar.gz，保留最近 7 份
+bin/mt.sh backup --live                # 不冻结（打包期间 agent 继续跑）
+bin/mt.sh backup --out /mnt/backup     # 换备份目录
+bin/mt.sh restore backups/dsh-mt-xxx.tar.gz
+```
+
+- 归档含 `tenants/`（全部 `DSH_HOME` 与 workspace）、`state/`（网关会话密钥）、`tenants.json`、`.env`、`MANIFEST.txt`。
+- 默认先用 `docker pause` 冻结各租户再打包（几秒），避免抓到写了一半的会话日志；`--live` 跳过冻结。
+- 恢复**不会删除**现有数据：先整体挪到 `restore-aside-<时间戳>/`，确认无误后再手动删。
+- 内存密钥（`state/session.key`）也在归档里，恢复后原有浏览器会话继续有效。
+
 
 ## 4. 用户怎么访问
 
