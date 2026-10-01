@@ -72,10 +72,11 @@ trap restore EXIT
 health() { curl -fsS "http://127.0.0.1:${EDGE_PORT}/__mt/health" 2>/dev/null; }
 
 # 只认被测租户自己的就绪状态：别的租户先就绪不代表它已经起来了。
+# 模式允许 id 与 ready 之间存在其它字段（例如 container）。
 wait_tenant_ready() {
   local id="$1" tries="${2:-60}"
   for _ in $(seq 1 "$tries"); do
-    if health | tr -d ' \n' | grep -q "\"id\":\"${id}\",\"ready\":true"; then return 0; fi
+    if health | tr -d ' \n' | grep -qE "\"id\":\"${id}\"[^}]*\"ready\":true"; then return 0; fi
     sleep 2
   done
   return 1

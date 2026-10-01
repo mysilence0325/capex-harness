@@ -33,8 +33,29 @@ const TOKEN_CACHE_MS = 10_000
 const SESSION_COOKIE = 'mt_session'
 const PREFIX = '/__mt'
 
-const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
-const tenants = new Map(config.tenants.map((tenant) => [tenant.id, tenant]))
+/**
+ * Read the tenant registry.
+ *
+ * The file is rewritten in place by bin/registry.js (write, not rename), so a
+ * bind-mounted copy inside this container stays the same inode and the watcher
+ * below sees every change.
+ *
+ * @returns the registry keyed by tenant id.
+ */
+function loadRegistry() {
+  const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+  const loaded = new Map()
+  for (const tenant of config.tenants ?? []) {
+    if (typeof tenant?.id !== 'string' || !Number.isInteger(tenant?.internalPort)) {
+      throw new Error(`tenant entry needs an id and an internalPort: ${JSON.stringify(tenant?.id)}`)
+    }
+    loaded.set(tenant.id, tenant)
+  }
+  return loaded
+}
+
+/** Current registry. Replaced as a whole on reload, never mutated in place. */
+let tenants = loadRegistry()
 
 fs.mkdirSync(STATE_DIR, { recursive: true })
 fs.mkdirSync(LOG_DIR, { recursive: true })
@@ -733,6 +754,9 @@ function handleUpgrade(req, socket, head) {
 // listeners
 // ---------------------------------------------------------------------------
 
+/** Listening servers by port, so a reload can add one without dropping others. */
+const listeners = new Map()
+
 /**
  * Listen on one public port and answer with the shared handler.
  *
@@ -744,6 +768,7 @@ function handleUpgrade(req, socket, head) {
  * @param port - public port to bind inside the gateway container.
  */
 function listen(port) {
+  if (listeners.has(port)) return
   const server = http.createServer(handleRequest)
   server.on('upgrade', handleUpgrade)
   server.on('error', (error) => {
@@ -753,11 +778,59 @@ function listen(port) {
   server.listen(port, BIND_ADDRESS, () => {
     console.log(`mt-gateway listening on ${BIND_ADDRESS}:${String(port)}`)
   })
+  listeners.set(port, server)
 }
 
-const ports = new Set([EDGE_PORT])
-for (const tenant of tenants.values()) {
-  if (tenant.edgePort !== undefined && tenant.edgePort !== EDGE_PORT) ports.add(tenant.edgePort)
+/**
+ * Apply the registry to the live gateway.
+ *
+ * Adding or removing a tenant must not disturb the tenants already being used,
+ * so this never restarts the process: it swaps the registry, opens a listener
+ * for a new edge port, closes one whose tenant is gone, and drops cached
+ * addresses and launch tokens of tenants that no longer exist.
+ *
+ * @param reason - why this ran, for the audit line.
+ */
+function applyRegistry(reason) {
+  let next
+  try {
+    next = loadRegistry()
+  } catch (error) {
+    // Keep serving the previous registry: a half-written file must not take the
+    // control plane down.
+    console.error(`mt-gateway: registry reload failed, keeping the previous one: ${error.message}`)
+    return
+  }
+
+  const added = [...next.keys()].filter((id) => !tenants.has(id))
+  const removed = [...tenants.keys()].filter((id) => !next.has(id))
+  tenants = next
+
+  const wanted = new Set([EDGE_PORT])
+  for (const tenant of tenants.values()) {
+    if (tenant.edgePort !== undefined && tenant.edgePort !== EDGE_PORT) wanted.add(tenant.edgePort)
+  }
+  for (const port of wanted) listen(port)
+  for (const [port, server] of listeners) {
+    if (wanted.has(port)) continue
+    server.close()
+    listeners.delete(port)
+    console.log(`mt-gateway stopped listening on :${String(port)}`)
+  }
+
+  for (const id of removed) {
+    tokenCache.delete(id)
+    addressCache.delete(id)
+  }
+
+  if (added.length > 0 || removed.length > 0) {
+    console.log(`mt-gateway registry ${reason}: +${added.join(',') || '-'} -${removed.join(',') || '-'} (now ${String(tenants.size)})`)
+    audit({ tenant: '-', user: '-', status: 0, note: 'registry-reload', added: added.join(','), removed: removed.join(',') })
+  }
 }
-for (const port of ports) listen(port)
+
+applyRegistry('boot')
+// Polling instead of fs.watch: the registry arrives through a bind mount, whose
+// watch semantics differ across kernels.
+fs.watchFile(CONFIG_FILE, { interval: 2000 }, () => { applyRegistry('reload') })
 console.log(`mt-gateway serving ${String(tenants.size)} tenant(s): ${[...tenants.keys()].join(', ')}`)

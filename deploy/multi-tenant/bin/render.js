@@ -143,7 +143,8 @@ function sharedModelEntries() {
  * @returns whether the file changed.
  */
 function spliceModelBlock(patchFile, tenant, entries) {
-  const base = fs.existsSync(patchFile) ? fs.readFileSync(patchFile, 'utf8') : profilePatch(tenant)
+  const existed = fs.existsSync(patchFile)
+  const base = existed ? fs.readFileSync(patchFile, 'utf8') : profilePatch(tenant)
   const kept = []
   let skipping = false
   for (const line of base.split('\n')) {
@@ -155,7 +156,10 @@ function spliceModelBlock(patchFile, tenant, entries) {
   const next = entries === undefined
     ? body + '\n'
     : `${body}\n\n${MARK_BEGIN}\n${entries}\n${MARK_END}\n`
-  if (next === base) return false
+  // A missing file must always be written: without this, a tenant whose model
+  // block is empty gets no patch at all and DSH falls back to the profile
+  // template, listening on its default port instead of the assigned one.
+  if (next === base && existed) return false
   fs.writeFileSync(patchFile, next, { mode: 0o600 })
   return true
 }

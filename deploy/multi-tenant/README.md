@@ -90,15 +90,43 @@ bin/mt.sh status                   # 容器状态 + 就绪情况
 bin/mt.sh doctor                   # 自检：前置条件/配置/租户/控制面/防火墙/模型/资源/备份
 bin/mt.sh url                      # 打印入口地址
 bin/mt.sh logs alpha               # 看某个租户的运行日志
-bin/mt.sh add delta --user dave --title "Delta 团队" --edge-port 8094
+bin/mt.sh add delta --user dave    # 开通新租户（一条命令走完全流程，见下）
+bin/mt.sh remove delta             # 摘除租户（保留数据）；--purge 连数据一起删
 bin/mt.sh passwd alpha alice       # 重置密码（会打印新密码）
-bin/mt.sh remove delta             # 从注册表移除（数据目录保留，需手动删除）
 bin/mt.sh key alpha sk-xxxx        # 写入该租户的模型 key，然后 bin/mt.sh up
 bin/mt.sh smoke --tenant alpha --user alice --password <pw>   # 隔离性冒烟测试
 bin/mt.sh accept --tenant alpha --user alice --password <pw>  # 端到端验收（含一次真实模型调用）
 bin/mt.sh backup                   # 备份全部租户数据 + 控制面状态（默认冻结快照）
 bin/mt.sh restore <归档>           # 恢复；现有数据挪到 restore-aside-<时间戳>/ 而不删除
 bin/mt.sh publish-image            # 用已上传的覆盖层构建本地源码镜像
+```
+
+### 开通新租户
+
+```bash
+bin/mt.sh add delta --user dave
+```
+
+这一条命令做的事：
+
+1. 写注册表：自动分配内部端口（3181 起）和**专属入口端口**（8091 起），随机生成密码；
+2. 渲染 compose 与 `tenants/<id>/home/profiles/web/cordis.patch.yml`；
+3. 防火墙放行新的专属端口；
+4. **只启动这一个 service**，已有租户不受影响；
+5. 等它就绪（轮询网关健康接口），失败会提示看日志；
+6. 打印用户名、密码、统一入口与专属入口。
+
+**网关不需要重启**：它每 2 秒轮询 `tenants.json`，热加载新增/删除的租户、自动为新租户开专属端口监听、
+并在租户被删除时关掉对应监听、清掉它的地址与 token 缓存。因此开通/摘除过程中，
+其它租户正在使用的 WebSocket 与页面不会断。
+
+`bin/mt.sh list` 可查看当前所有租户及其端口分配。
+
+### 摘除租户
+
+```bash
+bin/mt.sh remove delta            # 停容器、删容器、从注册表摘除，数据留在 tenants/delta/
+bin/mt.sh remove delta --purge    # 连数据一起删除（不可恢复，先确保有备份）
 ```
 
 ### 备份与恢复

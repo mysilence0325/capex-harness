@@ -54,7 +54,19 @@ for t in $TENANTS; do
   [ -d "tenants/$t/home" ] && ok "  $t home 存在（$(du -sh "tenants/$t/home" 2>/dev/null | cut -f1)，会话 $(find "tenants/$t/home/sessions" -name 'session*.jsonl*' 2>/dev/null | wc -l) 个）" \
     || bad "  $t home 缺失"
   patch="tenants/$t/home/profiles/web/cordis.patch.yml"
-  [ -f "$patch" ] && ok "  $t profile patch 存在" || warn "  $t 没有 profile patch（bin/mt.sh render 会补）"
+  want_port="$(grep -A4 "\"id\": \"$t\"" tenants.json | grep -o '"internalPort": *[0-9]*' | grep -o '[0-9]*' | head -1)"
+  if [ -f "$patch" ]; then
+    have_port="$(grep -A3 'id: webserver' "$patch" | grep -o 'port: *[0-9]*' | grep -o '[0-9]*' | head -1)"
+    if [ -z "$have_port" ]; then
+      bad "  $t 的 patch 缺少 webserver.port（会退到默认 3080，网关将无法代理）"
+    elif [ "$have_port" != "$want_port" ]; then
+      bad "  $t 的 patch 端口 $have_port 与注册表 $want_port 不一致"
+    else
+      ok "  $t patch 端口 $have_port 与注册表一致"
+    fi
+  else
+    warn "  $t 没有 profile patch（bin/mt.sh render 会补）"
+  fi
 done
 
 head_ "控制面"

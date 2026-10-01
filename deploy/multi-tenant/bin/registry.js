@@ -7,9 +7,12 @@
  *
  * Usage:
  *   node bin/registry.js list
- *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--password <pw>]
+ *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--no-edge-port] [--password <pw>]
  *   node bin/registry.js passwd <id> <user> [--password <pw>]
  *   node bin/registry.js remove <id>
+ *
+ * `add` allocates the internal port and, unless --no-edge-port is given, a
+ * dedicated entry port automatically, so bin/mt.sh add needs only an id.
  */
 
 'use strict'
@@ -93,7 +96,14 @@ switch (command) {
       limits: { memory: flag(args, 'memory') ?? '2g', cpus: flag(args, 'cpus') ?? '1.5', pids: 512 },
     }
     const edgePort = flag(args, 'edge-port')
-    if (edgePort !== undefined) tenant.edgePort = Number(edgePort)
+    if (edgePort !== undefined) {
+      tenant.edgePort = Number(edgePort)
+    } else if (!args.includes('--no-edge-port')) {
+      // Every tenant gets its own entry port by default: it makes the tenant
+      // reachable without typing a username on the shared entry, and it lets a
+      // shared username be disambiguated by the address it arrived on.
+      tenant.edgePort = nextPort('edgePort', 8091)
+    }
     registry.tenants.push(tenant)
     save()
     console.log(`added tenant ${id}`)
