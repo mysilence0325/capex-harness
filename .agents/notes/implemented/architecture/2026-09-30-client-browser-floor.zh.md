@@ -16,6 +16,8 @@ Web 客户端此前假定运行环境是较新的引擎。客户端产物按 ES2
 
 **编译器运行时辅助函数永不成为兄弟 chunk。**把类字段降到下限目标会让打包器产出一个可由同包的入口与其动态 chunk 共享的辅助函数，Rolldown 会把它发布成独立的 chunk 文件。shell 交给每个 factory 的 `require` 是同步的，只认平台种子词与已注册的 factory，因此这条边会在插件物化时抛错。[tsdown.client.ts](../../../../packages/client/tsdown.client.ts) 把每处兄弟 require 改写为一个内联模块对象，其中带上该辅助函数及它 import 的模块，并删除该 chunk 文件：无论打包器决定共享什么，包内 chunk 图都保持扁平；该表达式渲染成单行，因此不会移动任何其他 sourcemap 映射。Host 的启动就绪尾脚本位于 [injections.ts](../../../../packages/host/webserver/src/injections.ts)，它用 `new Promise` 构建 deferred，原因与 compat 安装相同——这段内联脚本先于任何客户端模块执行。
 
+**以文本内嵌的 JavaScript 载荷会被降级，并自带所属 realm 的安装。**Worker 载荷不经过 bundle 的转换——PDF.js Worker 由 [tsdown.config.ts](../../../../packages/client/ui-sidebar-documentpreview/tsdown.config.ts) 原样内联，Excel 解析器是一次嵌套 Rolldown 构建——因此 [tsdown.client.ts](../../../../packages/client/tsdown.client.ts) 导出 `downlevelClientScript`，只按浏览器下限目标处理该载荷。Worker 同时也是独立的 realm：shell 的 compat 入口永远不会在其中求值，所以两段预览载荷都前置了 `CLIENT_FLOOR_WORKER_PREAMBLE`，这是载荷可能调用到的全部下限 API 的自包含安装。`pdfjs-dist` 6.3.289 在原有集合之外还需要四个 API——`Iterator`（它在检查之前就扩展共享迭代器原型）、`Promise.try`、`URL.parse`、`Uint8Array.fromBase64`——并且在主线程 realm 中同样调用，因此它们并入由 [compat.ts](../../../../packages/client/web/src/compat.ts) 安装的下限契约。
+
 **样式：**两条路径都用 Lightning CSS 按样式目标编译，由它提供该下限所需的厂商前缀（例如 `-webkit-mask-*` 系列）、展开嵌套并压缩。有两类特性没有编译器降级方案，由 `downlevelClientCss` 直接改写源码：`color-mix()` 按主题自身的 token 表求值，变成一个自定义属性，由样式表给出各主题的字面量，同时在 `@supports` 之后为支持该函数的引擎保留原表达式；token 表或同一样式表内的声明无法解析的 mix 保持原样。每个动态视口单位都会在原始声明之前得到一条静态的 `vh`/`vw` 回退声明。
 
 **依赖组件渲染结果的规则读取组件设置的 data 属性。**组件写出它本就掌握的事实——Checkbox 的 `data-disabled`、compaction 行的 `data-open`、工具条目的 `data-only-code`、代码块的 `data-code-block-banner-wrap`、Markdown 标题的 `data-followed-by-list`、对话 seat 的 `data-chat-followed-by-input`、预览主体的 `data-preview-kind`——对话 shell 则把被选中 view 的 composer 浮层标记镜像到 `[data-conversation-shell]`。两个引擎因此读到同一事实，并由组件测试固定。
@@ -27,6 +29,8 @@ Web 客户端此前假定运行环境是较新的引擎。客户端产物按 ES2
 [compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及一条语料不变量：`packages/client/**/*.css` 中每个 `color-mix()` 都能解析。
 
 Chromium 90.0.4430.0 快照构建（revision 857891）实测报告：所有被 polyfill 的 API 均缺失，所有被改写的 CSS 特性均不支持；它能启动服务端提供的客户端，并渲染出侧栏、工作区列表、输入框与设置。
+
+[verify-client-browser-floor.ts](../../../../scripts/verify-client-browser-floor.ts) 会解析每个浏览器产物，以及其中以文本内嵌的每一段 JavaScript 载荷——字符串字面量会对外层文件的扫描隐藏其内容。它与其他产物级门禁一起注册，并且会让降级之前出厂的那个产物失败：`lib/client.pdf.js:29:982202: class static block (embedded payload)`。
 
 ## Alternatives considered
 
