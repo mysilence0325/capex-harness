@@ -142,7 +142,7 @@ describe('client stylesheet downleveling', () => {
       counts.container += [...source.matchAll(/@container\b/g)].length
       counts.gutter += [...source.matchAll(/scrollbar-gutter\s*:/g)].length
     }
-    expect(counts).toEqual({ has: 13, container: 5, gutter: 0 })
+    expect(counts).toEqual({ has: 13, container: 0, gutter: 0 })
   })
 })
 
