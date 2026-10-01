@@ -554,9 +554,6 @@
   border: 0.5px solid var(--dsw-alias-border-l2);
 }
 
-.menu:not(:has([role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'])) {
-  display: none;
-}
 
 .menuItem {
   padding: 4px 7px;
