@@ -77,6 +77,26 @@ describe('composer control row measurement', () => {
     expect(row.hasAttribute('data-model-compact')).toBe(false)
   })
 
+  it('publishes the row widths the stylesheets select on', () => {
+    const { row, sizes, resize } = fixture()
+    // A 400px row leaves 384px of content, inside both cuts.
+    expect(row.hasAttribute('data-narrow')).toBe(true)
+    expect(row.hasAttribute('data-tight')).toBe(true)
+    sizes.row = 576
+    resize()
+    expect(row.hasAttribute('data-narrow')).toBe(true)
+    expect(row.hasAttribute('data-tight')).toBe(false)
+    sizes.row = 577
+    resize()
+    expect(row.hasAttribute('data-narrow')).toBe(false)
+    sizes.row = 476
+    resize()
+    expect(row.hasAttribute('data-tight')).toBe(true)
+    sizes.row = 477
+    resize()
+    expect(row.hasAttribute('data-tight')).toBe(false)
+  })
+
   it('remeasures after font loading and disconnects all notifications', async () => {
     const { row, label, sizes, disconnect, dispose } = fixture()
     sizes.trailing = 100

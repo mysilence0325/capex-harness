@@ -499,7 +499,10 @@
   80%, 100% { opacity: 1; }
 }
 
-@container plugin-inventory (max-width: 520px) {
+/* One column when the tab is narrow. The tab fills the settings dialog, whose
+   width tracks the window, so the window stands in for the container: Chromium
+   90 has no container queries (chrome 105). */
+@media (max-width: 520px) {
   .cards {
     grid-template-columns: minmax(0, 1fr);
   }

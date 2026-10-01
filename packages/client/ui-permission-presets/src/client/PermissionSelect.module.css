@@ -89,12 +89,11 @@
    fitting. Only triggers that actually carry a mode glyph drop their label —
    a host-configured mode without one keeps its text as the sole identifier.
    The 460px cut is the point where the row (attach + modes + model + send)
-   starts squeezing labels; the container is the composer row (InputBar .row —
-   anonymous query because CSS modules hash container-names per module). */
-@container (max-width: 460px) {
-  .trigger[data-has-icon] .triggerLabel {
-    display: none;
-  }
+   starts squeezing labels; the container is the composer row, which publishes
+   its own width as data-tight (InputBar/control-row-layout.ts) because
+   Chromium 90 has no container queries (chrome 105). */
+[data-tight] .trigger[data-has-icon] .triggerLabel {
+  display: none;
 }
 
 .chevronOpen {

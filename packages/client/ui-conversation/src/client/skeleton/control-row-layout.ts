@@ -1,9 +1,16 @@
 /** Content-sized model collapse for the composer's two control groups. */
 
+/** Row content width (CSS pixels) at or below which the control groups tighten their gaps. */
+const NARROW_ROW_WIDTH = 560
+/** Row content width (CSS pixels) at or below which chips carrying a glyph drop their labels. */
+const TIGHT_ROW_WIDTH = 460
+
 /**
  * Collapse the model text only when the expanded controls cannot share a line.
  * The model seat consumes the row's inherited display variables; wrapping remains
  * available when even the icon cannot fit. Each notification is measured synchronously.
+ * The row also carries `data-narrow` and `data-tight` for the widths its stylesheets
+ * used to query with a container, which Chromium 90 has no support for (chrome 105).
  * @param row - Composer control row with its leading and trailing groups.
  * @returns Disconnect the layout observers and font listener.
  */
@@ -19,6 +26,8 @@ export function observeControlRow(row: HTMLElement): () => void {
     const needed = widths.reduce((sum, width) => sum + width, 0)
       + Math.max(0, widths.length - 1) * parseFloat(style.columnGap)
     row.toggleAttribute('data-model-compact', needed > available)
+    row.toggleAttribute('data-narrow', available <= NARROW_ROW_WIDTH)
+    row.toggleAttribute('data-tight', available <= TIGHT_ROW_WIDTH)
   }
   const resize = new ResizeObserver(measure)
   resize.observe(row)

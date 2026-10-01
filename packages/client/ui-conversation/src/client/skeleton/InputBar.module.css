@@ -259,10 +259,9 @@
      controls' own centering stays untouched. */
   padding: 2px 8px 6px;
   min-width: 0;
-  /* Size container so the chips inside can collapse to icon-only when the
-     card runs out of row width (PermissionSelect @container rule). Anonymous
-     on purpose: CSS modules hash container-name per module, so a name declared
-     here can never match a query in another module's sheet. */
+  /* Kept for the containment it applies where container queries exist; the
+     chips inside now collapse on the row's own data-tight attribute
+     (PermissionSelect), because Chromium 90 has no container queries. */
   container-type: inline-size;
 }
 
@@ -301,13 +300,13 @@
   gap: 12px;
 }
 
-/* Compact spacing preserves room for the fixed-width controls in narrow cards. */
-@container (max-width: 560px) {
-  .tools,
-  .modes,
-  .trailing {
-    gap: 8px;
-  }
+/* Compact spacing preserves room for the fixed-width controls in narrow cards.
+   control-row-layout.ts publishes the row's own width, because Chromium 90 has
+   no container queries (chrome 105). */
+.row[data-narrow] .tools,
+.row[data-narrow] .modes,
+.row[data-narrow] .trailing {
+  gap: 8px;
 }
 
 /* Attach circle (figma + control): 28px, selector fill, primary glyph. */
