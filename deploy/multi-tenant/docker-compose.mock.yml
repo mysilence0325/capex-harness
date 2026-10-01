@@ -11,4 +11,9 @@ services:
     networks: [mt-net]
     environment:
       MOCK_MODEL_PORT: "8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 不发布端口：只有 mt-net 上的租户容器能访问它。

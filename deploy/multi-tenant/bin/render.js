@@ -298,6 +298,29 @@ function literalEnvLine(name, value) {
   return value ? `      ${name}: ${value}\n` : ''
 }
 
+/**
+ * Cap on a container's own stdout log.
+ *
+ * `json-file` is the default driver and it has no size limit, so a container
+ * that starts printing — a crash loop, a chatty tool, the proxy's one line per
+ * request — grows until the disk is full. This host's root filesystem has about
+ * 12 GB free and shares it with everything else.
+ *
+ * DSH itself writes almost nothing to stdout (it logs to its session files), so
+ * the cap mostly protects against the pathological case. Sizes come from .env so
+ * a deployment with many tenants can set a smaller budget per container.
+ */
+function loggingBlock(indent = '    ') {
+  const size = envValues.get('MT_LOG_MAX_SIZE') ?? '10m'
+  const files = envValues.get('MT_LOG_MAX_FILE') ?? '3'
+  return `${indent}logging:
+${indent}  driver: json-file
+${indent}  options:
+${indent}    max-size: "${size}"
+${indent}    max-file: "${files}"
+`
+}
+
 function tenantService(tenant) {
   const limits = tenant.limits ?? {}
   const limitLines = []
@@ -324,6 +347,7 @@ ${tenant.modelKey === undefined
   : `      # 占位 key：模型网关按它识别租户并换成真凭据，真 key 不进容器\n      DEEPSEEK_API_KEY: ${tenant.modelKey}\n`}      # 模型请求发往网关而不是公网；本机 ip_forward=0，容器本来也出不去
       DEEPSEEK_BASE_URL: ${MODEL_GATEWAY_URL}/anthropic
 ${credentialLine('GATEWAY_API_KEY', envKeyFor(tenant, 'GATEWAY_API_KEY'))}${literalEnvLine('HTTPS_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('HTTP_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('NO_PROXY', envValues.get('MT_NO_PROXY') ?? DEFAULT_NO_PROXY)}${limitLines.join('\n')}
+${loggingBlock()}
     volumes:
       - ./tenants/${tenant.id}/home:/dsh-home
       - ./tenants/${tenant.id}/workspace:/workspace
@@ -365,7 +389,7 @@ services:
       MT_EGRESS_PORT: \${MT_EGRESS_PORT:-3128}
       MT_EGRESS_BIND: \${MT_EGRESS_BIND:-0.0.0.0}
       MT_EGRESS_ALLOW: \${MT_EGRESS_ALLOW:-}
-
+${loggingBlock()}
   model-gateway:
     build: ./model-gateway
     image: mt-model-gateway:local
@@ -383,6 +407,7 @@ services:
       MT_REGISTRY: /config/tenants.json
       MT_LOG_DIR: /logs
       TZ: \${TZ:-Asia/Shanghai}
+${loggingBlock()}
     volumes:
       - ./tenants.json:/config/tenants.json:ro
       - ./logs:/logs
@@ -404,6 +429,7 @@ services:
       MT_BIND_IP: \${MT_BIND_IP:-0.0.0.0}
       MT_SESSION_TTL_HOURS: \${MT_SESSION_TTL_HOURS:-12}
 ${gatewayTlsLines}      TZ: \${TZ:-Asia/Shanghai}
+${loggingBlock()}
     volumes:
       - ./tenants.json:/config/tenants.json:ro
       - ./state:/state

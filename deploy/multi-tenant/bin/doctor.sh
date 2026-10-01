@@ -182,6 +182,35 @@ if [ -n "${FIRST_TENANT:-}" ] && [ -n "$LAN_IP" ]; then
   fi
 fi
 
+head_ "日志上限"
+# json-file 驱动默认不封顶：容器一直写就把磁盘写满。逐个容器核实，并报出实际占用。
+UNBOUNDED=""
+LOG_TOTAL=0
+for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(mt-|mock-model)' | sort); do
+  MAXSIZE="$(docker inspect "$c" --format '{{index .HostConfig.LogConfig.Config "max-size"}}' 2>/dev/null)"
+  LOGPATH="$(docker inspect "$c" --format '{{.LogPath}}' 2>/dev/null)"
+  if [ -n "$LOGPATH" ] && [ -f "$LOGPATH" ]; then
+    SIZE="$(stat -c%s "$LOGPATH" 2>/dev/null || echo 0)"
+    LOG_TOTAL=$((LOG_TOTAL + SIZE))
+  fi
+  if [ -z "$MAXSIZE" ] || [ "$MAXSIZE" = "<no value>" ]; then
+    UNBOUNDED="$UNBOUNDED $c"
+  fi
+done
+if [ -z "$UNBOUNDED" ]; then
+  ok "本部署的容器都有日志上限（${MT_LOG_MAX_SIZE:-10m} × ${MT_LOG_MAX_FILE:-3}）"
+else
+  bad "以下容器日志无上限，磁盘可能被写满：$UNBOUNDED"
+fi
+ok "  本部署容器日志当前合计 $(echo "scale=1; $LOG_TOTAL/1048576" | bc) MB"
+AVAIL_KB="$(df -k / | tail -1 | awk '{print $4}')"
+if [ "${AVAIL_KB:-0}" -lt 5242880 ]; then
+  warn "  根分区可用不足 5 GB，先清理再排查其它问题"
+fi
+if ! grep -q 'max-size' /etc/docker/daemon.json 2>/dev/null; then
+  ok "  备注：宿主 daemon.json 未设全局 log-opts，其它系统的容器仍无上限（不属于本部署）"
+fi
+
 head_ "传输加密"
 CERT="state/tls/server.crt"
 if [ -f "$CERT" ] && [ -f state/tls/server.key ]; then
