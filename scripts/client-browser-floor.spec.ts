@@ -1,9 +1,10 @@
 /**
  * The client browser floor's stylesheet rewrites: which color-mix() forms
  * become static colors, what the appended definitions must resolve to, and the
- * static fallback every dynamic viewport unit gets. The corpus case pins the
- * property that matters in review — a client stylesheet's mixes must all be
- * resolvable, because the browser floor cannot compute one at runtime.
+ * static fallback every dynamic viewport unit gets. The corpus cases pin the
+ * properties that matter in review — a client stylesheet's mixes must all be
+ * resolvable, because the browser floor cannot compute one at runtime, and the
+ * features the floor drops whole must not spread past their recorded count.
  */
 import { globSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
@@ -127,6 +128,22 @@ describe('client stylesheet downleveling', () => {
     }
     expect([...unresolved]).toEqual([])
   })
+
+  it('keeps the selectors outside the floor at their recorded count', () => {
+    // A ratchet, not a target: Chromium 90 drops each of these whole, so a new
+    // occurrence is a silent loss on that engine rather than a broken parse.
+    // Lower a number in the change that converts one; raising one is a decision
+    // the Agent Note records.
+    const counts = { has: 0, container: 0, gutter: 0 }
+    for (const file of globSync('packages/**/src/**/*.css', { cwd: process.cwd() })) {
+      // Comments name the properties they explain; only declarations count.
+      const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ')
+      counts.has += [...source.matchAll(/:has\(/g)].length
+      counts.container += [...source.matchAll(/@container\b/g)].length
+      counts.gutter += [...source.matchAll(/scrollbar-gutter\s*:/g)].length
+    }
+    expect(counts).toEqual({ has: 13, container: 5, gutter: 0 })
+  })
 })
 
 describe('shell install contract', () => {
@@ -153,7 +170,7 @@ describe('worker realm install', () => {
       const member = api.split('.').at(-1)
       expect(member).toBeDefined()
       // A global is installed through defineProperty, a static through define().
-      expect(api.includes('.') ? installed : installed).toContain(api.includes('.') ? `'${String(member)}'` : String(member))
+      expect(installed).toContain(api.includes('.') ? `'${String(member)}'` : String(member))
     }
   })
 

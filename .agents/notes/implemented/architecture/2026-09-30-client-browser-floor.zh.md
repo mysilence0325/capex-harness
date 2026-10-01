@@ -20,13 +20,15 @@ Web 客户端此前假定运行环境是较新的引擎。客户端产物按 ES2
 
 **样式：**两条路径都用 Lightning CSS 按样式目标编译，由它提供该下限所需的厂商前缀（例如 `-webkit-mask-*` 系列）、展开嵌套并压缩。有两类特性没有编译器降级方案，由 `downlevelClientCss` 直接改写源码：`color-mix()` 按主题自身的 token 表求值，变成一个自定义属性，由样式表给出各主题的字面量，同时在 `@supports` 之后为支持该函数的引擎保留原表达式；token 表或同一样式表内的声明无法解析的 mix 保持原样。每个动态视口单位都会在原始声明之前得到一条静态的 `vh`/`vw` 回退声明。
 
-**依赖组件渲染结果的规则读取组件设置的 data 属性。**组件写出它本就掌握的事实——Checkbox 的 `data-disabled`、compaction 行的 `data-open`、工具条目的 `data-only-code`、代码块的 `data-code-block-banner-wrap`、Markdown 标题的 `data-followed-by-list`、对话 seat 的 `data-chat-followed-by-input`、预览主体的 `data-preview-kind`——对话 shell 则把被选中 view 的 composer 浮层标记镜像到 `[data-conversation-shell]`。两个引擎因此读到同一事实，并由组件测试固定。
+**依赖组件渲染结果的规则读取组件设置的 data 属性。**组件写出它本就掌握的事实——Checkbox 的 `data-disabled`、compaction 行的 `data-open`、工具条目的 `data-only-code`、代码块的 `data-code-block-banner-wrap`、Markdown 标题的 `data-followed-by-list`、对话 seat 的 `data-chat-followed-by-input`、预览主体的 `data-preview-kind`、对话标题栏的 `data-header-tabs`、插件卡片的 `data-followed-by-open`、Markdown 块的 `data-has-math`、输入控件行的 `data-narrow` 与 `data-tight`——对话 shell 则把被选中 view 的 composer 浮层标记镜像到 `[data-conversation-shell]`。两个引擎因此读到同一事实，并由组件测试固定。
 
-**无法降级的选择器与 at-rule 特性保留在源码中，并被该下限整条丢弃：**容器查询、锚点定位、`@starting-style`、`field-sizing`、`scrollbar-gutter`、`accent-color` 与 `:nth-child(An+B of S)`。仍保留十七条 `:has()` 规则，每一条都因为 DOM 是唯一事实来源：渲染器自身的空输出（聊天 flow seat）、子元素的 hover 或键盘焦点（trajectory 与快捷键行、提问气泡、引导卡片）、由 slot 贡献的部件（对话标题栏的 tab、输入座位上的触发器菜单、dockkit 的菜单内容）、其他包发布的 `html` 级状态（Windows 标题栏折叠、dockkit 指针）、两列网格中的相邻卡片，以及紧凑 Markdown 的 KaTeX 溢出。
+**无法降级的选择器与 at-rule 特性保留在源码中，并被该下限整条丢弃：**容器查询、锚点定位、`@starting-style`、`field-sizing`、`accent-color` 与 `:nth-child(An+B of S)`。仍保留十三条 `:has()` 规则，每一条都因为子元素自身的状态是唯一事实来源：渲染器自身的空输出（聊天 flow seat）与某个 seat 的贴底跟随标记、子元素的 hover 或键盘焦点（trajectory 与快捷键行、提问气泡、引导卡片）、由 slot 贡献的部件（输入座位上的触发器菜单），以及其他包发布的 `html` 级状态（Windows 标题栏折叠、dockkit 指针）。容器查询剩下五条：交付物网格、trajectory 表格的窄列、回合导航的预览框、预设标签，以及 agent team 的触发器。
+
+**预留滚动条的面板改为常驻滚动条。**该下限不认识 `scrollbar-gutter`，因此九个面板——对话滚动区、引导对话框、聊天分组主体、工作区与文件列表、任务管理器的页面滚动区与详情滚动区、trajectory 详情主体，以及 agent team 名册——改用 `overflow-y: scroll`：无论内容是否溢出，预留的空间都一样大，内容放得下时主题滚动条不绘制任何东西。另外三条 `scrollbar-gutter: auto` 只是在已经自行声明 overflow 的元素上重述初始值，已删除；composer 浮层规则通过它本就声明的 `overflow-y: auto` 取消对话滚动区的预留。
 
 ## Verification
 
-[compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及一条语料不变量：`packages/client/**/*.css` 中每个 `color-mix()` 都能解析。
+[compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及两条语料不变量：客户端样式表中每个 `color-mix()` 都能解析；源码语料固定为记录在案的十三条 `:has()` 规则、五条容器查询，且没有任何 `scrollbar-gutter` 声明，因此该下限丢弃的特性不会悄悄扩散。
 
 Chromium 90.0.4430.0 快照构建（revision 857891）实测报告：所有被 polyfill 的 API 均缺失，所有被改写的 CSS 特性均不支持；它能启动服务端提供的客户端，并渲染出侧栏、工作区列表、输入框与设置。
 
@@ -52,4 +54,4 @@ Chromium 90 可以启动并渲染客户端；Vite 管线中 shell 的 CSS 类名
 
 被共享的编译器运行时辅助函数会内联进每个需要它的 chunk，因此这类包会按消费方各带一份。
 
-代价是可见的：容器查询不会生效，窄容器下的列折叠保持基础样式；其余十七条 `:has()` 规则会被丢弃——子元素的 hover 与键盘焦点高亮、对话标题栏的 tab 间距、dockkit 的空菜单抑制、插件网格中的相邻对齐，以及紧凑 Markdown 的 KaTeX 溢出；`field-sizing` 让它的两个 textarea 停在声明的最小高度，相关规则本就把这写成文档化的回退；锚点定位的菜单底层只用于 macOS，会失去对齐；经 polyfill 的 `AbortSignal.any` 合成的信号报告引擎默认的中止原因，因为 Chromium 90 没有 `signal.reason`，而传输层本就把它当作中止处理。
+代价是可见的：剩下五条容器查询不会生效，组件没有自行测量的视图因此保持宽布局的基础样式；其余十三条 `:has()` 规则会被丢弃——子元素的 hover 与键盘焦点高亮、输入座位上的触发器菜单间距，以及 `html` 级的标题栏与指针状态；`field-sizing` 让它的两个 textarea 停在声明的最小高度，相关规则本就把这写成文档化的回退；锚点定位的菜单底层只用于 macOS，会失去对齐；经 polyfill 的 `AbortSignal.any` 合成的信号报告引擎默认的中止原因，因为 Chromium 90 没有 `signal.reason`，而传输层本就把它当作中止处理。
