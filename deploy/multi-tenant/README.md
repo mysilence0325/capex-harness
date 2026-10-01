@@ -129,7 +129,34 @@ bin/mt.sh up                       # 重新渲染：公开端口切到 HTTPS
 | 凭据 | 每个租户自己的 `.credentials.yaml`（各自随机签名密钥），模型 key 按租户注入 |
 | 执行 | 每租户一个容器（独立 PID/挂载/网络命名空间）+ 内存/CPU/PID 限额；宿主内核 3.10 无法跑 DSH 自带文件沙箱，容器即边界 |
 | 网络 | 租户容器不发布任何端口，只有网关能被访问；出网必须经 `mt-egress-proxy`，私网目标被拒 |
+| 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.1） |
 | 审计 | 网关按请求写 `logs/access.jsonl`（租户、用户、方法、URL、状态码、耗时） |
+
+## 1.1 限制租户对宿主端口的访问
+
+```bash
+bin/mt.sh isolate status     # 查看状态（doctor 每次也会实测）
+bin/mt.sh isolate apply      # 应用（bin/mt.sh up 会自动执行）
+bin/mt.sh isolate remove     # 撤销
+```
+
+租户的 agent 以 `danger-full-access` 运行（宿主内核 3.10 跑不了 DSH 自带沙箱），
+它能敲到的每个宿主端口就等于交给了租户。宿主上跑着别的系统，从局域网访问它们被
+`public` 区域挡着，**从我们的容器里却不设防**。
+
+做法：给本部署的网桥在 firewalld 里加两条 `--direct` 规则——放行出口代理端口，其余丢弃。
+
+挂在 `INPUT_direct` 的原因：firewalld 的评估顺序是
+
+```
+INPUT: 1 ESTABLISHED,RELATED → 2 lo → 3 INPUT_direct → 4 ZONES_SOURCE → 5 INPUT_ZONES → …
+```
+
+docker 区域的 ACCEPT 在第 5 步，规则必须挂在第 3 步才拦得住。`--direct` 规则写进 firewalld
+的**永久配置**，所以 `firewall-cmd --reload`（`bin/mt.sh add` 每次开端口都会触发）和主机重启
+都不会丢。
+
+只匹配本部署网桥的入向流量：其它系统的容器不受影响，租户之间的流量也不经过这条链。
 
 ## 2. 目录
 
@@ -146,6 +173,7 @@ bin/mt.sh up                       # 重新渲染：公开端口切到 HTTPS
 | `build/`、`entry-urls.txt` | 生成物 |
 | `state/tls/` | TLS 证书与私钥（`ca.crt` 给客户端导入） |
 | `egress-proxy/server.js` | 租户出口代理：宿主网络 + 未放行端口 = 只有容器可达 |
+| `bin/isolate.sh` | 租户→宿主 端口限制（firewalld direct 规则） |
 | `backups/` | `bin/mt.sh backup` 的归档 |
 
 ## 3. 日常操作
@@ -167,6 +195,7 @@ bin/mt.sh restore <归档>           # 恢复；现有数据挪到 restore-aside
 bin/mt.sh publish-image            # 用已上传的覆盖层构建本地源码镜像
 bin/mt.sh cert [额外SAN]           # 生成自签 CA + 服务端证书，之后 bin/mt.sh up 切到 HTTPS
 bin/mt.sh model                    # 应用 model.patch.yml / model.env 到全部租户
+bin/mt.sh isolate [apply|remove|status]   # 限制租户可访问的宿主端口
 ```
 
 ### 开通新租户

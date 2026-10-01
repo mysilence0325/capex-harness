@@ -146,6 +146,42 @@ if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTER
   esac
 fi
 
+head_ "租户对宿主的访问"
+BRIDGE="br-$(docker network inspect mt-net --format '{{.Id}}' 2>/dev/null | cut -c1-12)"
+DIRECT_RULES="$(firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep -c 'mt-tenant-isolation' || true)"
+if [ "${DIRECT_RULES:-0}" -ge 2 ]; then
+  if firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep 'mt-tenant-isolation' | grep -q -- "-i ${BRIDGE} "; then
+    ok "隔离规则已生效，作用于当前网桥 ${BRIDGE}"
+    # `iptables -L -n` 不显示 in 接口列，要用 -S 才能看到 -i 参数。
+    if iptables -S INPUT_direct 2>/dev/null | grep -q -- "-i ${BRIDGE}"; then
+      ok "  规则已在运行时加载"
+    else
+      bad "  规则未加载到运行时：firewall-cmd --reload"
+    fi
+  else
+    bad "隔离规则指向的网桥不是当前的 ${BRIDGE}：bin/mt.sh isolate apply"
+  fi
+else
+  bad "未限制租户对宿主端口的访问：容器可直达 Harbor/Nacos/Prometheus 等（bin/mt.sh isolate apply）"
+fi
+# 实测一次：从第一个租户容器访问宿主的一个端口，应当连不上。
+# 目标地址运行时推导（宿主自己的局域网 IP），不写死任何 IP。
+LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1)"
+if [ -n "${FIRST_TENANT:-}" ] && [ -n "$LAN_IP" ]; then
+  REACHED="$(docker exec -e PROBE_HOST="$LAN_IP" -e PROBE_PORT="${MT_EGRESS_PORT:-3128}" "mt-dsh-${FIRST_TENANT}" node -e '
+    const net = require("node:net")
+    // 探一个宿主上公开但不属于本部署的端口：既有单租户部署的 3080。
+    const s = net.connect(3080, process.env.PROBE_HOST, () => { console.log("reached"); s.destroy() })
+    s.on("error", () => console.log("blocked"))
+    setTimeout(() => { s.destroy(); console.log("blocked") }, 3000)
+  ' 2>/dev/null | tr -d '\r')"
+  if [ "$REACHED" = blocked ]; then
+    ok "  实测 ${FIRST_TENANT}: 访问宿主其它端口被拒"
+  else
+    bad "  实测 ${FIRST_TENANT}: 仍能访问宿主端口（结果 ${REACHED:-无响应}）"
+  fi
+fi
+
 head_ "传输加密"
 CERT="state/tls/server.crt"
 if [ -f "$CERT" ] && [ -f state/tls/server.key ]; then

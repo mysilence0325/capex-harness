@@ -58,6 +58,8 @@ cmd_up() {
   "${COMPOSE[@]}" up -d
   # 网络建立后才能探测到网关地址；首次运行或网段变化时补上租户出口代理。
   ensure_egress_proxy
+  # 收紧租户容器对宿主端口的访问；失败只提示，不让 up 半途而废（doctor 会报出来）。
+  bash bin/isolate.sh apply || echo "    !! 租户隔离规则未应用，执行 bin/isolate.sh status 查看"
   # 重建容器会换掉租户的 bridge 地址，网关缓存里可能还是旧的；重启一次让它从零开始。
   docker restart mt-gateway >/dev/null 2>&1 || true
   cmd_wait
@@ -336,6 +338,7 @@ case "${1:-}" in
   smoke)   shift; cmd_smoke "$@" ;;
   accept)  shift; cmd_accept "$@" ;;
   doctor)  bash bin/doctor.sh ;;
+  isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
   cert)    shift; bash bin/make-cert.sh "$@" ;;   # 生成自签证书；之后 bin/mt.sh up 切到 HTTPS
   backup)  shift; bash bin/backup.sh "$@" ;;
   restore) shift; bash bin/restore.sh "$@" ;;
