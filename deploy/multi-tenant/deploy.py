@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deploy the DSH multi-tenant stack to the VM.
 
-Uploads the project to /opt/dsh-mt, seeds tenants, renders and starts the
+Uploads the project to /home/dsh-mt, seeds tenants, renders and starts the
 stack, opens the firewall port, and prints the entry URL plus credentials.
 
 Usage: python deploy.py [--tenants alpha,beta,gamma] [--skip-up]
@@ -17,7 +17,7 @@ import sys
 import vm
 
 LOCAL_ROOT = "."
-REMOTE_ROOT = "/opt/dsh-mt"
+REMOTE_ROOT = "/home/dsh-mt"
 
 UPLOAD_FILES = [
     "README.md",

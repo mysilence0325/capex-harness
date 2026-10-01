@@ -124,10 +124,10 @@ tar -czf image-overlay.tar.gz -C image-overlay .
 
 # ③ 上传到部署机并发布镜像
 scp image-overlay.tar.gz root@<主机>:/tmp/
-ssh root@<主机> 'cd /opt/dsh-mt && bin/mt.sh publish-image "" /tmp/image-overlay.tar.gz'
+ssh root@<主机> 'cd /home/dsh-mt && bin/mt.sh publish-image "" /tmp/image-overlay.tar.gz'
 
 # ④ 切换租户到新镜像
-ssh root@<主机> 'cd /opt/dsh-mt && bin/mt.sh up'
+ssh root@<主机> 'cd /home/dsh-mt && bin/mt.sh up'
 ```
 
 `publish-image.sh` 会在构建后**核对镜像内的 `index.html` 哈希与覆盖层一致**，不一致直接失败——
@@ -399,7 +399,7 @@ bin/mt.sh model        # 渲染 + 应用到所有租户 + 重启
 
 | 项 | 值 |
 |---|---|
-| 部署目录 | `/opt/dsh-mt` |
+| 部署目录 | `/home/dsh-mt` |
 | 镜像 | `dsh-web:0.2.0-rc.2`（宿主已有），网关镜像 `mt-gateway:local` |
 | 统一入口 | `http://<部署主机>:8090/` |
 | 租户专属入口 | alpha `:8091`、beta `:8092`、gamma `:8093` |
@@ -408,4 +408,4 @@ bin/mt.sh model        # 渲染 + 应用到所有租户 + 重启
 | 内存占用 | 网关约 28 MB，每个租户运行时约 95-100 MB |
 | 构建注意 | 本机 Docker Hub 不可达，网关镜像用 `DOCKER_BUILDKIT=0` 经典构建器构建（`bin/mt.sh` 已内置） |
 
-租户数据目录：`/opt/dsh-mt/tenants/<租户>/{home,workspace}`；备份 `home` 即备份该租户的全部会话与设置。
+租户数据目录：`/home/dsh-mt/tenants/<租户>/{home,workspace}`；备份 `home` 即备份该租户的全部会话与设置。
