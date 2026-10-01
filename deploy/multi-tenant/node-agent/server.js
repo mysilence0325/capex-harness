@@ -299,7 +299,9 @@ async function sync(nodeAddress, force = false) {
     const target = `http://${runtime.ip}:${String(runtime.port)}`
     let token
     try {
-      token = dockerAvailable ? (await currentRuntime(`${CONTAINER_PREFIX}${tenant}`)).token : undefined
+      // Read the token from the container discovery actually found: its name is
+      // whatever this host named it, not necessarily the name convention.
+      token = dockerAvailable ? (await currentRuntime(runtime.container)).token : undefined
     } catch (error) {
       console.error(`mt-node-agent: token lookup for ${tenant} failed: ${error.message}`)
     }

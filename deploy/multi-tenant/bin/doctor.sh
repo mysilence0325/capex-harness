@@ -42,9 +42,23 @@ fi
 TENANTS="$(grep -o '"id": *"[^"]*"' tenants.json 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')"
 [ -n "$TENANTS" ] && ok "注册了 $(echo "$TENANTS" | wc -l) 个租户: $(echo $TENANTS | tr '\n' ' ')" || bad "tenants.json 里没有租户"
 [ -f docker-compose.yml ] && ok "docker-compose.yml 已生成" || warn "docker-compose.yml 未生成（bin/mt.sh render）"
+# 控制面只对"住在本机"的租户检查容器与 home；其余租户的运行时在别的节点上，
+# 由本机的节点代理创建，控制面能查的只有它的注册与可达性（下一节）。
+NODE_OF() { grep -A6 "\"id\": \"$1\"" tenants.json 2>/dev/null | grep -o '"node": *"[^"]*"' | head -1 | cut -d'"' -f4; }
+LOCAL_TENANTS=""
+REMOTE_TENANTS=""
+for t in $TENANTS; do
+  case "$(NODE_OF "$t")" in
+    ""|local) LOCAL_TENANTS="$LOCAL_TENANTS $t" ;;
+    *)        REMOTE_TENANTS="$REMOTE_TENANTS $t" ;;
+  esac
+done
+if [ -n "$REMOTE_TENANTS" ]; then
+  ok "远端租户（运行时在别的节点，由节点代理创建）:$REMOTE_TENANTS"
+fi
 
 head_ "租户运行时"
-for t in $TENANTS; do
+for t in $LOCAL_TENANTS; do
   state="$(docker inspect "mt-dsh-$t" --format '{{.State.Status}}' 2>/dev/null || echo missing)"
   case "$state" in
     running) ok "$t 容器运行中（镜像 $(docker inspect "mt-dsh-$t" --format '{{.Config.Image}}')）" ;;
@@ -95,7 +109,7 @@ else
   if [ "${REG_COUNT:-0}" = "${TENANT_COUNT:-0}" ]; then
     ok "${REG_COUNT}/${TENANT_COUNT} 个租户都已注册运行时"
   else
-    bad "只有 ${REG_COUNT}/${TENANT_COUNT} 个租户注册了运行时：bin/mt.sh runtimes 查看，bin/mt.sh register <租户> 补注册"
+    bad "只有 ${REG_COUNT}/${TENANT_COUNT} 个租户注册了运行时：bin/mt.sh runtimes 查看；本机租户用 bin/mt.sh register，远端租户看该节点的代理日志"
   fi
   # 逐个核对：注册了但要连不上，同样是故障。
   for t in $TENANTS; do

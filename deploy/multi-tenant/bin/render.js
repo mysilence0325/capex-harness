@@ -243,12 +243,47 @@ const createdPatches = []
 const modelApplied = []
 const trustApplied = []
 const remoteTenants = []
-/** Whether this host runs the tenant, or another node's agent does. */
-const isLocalTenant = (tenant) => (tenant.node ?? 'local') === 'local'
+/**
+ * Which machine this render is for.
+ *
+ * The control plane renders for `local`; a worker node sets `MT_NODE_NAME` to its
+ * own name and renders the tenants assigned to it (plus the node-local helpers),
+ * which is how a node creates its own containers instead of an operator starting
+ * them by hand.
+ */
+const THIS_NODE = process.env.MT_NODE_NAME ?? 'local'
+const isControlPlane = THIS_NODE === 'local'
+/**
+ * Docker network the tenant runtimes join.
+ *
+ * Configurable so several nodes can share one development host, and so a Swarm
+ * deployment can name its overlay instead of the compose bridge.
+ */
+const NETWORK_NAME = process.env.MT_NETWORK ?? 'mt-net'
+/**
+ * Whether the network already exists on this host.
+ *
+ * Compose refuses a network it did not create unless it is declared external.
+ * Set MT_NETWORK_EXTERNAL=1 on a host where the network is managed elsewhere —
+ * a pre-created bridge on a shared machine, or an overlay in a Swarm.
+ */
+const NETWORK_EXTERNAL = (process.env.MT_NETWORK_EXTERNAL ?? '') !== ''
+/**
+ * Prefix for the container names this host creates.
+ *
+ * Container names are local to a host (the control plane addresses tenants by
+ * what a node registered, never by container name), so two nodes sharing one
+ * Docker daemon — a test setup, or a machine hosting more than one role — need
+ * distinct names to avoid colliding on the shared helpers.
+ */
+const NAME_PREFIX = process.env.MT_CONTAINER_NAME_PREFIX ?? 'mt-'
+
+/** Whether this node runs the tenant. */
+const isLocalTenant = (tenant) => (tenant.node ?? 'local') === THIS_NODE
 
 for (const tenant of tenants) {
-  // A tenant on another node keeps its data and its containers there; this host
-  // only needs its registry entry, so it must not create a second home or a
+  // A tenant assigned elsewhere keeps its data and its containers there; this
+  // host only needs its registry entry, so it must not create a second home or a
   // compose service that would start a duplicate runtime.
   if (!isLocalTenant(tenant)) {
     remoteTenants.push(tenant.id)
@@ -388,9 +423,9 @@ function tenantService(tenant) {
 
   return `  ${tenant.service ?? `dsh-${tenant.id}`}:
     image: \${DSH_IMAGE:-dsh-web:0.2.0-rc.2}
-    container_name: mt-dsh-${tenant.id}
+    container_name: ${NAME_PREFIX}dsh-${tenant.id}
     restart: unless-stopped
-    networks: [mt-net]
+    networks: [${NETWORK_NAME}]
     # A node agent discovers tenant runtimes by this label, not by container
     # name: an orchestrator renames containers (a Swarm task is
     # <stack>_<service>.<slot>.<id>) while a label survives.
@@ -441,7 +476,7 @@ services:
   egress-proxy:
     build: ./egress-proxy
     image: mt-egress-proxy:local
-    container_name: mt-egress-proxy
+    container_name: ${NAME_PREFIX}egress-proxy
     restart: unless-stopped
     # Host networking because this host has net.ipv4.ip_forward=0: a container on
     # a bridge has no route off the machine, so a proxy that tenants could reach
@@ -456,11 +491,11 @@ ${loggingBlock()}
   model-gateway:
     build: ./model-gateway
     image: mt-model-gateway:local
-    container_name: mt-model-gateway
+    container_name: ${NAME_PREFIX}model-gateway
     restart: unless-stopped
     # On the tenant network, so it needs no host port of its own; it reaches the
     # internet through the egress proxy like everything else here.
-    networks: [mt-net]
+    networks: [${NETWORK_NAME}]
     environment:
       MT_PORT: "8080"
       MT_UPSTREAM_BASE: \${MT_UPSTREAM_BASE:-https://api.deepseek.com}
@@ -475,17 +510,16 @@ ${loggingBlock()}
       - ./tenants.json:/config/tenants.json:ro
       - ./logs:/logs
 
-  gateway:
+${isControlPlane ? `  gateway:
     build: ./gateway
     image: mt-gateway:local
-    container_name: mt-gateway
+    container_name: ${NAME_PREFIX}gateway
     restart: unless-stopped
     # Host networking on purpose. This host has net.ipv4.ip_forward=0, so a
     # bridge-network port mapping is unreachable from the LAN (every other
     # stack on this machine has the same problem). The control plane therefore
     # listens on the host's own ports, while tenant containers stay on mt-net
-    # with no published port at all: the gateway resolves their addresses
-    # through the Docker API.
+    # with no published port at all: it proxies to whatever a node registered.
     network_mode: host
     environment:
       MT_EDGE_PORT: \${MT_EDGE_PORT:-8090}
@@ -498,11 +532,11 @@ ${loggingBlock()}
       - ./state:/state
       - ./logs:/logs
 
-${tenants.filter(isLocalTenant).map(tenantService).join('\n')}
+` : ''}${tenants.filter(isLocalTenant).map(tenantService).join('\n')}
 networks:
-  mt-net:
-    name: mt-net
-    driver: bridge
+  ${NETWORK_NAME}:
+    name: ${NETWORK_NAME}
+${NETWORK_EXTERNAL ? '    external: true' : '    driver: bridge'}
 `
 
 fs.writeFileSync(path.join(ROOT, 'docker-compose.yml'), compose)
@@ -512,6 +546,7 @@ fs.chmodSync(path.join(ROOT, 'docker-compose.yml'), 0o600)
 // file so `bin/mt.sh url` never has to parse it again.
 const entryLines = [`\${IP}:\${MT_EDGE_PORT:-8090}/   统一登录入口（所有租户）`]
 for (const tenant of tenants) {
+  if (!isLocalTenant(tenant)) continue
   if (tenant.edgePort !== undefined) {
     entryLines.push(`\${IP}:${String(tenant.edgePort)}/   ${tenant.id} 专属入口`)
   }

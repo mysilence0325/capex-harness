@@ -228,35 +228,60 @@ GET  /__mt/registry             列出全部（loopback 免密钥，远端需要
 | 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.2） |
 | 审计 | 网关按请求写 `logs/access.jsonl`（租户、用户、方法、URL、状态码、耗时） |
 
-## 1.1 多机部署（节点代理）
+## 1.1 多机部署（节点代理 + 节点自建容器）
 
-控制面与运行时解耦之后，租户可以分布在多台机器上。每台跑租户的机器上放一个**节点代理**：
+控制面与运行时解耦之后，租户可以分布在多台机器上。**每台节点跑同一套项目**，靠 `MT_NODE_NAME`
+决定自己该管哪些租户。
+
+### 控制面：登记一个住在别处的租户
 
 ```bash
-# 在节点上（node-agent/ 目录随项目一起放过去）
-docker build -t mt-node-agent:local ./node-agent
+bin/mt.sh add gamma2 --user gina --node node2   # 只登记，不会在本机建容器
+bin/mt.sh render                                 # 不会为它生成 compose 服务
+```
+
+`node` 不是 `local` 的租户，控制面不建 home、不建容器、不生成专用入口；它只保留登录与路由所需的
+注册表条目。查状态用 `bin/mt.sh runtimes`（等节点上报后出现）。
+
+### 节点：自己把分配给它的租户拉起来
+
+```bash
+# 项目目录（bin/ gateway/ egress-proxy/ model-gateway/ node-agent/）放到节点上，
+# 然后从控制面取两份东西：租户注册表、注册密钥。
+scp <控制面>:/home/dsh-mt/tenants.json        /home/dsh-node/tenants.json
 scp <控制面>:/home/dsh-mt/state/registry.key  /home/dsh-node/state/registry.key
-scp <控制面>:/home/dsh-mt/state/tls/ca.crt    /home/dsh-node/ca.crt
+
+cd /home/dsh-node
+MT_NODE_NAME=node2 bin/mt.sh up      # 只渲染/创建属于 node2 的租户 + 本机出口代理与模型网关
+```
+
+节点侧的 `up` 会为这些租户生成 home 与 profile patch（含 `webserver.port` 与
+`connection.trustedHosts`），然后建容器——**控制面从头到尾没有碰过它们的容器**。
+
+同一台机器上模拟多个节点时需要区分，这三个变量就是为此（真实分机不需要）：
+
+| 变量 | 作用 |
+|---|---|
+| `MT_NETWORK` | 容器加入的 Docker 网络名（默认 `mt-net`；Swarm 下改成 overlay 名） |
+| `MT_NETWORK_EXTERNAL=1` | 网络已存在、不是 compose 建的（共享宿主、overlay） |
+| `MT_CONTAINER_NAME_PREFIX` | 本机容器名前缀（默认 `mt-`），避免同机多节点撞名 |
+
+### 节点代理：发现 → 上报 → 转发
+
+```bash
+docker build -t mt-node-agent:local ./node-agent
 docker run -d --name mt-node-agent --network host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v /home/dsh-node/state:/key:ro -v /home/dsh-node/ca.crt:/ca/ca.crt:ro \
   -e MT_NODE_NAME=node2 -e MT_NODE_ADDRESS=<本机局域网IP> \
   -e MT_CONTROL_PLANE=https://<控制面>:8090 -e MT_CONTROL_PLANE_CA=/ca/ca.crt \
-  -e MT_REGISTRY_KEY_FILE=/key/registry.key \
-  -e MT_NETWORK=mt-net -e MT_CONTAINER_PREFIX=mt-dsh- \
+  -e MT_REGISTRY_KEY_FILE=/key/registry.key -e MT_NETWORK=mt-net \
   mt-node-agent:local
 ```
 
-代理做三件事：**发现**本机租户容器（Docker API）、**上报**给控制面（地址 + 启动 token，变了就重报）、
-**转发**控制面发来的请求（保留控制面的 Host/Origin，DSH 的 cookie 名依赖它）。
-
-控制面这边只需要在注册表里标出该租户住在哪个节点，并且**不要**为它生成本地容器：
-
-```bash
-bin/mt.sh add gamma2 --user gina --node node2   # 控制面只登记，不启动
-bin/mt.sh render                                 # 不会为它生成 compose 服务
-bin/mt.sh runtimes                               # 等代理上报后能看到它
-```
+代理做三件事：**发现**本机租户容器（按 `mt.tenant` 标签，不看容器名）、**上报**给控制面
+（地址 + 启动 token，变了就重报——重启会换 token，重建会换地址）、**转发**控制面发来的请求
+（保留控制面的 Host/Origin，DSH 的 cookie 名依赖它）。
 
 **为什么必须经过代理**：租户容器不发布端口，而 `ip_forward=0` 的机器上发布了也到不了；
 只有节点宿主自己能"本地投递"到容器。代理跑在宿主网络里，正好是这一跳。

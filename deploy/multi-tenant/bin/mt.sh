@@ -43,9 +43,26 @@ fi
 # shellcheck disable=SC1091
 [ -f .env ] && set -a && . ./.env && set +a
 
-node_run() { docker run --rm -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"; }
+node_run() {
+  # MT_NODE_NAME / MT_NETWORK must reach the render container: without them it
+  # renders the control plane's own tenant set on a worker node, which then tries
+  # to create containers that already exist elsewhere.
+  docker run --rm \
+    -e "MT_NODE_NAME=${MT_NODE_NAME:-local}" \
+    -e "MT_NETWORK=${MT_NETWORK:-mt-net}" \
+    -e "MT_NETWORK_EXTERNAL=${MT_NETWORK_EXTERNAL:-}" \
+    -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
+    -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"
+}
 # 需要从 stdin 读数据的场合：docker run 不挂 -i 时，容器里读到的是空输入。
-node_run_stdin() { docker run --rm -i -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"; }
+node_run_stdin() {
+  docker run --rm -i \
+    -e "MT_NODE_NAME=${MT_NODE_NAME:-local}" \
+    -e "MT_NETWORK=${MT_NETWORK:-mt-net}" \
+    -e "MT_NETWORK_EXTERNAL=${MT_NETWORK_EXTERNAL:-}" \
+    -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
+    -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"
+}
 
 require_render() {
   if [ ! -f docker-compose.yml ]; then
@@ -55,20 +72,31 @@ require_render() {
 }
 
 cmd_up() {
+  local this_node="${MT_NODE_NAME:-local}"
   # 老租户可能还没有占位 key；先补发，否则渲染出来的租户没有模型凭据。
   node_run bin/registry.js ensure-model-keys | sed "s/^/    /"
   node_run bin/render.js "${1:-}"
-  echo "==> 构建镜像并启动"
+  echo "==> 构建镜像并启动（本机节点名: ${this_node}）"
   # 经典构建器：本机 Docker Hub 不可达，buildkit 会去远端解析基础镜像元数据而失败，
   # 经典构建器直接使用本地已有的 node:22-bookworm-slim。
-  DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build gateway egress-proxy model-gateway
+  # 网关只在控制面上有；worker 节点的 compose 里没有这个 service，构建它会失败。
+  if [ "$this_node" = local ]; then
+    DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build gateway egress-proxy model-gateway
+  else
+    DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build egress-proxy model-gateway
+  fi
   "${COMPOSE[@]}" up -d
   # 网络建立后才能探测到网关地址；首次运行或网段变化时补上租户出口代理。
   ensure_egress_proxy
   # 收紧租户容器对宿主端口的访问；失败只提示，不让 up 半途而废（doctor 会报出来）。
   bash bin/isolate.sh apply || echo "    !! 租户隔离规则未应用，执行 bin/isolate.sh status 查看"
-  # 网关只认注册表里的运行时地址，自己不看 Docker；容器重建后地址会变，必须重新注册。
-  register_all_tenants
+  if [ "$this_node" = local ]; then
+    # 控制面：注册本机租户（网关只认注册表里的地址，容器重建后必须重报）。
+    register_all_tenants
+  else
+    # 节点：不自己注册，交给本机节点代理——它随容器变化持续重报，而 up 只跑一次。
+    echo "==> 本节点是 ${this_node}：运行时由节点代理上报（在控制面用 bin/mt.sh runtimes 查看）"
+  fi
   cmd_wait
   cmd_url
 }
@@ -309,6 +337,10 @@ ensure_egress_proxy() {
 # ready 由控制面给出：它逐个探测注册进来的地址，所以"就绪"现在是"真的连得上"，
 # 而不是早期那种"日志里出现了启动行"。
 cmd_wait() {
+  if [ "${MT_NODE_NAME:-local}" != local ]; then
+    echo "==> 节点 ${MT_NODE_NAME}：就绪状态由控制面观测（本机不查健康接口）"
+    return 0
+  fi
   echo "==> 等待租户运行时就绪"
   local ready total pending
   for _ in $(seq 1 90); do
