@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # End-to-end acceptance: admin-provided model catalog → tenant picks a model →
 # a real turn runs → the reply lands in that tenant's own session log.
 #
@@ -19,6 +19,8 @@ NODE_IMAGE="${MT_NODE_IMAGE:-node:22-bookworm-slim}"
 MARKER="MULTITENANT-OK"
 MODEL_ID="mock-strong"
 EDGE_PORT="${MT_EDGE_PORT:-8090}"
+# TLS 开着时公开端口是 HTTPS，本机脚本走 loopback 明文运维端口
+if [ -f state/tls/server.crt ]; then EDGE_PORT="${MT_HTTP_PORT:-8099}"; fi
 BASE="http://127.0.0.1:${EDGE_PORT}"
 
 if command -v docker-compose >/dev/null 2>&1; then COMPOSE=(docker-compose); else COMPOSE=(docker compose); fi

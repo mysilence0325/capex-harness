@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # Isolation smoke test for the DSH multi-tenant deployment.
 #
 # Verifies, against the running stack:
@@ -51,7 +51,18 @@ REG="$(docker run --rm -v "$ROOT:/w" -w /w "$IMAGE" node -e '
 ' "$TENANT" "$PEER" 2>/dev/null)"
 eval "$REG"
 PORT="${MT_EDGE_PORT:-8090}"
+# TLS 开着时公开端口是 HTTPS，本机脚本走 loopback 明文运维端口
+if [ -f state/tls/server.crt ]; then PORT="${MT_HTTP_PORT:-8099}"; fi
 BASE="http://127.0.0.1:${PORT}"
+
+# 专属入口端口不经运维端口，它自己就是公开端口：TLS 开着时按 HTTPS 访问，
+# 并用部署自己的证书校验（因此冒烟测试同时验证了证书链）。
+EDGE_SCHEME="http"
+TLS_CURL=()
+if [ -f state/tls/server.crt ]; then
+  EDGE_SCHEME="https"
+  TLS_CURL=(--cacert state/tls/ca.crt)
+fi
 JAR="$(mktemp)"
 PASS=0; FAIL=0
 
@@ -90,7 +101,8 @@ check "RPC 调用成功" "$(printf '%s' "$RPC" | grep -c '"ok":true')" "1"
 
 echo "== 5. 跨租户访问被拒 =="
 if [ -n "$PEER" ] && [ -n "$PEER_EDGE" ]; then
-  CODE="$(curl -sS -o /tmp/mt-403.html -w '%{http_code}' -b "$JAR" "http://127.0.0.1:${PEER_EDGE}/")"
+  # 专属端口在启用 TLS 后是 HTTPS；顺带用部署自己的证书做一次校验。
+  CODE="$(curl -sS -o /tmp/mt-403.html -w '%{http_code}' -b "$JAR" "${EDGE_SCHEME}://127.0.0.1:${PEER_EDGE}/" "${TLS_CURL[@]}")"
   check "以 ${TENANT} 身份访问 ${PEER} 的专属入口" "$CODE" "403"
 elif [ -n "$PEER" ]; then
   echo "  (${PEER} 没有专属入口端口，跳过)"

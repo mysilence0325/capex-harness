@@ -44,7 +44,10 @@ if command -v docker-compose >/dev/null 2>&1; then COMPOSE=(docker-compose); els
 echo "==> 现有数据挪到 $ASIDE/"
 mkdir -p "$ASIDE"
 for item in tenants state tenants.json .env entry-urls.txt; do
-  [ -e "$item" ] && mv "$item" "$ASIDE/" && echo "    $item"
+  if [ -e "$item" ]; then
+    mv "$item" "$ASIDE/"
+    echo "    $item"
+  fi
 done
 
 echo "==> 解包归档"

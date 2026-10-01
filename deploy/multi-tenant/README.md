@@ -1,4 +1,4 @@
-# DSH 多租户部署（形态 C：共享控制面 + 每租户隔离运行时）
+﻿# DSH 多租户部署（形态 C：共享控制面 + 每租户隔离运行时）
 
 在一台 Docker 主机上把 DeepSeek Harness 变成"一个入口、多个互相隔离的租户"。
 
@@ -10,8 +10,15 @@
                         ┌───────────────▼──────┐  ┌────────────▼─────────┐  ┌─────────▼────────────┐
                         │ mt-dsh-alpha :3181   │  │ mt-dsh-beta :3182    │  │ mt-dsh-gamma :3183   │
                         │ DSH_HOME=租户 A 私有 │  │ DSH_HOME=租户 B 私有 │  │ DSH_HOME=租户 C 私有 │
-                        └──────────────────────┘  └──────────────────────┘  └──────────────────────┘
+                        └──────────┬───────────┘  └──────────┬───────────┘  └──────────┬──────────┘
+                                   └─────────────────┬───────┴─────────────────────────┘
+                                        ┌────────────▼─────────────┐
+                                        │ mt-egress-proxy :3128    │──▶ 模型 API 等公网目标
+                                        │ 私网/回环目标一律拒绝     │
+                                        └──────────────────────────┘
 ```
+
+公开端口默认是 **HTTPS**（自签 CA，见「传输加密」）；本机运维脚本另走 loopback 明文端口 8099。
 
 ## 0. 首次部署
 
@@ -29,6 +36,45 @@ bin/mt.sh url                     # 打印入口地址
 
 前置条件：宿主已装 Docker 与 compose v2；有一个可用的 DSH 运行时镜像（见 `.env` 的 `DSH_IMAGE`，
 例如从 npm 安装构建：`node:22-bookworm-slim` + `npm i -g @deepseek-ai/dsh@<版本>`）。
+
+## 0.0 模型接入
+
+管理员统一配置模型，租户在界面里自选。凭据放在 `model.env`（`env_file` 注入每个租户容器，
+0600 且不进版本库）：
+
+```bash
+# model.env
+DEEPSEEK_API_KEY=sk-...        # 共享给所有租户；单个租户要独立 key 时用 bin/mt.sh key
+```
+
+DSH 内置的 `deepseek-official` 卡片指向 `https://api.deepseek.com`，提供两个模型
+（`deepseek-flash` = DeepSeek-V41-Flash、`deepseek-v4-pro` = DeepSeek-V4-Pro），
+配好 key 后租户在模型选择器里直接能看到，不需要写 `model.patch.yml`。
+
+要接**别的** OpenAI 兼容端点（私有化部署的模型）时，写 `model.patch.yml` 再应用：
+
+```bash
+bin/mt.sh model                    # 应用到全部租户并重启它们
+bin/model-check.sh --tenant alpha --user alice --password <pw>          # 真实调用验证
+bin/model-check.sh --tenant alpha --user alice --password <pw> --model <id> --provider <id>
+```
+
+`bin/model-check.sh` 固定选 `deepseek-flash` 做测试，不依赖会话默认值，避免测试打到更贵的模型上；
+它会核对回复确实来自选定的那个模型。
+
+### 租户怎么出网：出口代理
+
+**本机 `net.ipv4.ip_forward=0`，bridge 容器没有任何外网路由**——连公网 DNS 都解析不了，
+模型调用必然失败。因此部署里有一个 `mt-egress-proxy`：它跑在宿主网络命名空间里（用的是宿主的出口），
+监听一个**宿主防火墙未放行**的端口，所以只有租户容器连得上，局域网连不上。
+
+租户容器的 `HTTPS_PROXY`/`HTTP_PROXY` 由 `bin/mt.sh up` 自动探测并写入 `.env` 的 `MT_EGRESS_PROXY`。
+
+代理同时是租户的**出网边界**：目标是私网、回环、链路本地地址时一律 403，
+租户无法借它跳进内网（那些地址本来也路由不到）。要限制只能访问特定域名，设 `MT_EGRESS_ALLOW`。
+本部署自己的内网服务（例如验收用的假模型）要放进 `MT_NO_PROXY` 才能被租户访问。
+
+`bin/mt.sh doctor` 会实测一次：从租户容器经代理访问公网应通、访问内网地址应被拒。
 
 ## 0.1 用本地源码构建运行时镜像
 
@@ -56,6 +102,23 @@ ssh root@<主机> 'cd /opt/dsh-mt && bin/mt.sh up'
 刻意不做的事：原生插件（`build:native-system`）产出的是构建机的 `.node`，不能跨平台塞进 Linux 容器；
 Electron 桌面包与 Web 部署无关。两者都不影响 Web GUI。
 
+## 0.2 传输加密
+
+```bash
+bin/mt.sh cert                     # 生成自签 CA + 服务端证书
+bin/mt.sh up                       # 重新渲染：公开端口切到 HTTPS
+```
+
+- 为什么是**两级链**而不是一张自签证书：客户端要导入签发者，而宿主 curl 用 NSS，它拒绝把
+  `CA:TRUE` 的证书当服务器证书用；一级自签在 OpenSSL 下又会报 `Issuer certificate is invalid`。
+- 产物：`state/tls/ca.crt` 导入客户端信任库；`server.crt`（叶子+CA 链）与 `server.key` 由网关加载。
+- SAN 自动覆盖：本机局域网 IP、`localhost`/`127.0.0.1`、注册表里每个租户的 hosts 条目；
+  额外的主机名用 `bin/mt.sh cert "dsh.example.com,10.0.0.9"` 追加。
+- 启用后：公开端口（8090 及每个租户的专属端口）只说 HTTPS，明文请求被拒；
+  网关为每个响应的 `dsh-auth-*` 与 `mt_session` cookie 补上 `Secure`（DSH 自己不知道它在 TLS 终结之后）。
+- 本机运维脚本改走 loopback 明文端口 `${MT_HTTP_PORT:-8099}`，它只绑定 127.0.0.1。
+- 换用你们 CA 签发的证书：替换 `server.crt` / `server.key` 两个文件即可，网关只读它们。
+
 ## 1. 隔离模型
 
 | 维度 | 隔离方式 |
@@ -65,7 +128,7 @@ Electron 桌面包与 Web 部署无关。两者都不影响 Web GUI。
 | DSH cookie | DSH 的浏览器 cookie 名由 Host authority 派生；网关对每个租户改写为 `127.0.0.1:<租户端口>`，因此 **一个租户的 cookie 在另一个租户那里必然 401** |
 | 凭据 | 每个租户自己的 `.credentials.yaml`（各自随机签名密钥），模型 key 按租户注入 |
 | 执行 | 每租户一个容器（独立 PID/挂载/网络命名空间）+ 内存/CPU/PID 限额；宿主内核 3.10 无法跑 DSH 自带文件沙箱，容器即边界 |
-| 网络 | 租户容器不发布任何端口，只有网关能被访问 |
+| 网络 | 租户容器不发布任何端口，只有网关能被访问；出网必须经 `mt-egress-proxy`，私网目标被拒 |
 | 审计 | 网关按请求写 `logs/access.jsonl`（租户、用户、方法、URL、状态码、耗时） |
 
 ## 2. 目录
@@ -81,6 +144,9 @@ Electron 桌面包与 Web 部署无关。两者都不影响 Web GUI。
 | `state/session.key` | 网关会话签名密钥（删除＝所有人重新登录） |
 | `logs/access.jsonl` | 访问审计 |
 | `build/`、`entry-urls.txt` | 生成物 |
+| `state/tls/` | TLS 证书与私钥（`ca.crt` 给客户端导入） |
+| `egress-proxy/server.js` | 租户出口代理：宿主网络 + 未放行端口 = 只有容器可达 |
+| `backups/` | `bin/mt.sh backup` 的归档 |
 
 ## 3. 日常操作
 
@@ -99,6 +165,8 @@ bin/mt.sh accept --tenant alpha --user alice --password <pw>  # 端到端验收�
 bin/mt.sh backup                   # 备份全部租户数据 + 控制面状态（默认冻结快照）
 bin/mt.sh restore <归档>           # 恢复；现有数据挪到 restore-aside-<时间戳>/ 而不删除
 bin/mt.sh publish-image            # 用已上传的覆盖层构建本地源码镜像
+bin/mt.sh cert [额外SAN]           # 生成自签 CA + 服务端证书，之后 bin/mt.sh up 切到 HTTPS
+bin/mt.sh model                    # 应用 model.patch.yml / model.env 到全部租户
 ```
 
 ### 开通新租户

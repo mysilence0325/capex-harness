@@ -17,6 +17,7 @@
 'use strict'
 
 const http = require('node:http')
+const https = require('node:https')
 const net = require('node:net')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -25,13 +26,61 @@ const path = require('node:path')
 const CONFIG_FILE = process.env.MT_TENANTS_FILE ?? '/config/tenants.json'
 const STATE_DIR = process.env.MT_STATE_DIR ?? '/state'
 const LOG_DIR = process.env.MT_LOG_DIR ?? '/logs'
-const EDGE_PORT = Number(process.env.MT_EDGE_PORT ?? 8090)
+/**
+ * Read a port from the environment, refusing anything that is not one.
+ *
+ * A compose interpolation that did not happen arrives here as literal text, and
+ * `server.listen(NaN)` reports a range error far from its cause.
+ *
+ * @param name - environment variable name.
+ * @param fallback - port to use when the variable is unset.
+ * @returns a usable port number.
+ */
+function envPort(name, fallback) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    console.error(`mt-gateway: ${name} is not a port number: ${JSON.stringify(raw)}`)
+    process.exit(1)
+  }
+  return port
+}
+
+const EDGE_PORT = envPort('MT_EDGE_PORT', 8090)
 const BIND_ADDRESS = process.env.MT_BIND_IP ?? '0.0.0.0'
 const SESSION_TTL_MS = Number(process.env.MT_SESSION_TTL_HOURS ?? 12) * 3_600_000
 const DOCKER_SOCKET = process.env.MT_DOCKER_SOCKET ?? '/var/run/docker.sock'
 const TOKEN_CACHE_MS = 10_000
 const SESSION_COOKIE = 'mt_session'
 const PREFIX = '/__mt'
+
+/**
+ * TLS material for the public listeners.
+ *
+ * Both files must exist; `bin/make-cert.sh` writes a self-signed pair, and a
+ * deployment with its own CA only has to replace the two files. Without them the
+ * public ports stay plain HTTP, which keeps an unconfigured stack working.
+ */
+const TLS_OPTIONS = (() => {
+  const cert = process.env.MT_TLS_CERT
+  const key = process.env.MT_TLS_KEY
+  if (cert === undefined || key === undefined) return undefined
+  if (!fs.existsSync(cert) || !fs.existsSync(key)) {
+    console.error(`mt-gateway: TLS certificate or key missing (${cert}, ${key}); serving plain HTTP`)
+    return undefined
+  }
+  return { cert: fs.readFileSync(cert), key: fs.readFileSync(key) }
+})()
+
+/**
+ * Loopback-only plain-HTTP port for operations.
+ *
+ * With TLS on, the public ports speak HTTPS, so the scripts that run on this
+ * machine (health, smoke, acceptance, model checks) need an unencrypted local
+ * entry that no browser ever uses.
+ */
+const OPS_PORT = TLS_OPTIONS === undefined ? undefined : envPort('MT_HTTP_PORT', 8099)
 
 /**
  * Read the tenant registry.
@@ -345,6 +394,23 @@ function send(res, status, headers, body) {
   res.end(body)
 }
 
+/**
+ * Add `Secure` to cookies when the request arrived over TLS.
+ *
+ * DSH decides its own cookie attributes and does not know it is behind a TLS
+ * terminator, so the gateway is the only place that can mark the browser cookie
+ * as HTTPS-only.
+ *
+ * @param value - one Set-Cookie value or a list of them.
+ * @param overTls - whether the request that produced it arrived over TLS.
+ * @returns the same value, with `Secure` present on every cookie.
+ */
+function secureCookies(value, overTls) {
+  if (!overTls || value === undefined) return value
+  const list = Array.isArray(value) ? value : [value]
+  return list.map((cookie) => (/(^|;\s*)secure(;|$)/iu.test(cookie) ? cookie : `${cookie}; Secure`))
+}
+
 function readBody(req, limit = 8192) {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -439,11 +505,14 @@ async function proxyRequest(req, res, session) {
       }
 
       const responseHeaders = { ...response.headers }
-      if (activation !== undefined) {
-        const existing = responseHeaders['set-cookie']
-        responseHeaders['set-cookie'] = existing === undefined
+      const existing = responseHeaders['set-cookie']
+      const delivered = activation === undefined
+        ? existing
+        : (existing === undefined
           ? [activation.setCookie]
-          : [...(Array.isArray(existing) ? existing : [existing]), activation.setCookie]
+          : [...(Array.isArray(existing) ? existing : [existing]), activation.setCookie])
+      if (delivered !== undefined) {
+        responseHeaders['set-cookie'] = secureCookies(delivered, req.socket.encrypted === true)
       }
       res.writeHead(status, responseHeaders)
       response.pipe(res)
@@ -603,7 +672,10 @@ function handleLogin(req, res) {
     audit({ tenant: resolved.tenant.id, user, status: 200, note: 'login-ok' })
     send(res, 303, {
       location: '/',
-      'set-cookie': `${SESSION_COOKIE}=${signSession(resolved.tenant.id, user)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${String(Math.floor(SESSION_TTL_MS / 1000))}`,
+      'set-cookie': secureCookies(
+        `${SESSION_COOKIE}=${signSession(resolved.tenant.id, user)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${String(Math.floor(SESSION_TTL_MS / 1000))}`,
+        req.socket.encrypted === true,
+      ),
       'cache-control': 'no-store',
     }, '')
   }).catch(() => {
@@ -667,7 +739,7 @@ function handleRequest(req, res) {
     })
     send(res, 303, {
       location: `${PREFIX}/`,
-      'set-cookie': expired,
+      'set-cookie': secureCookies(expired, req.socket.encrypted === true),
       'cache-control': 'no-store',
     }, '')
     return
@@ -763,20 +835,27 @@ const listeners = new Map()
  * A tenant with its own `edgePort` gets a listener on that exact port so the
  * gateway can resolve the tenant from the port the request arrived on; every
  * tenant is also reachable through the shared entry, where the session cookie
- * decides the tenant.
+ * decides the tenant. Public ports speak HTTPS once TLS material is present;
+ * the operations port is plain HTTP bound to loopback.
  *
- * @param port - public port to bind inside the gateway container.
+ * @param port - port to bind inside the gateway container.
+ * @param options - `plain` forces HTTP, `bind` overrides the listen address.
  */
-function listen(port) {
+function listen(port, options = {}) {
   if (listeners.has(port)) return
-  const server = http.createServer(handleRequest)
+  const plain = options.plain === true
+  const bind = options.bind ?? BIND_ADDRESS
+  const server = plain || TLS_OPTIONS === undefined
+    ? http.createServer(handleRequest)
+    : https.createServer(TLS_OPTIONS, handleRequest)
   server.on('upgrade', handleUpgrade)
   server.on('error', (error) => {
     console.error(`mt-gateway: cannot listen on :${String(port)}: ${error.message}`)
     process.exit(1)
   })
-  server.listen(port, BIND_ADDRESS, () => {
-    console.log(`mt-gateway listening on ${BIND_ADDRESS}:${String(port)}`)
+  server.listen(port, bind, () => {
+    const scheme = plain || TLS_OPTIONS === undefined ? 'http' : 'https'
+    console.log(`mt-gateway listening on ${scheme}://${bind}:${String(port)}`)
   })
   listeners.set(port, server)
 }
@@ -810,7 +889,8 @@ function applyRegistry(reason) {
   for (const tenant of tenants.values()) {
     if (tenant.edgePort !== undefined && tenant.edgePort !== EDGE_PORT) wanted.add(tenant.edgePort)
   }
-  for (const port of wanted) listen(port)
+  if (OPS_PORT !== undefined) wanted.add(OPS_PORT)
+  for (const port of wanted) listen(port, port === OPS_PORT ? { plain: true, bind: '127.0.0.1' } : {})
   for (const [port, server] of listeners) {
     if (wanted.has(port)) continue
     server.close()
@@ -833,4 +913,7 @@ applyRegistry('boot')
 // Polling instead of fs.watch: the registry arrives through a bind mount, whose
 // watch semantics differ across kernels.
 fs.watchFile(CONFIG_FILE, { interval: 2000 }, () => { applyRegistry('reload') })
-console.log(`mt-gateway serving ${String(tenants.size)} tenant(s): ${[...tenants.keys()].join(', ')}`)
+console.log(`mt-gateway serving ${String(tenants.size)} tenant(s): ${[...tenants.keys()].join(', ')}` +
+  (TLS_OPTIONS === undefined
+    ? ' — 公开端口为明文 HTTP（尚未生成 TLS 证书）'
+    : ` — 公开端口为 HTTPS，运维入口为 http://127.0.0.1:${String(OPS_PORT)}`))

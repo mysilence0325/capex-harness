@@ -3,7 +3,7 @@
 
 Usage:
   python vm.py run "<shell command>"      run a command through bash -lc
-  python vm.py script <local.sh>          upload and run a local bash script
+  python vm.py script <local.sh> [args]   upload and run a local bash script
   python vm.py put <local> <remote>       upload one file
   python vm.py get <remote> <local>       download one file
 
@@ -101,9 +101,11 @@ def main(argv: list[str]) -> int:
             return run(client, f"bash -lc {shell_quote(argv[2])}")
         if action == "script":
             local = argv[2]
+            extra = argv[3:]
             remote = f"/tmp/dsh-{uuid.uuid4().hex[:8]}.sh"
             sftp_put(client, local, remote)
-            return run(client, f"bash -lc {shell_quote(f'bash {remote}')}")
+            invocation = " ".join([f"bash {remote}", *[shell_quote(arg) for arg in extra]])
+            return run(client, f"bash -lc {shell_quote(invocation)}")
         if action == "put":
             remote = argv[3]
             run(client, f"mkdir -p {shell_quote(posixpath.dirname(remote))}")

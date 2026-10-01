@@ -74,13 +74,15 @@ gstate="$(docker inspect mt-gateway --format '{{.State.Status}}' 2>/dev/null || 
 [ "$gstate" = running ] && ok "网关容器运行中" || bad "网关容器状态: $gstate"
 # 监听表只取一次：`ss | grep -q` 在 pipefail 下会因 SIGPIPE 被误判为没有监听。
 LISTEN="$(ss -ltn 2>/dev/null)"
-HEALTH="$(curl -fsS "http://127.0.0.1:${MT_EDGE_PORT:-8090}/__mt/health" 2>/dev/null || true)"
+GW_BASE="http://127.0.0.1:${MT_EDGE_PORT:-8090}"
+if [ -f state/tls/server.crt ]; then GW_BASE="http://127.0.0.1:${MT_HTTP_PORT:-8099}"; fi
+HEALTH="$(curl -fsS "$GW_BASE/__mt/health" 2>/dev/null || true)"
 if [ -n "$HEALTH" ]; then
   READY="$(printf '%s' "$HEALTH" | tr -d ' \n' | grep -o '"ready":true' | wc -l)"
   TOTAL="$(printf '%s' "$HEALTH" | tr -d ' \n' | grep -o '"id":"' | wc -l)"
   [ "$READY" = "$TOTAL" ] && ok "全部租户就绪 ($READY/$TOTAL)" || bad "仅 $READY/$TOTAL 个租户就绪"
 else
-  bad "健康接口无响应（本机 curl 127.0.0.1:${MT_EDGE_PORT:-8090}/__mt/health）"
+  bad "健康接口无响应（本机 curl $GW_BASE/__mt/health）"
 fi
 for p in 8090 8091 8092 8093; do
   if printf '%s\n' "$LISTEN" | grep -q ":$p "; then ok "端口 $p 在监听"; else warn "端口 $p 未监听"; fi
@@ -99,6 +101,71 @@ if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "0" ]; then
   warn "宿主 ip_forward=0：bridge 网络的端口映射对外不通，控制面因此用 host 网络（这是本部署的既定做法）"
 else
   ok "宿主 ip_forward 已开启"
+fi
+
+head_ "租户出网"
+EGRESS_STATE="$(docker inspect mt-egress-proxy --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+if [ "$EGRESS_STATE" = running ]; then
+  ok "出口代理容器运行中（端口 ${MT_EGRESS_PORT:-3128}，宿主的公网出口）"
+else
+  bad "出口代理容器状态: $EGRESS_STATE"
+fi
+if [ -n "${MT_EGRESS_PROXY:-}" ]; then
+  ok "MT_EGRESS_PROXY=${MT_EGRESS_PROXY}"
+else
+  warn "MT_EGRESS_PROXY 未设置：bridge 容器没有外网路由，租户将无法调用模型（bin/mt.sh up 会自动补）"
+fi
+FIRST_TENANT="$(printf '%s\n' "$TENANTS" | head -1)"
+# 用出口代理自己的宿主地址当"内网目标"：它必然是私网地址，且不必写死任何 IP。
+PROBE_INTERNAL="$(printf '%s' "${MT_EGRESS_PROXY:-}" | sed 's|^http[s]*://||; s|:.*$||')"
+if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTERNAL" ]; then
+  PROBE="$(docker exec -e PROBE_INTERNAL="$PROBE_INTERNAL" "mt-dsh-${FIRST_TENANT}" node -e '
+    const proxy = process.env.HTTPS_PROXY
+    const internal = process.env.PROBE_INTERNAL
+    if (!proxy) { console.log("no-proxy-in-container"); process.exit(0) }
+    const net = require("node:net")
+    const [phost, pport] = proxy.replace("http://", "").split(":")
+    const ask = (host, port) => new Promise((resolve) => {
+      const socket = net.connect(Number(pport), phost, () => {
+        socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`)
+      })
+      socket.once("data", (chunk) => { socket.destroy(); resolve(String(chunk).split("\r\n")[0]) })
+      socket.on("error", () => resolve("error"))
+      setTimeout(() => { socket.destroy(); resolve("timeout") }, 10000)
+    })
+    ;(async () => {
+      const publicResult = await ask("api.deepseek.com", 443)
+      const internalResult = await ask(internal, 8090)
+      console.log(`${publicResult.includes("200") ? "public-ok" : "public-fail"} ${internalResult.includes("403") ? "internal-blocked" : "internal-ALLOWED"}`)
+    })()
+  ' 2>/dev/null | tr -d '\r')"
+  case "$PROBE" in
+    "public-ok internal-blocked") ok "  实测 ${FIRST_TENANT}: 可经代理访问公网，且内网地址被拒" ;;
+    "no-proxy-in-container") warn "  ${FIRST_TENANT} 容器里没有 HTTPS_PROXY（执行 bin/mt.sh up）" ;;
+    *) bad "  ${FIRST_TENANT} 出口实测异常: ${PROBE:-无响应}" ;;
+  esac
+fi
+
+head_ "传输加密"
+CERT="state/tls/server.crt"
+if [ -f "$CERT" ] && [ -f state/tls/server.key ]; then
+  if openssl x509 -in "$CERT" -noout -checkend 0 >/dev/null 2>&1; then
+    ok "证书有效，到期 $(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
+  else
+    bad "证书已过期：$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
+  fi
+  if docker inspect mt-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -q '^MT_TLS_CERT='; then
+    ok "  网关以 HTTPS 提供公开端口"
+    if printf '%s\n' "$LISTEN" | grep -q ":${MT_HTTP_PORT:-8099} "; then
+      ok "  运维明文端口 ${MT_HTTP_PORT:-8099} 在监听（仅 loopback，供本机脚本用）"
+    else
+      warn "  运维端口 ${MT_HTTP_PORT:-8099} 未监听（本机脚本会连不上）"
+    fi
+  else
+    warn "  证书已存在但网关仍走明文：执行 bin/mt.sh up 让它生效"
+  fi
+else
+  warn "未配置 TLS，公开端口为明文 HTTP；bin/mt.sh cert 可生成自签证书"
 fi
 
 head_ "模型接入"
