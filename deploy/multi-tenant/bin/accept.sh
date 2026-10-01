@@ -100,6 +100,8 @@ echo "  假模型就绪: $(docker run --rm --network mt-net "$NODE_IMAGE" node -
 echo "== 1. 把管理员模型目录装配给 ${TENANT} =="
 docker run --rm -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bin/render.js --only "$TENANT" --model-block mock-model/model.patch.yml
 docker restart "mt-dsh-${TENANT}" >/dev/null
+# 控制面只认注册进来的地址，重启后必须重新注册，否则这里会测出假故障。
+bash bin/mt.sh register "$TENANT" >/dev/null 2>&1 || true
 if wait_tenant_ready "$TENANT" 60; then
   check "重启后 ${TENANT} 恢复就绪" "yes" "yes"
 else

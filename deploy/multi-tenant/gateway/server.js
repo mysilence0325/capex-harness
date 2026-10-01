@@ -50,8 +50,6 @@ function envPort(name, fallback) {
 const EDGE_PORT = envPort('MT_EDGE_PORT', 8090)
 const BIND_ADDRESS = process.env.MT_BIND_IP ?? '0.0.0.0'
 const SESSION_TTL_MS = Number(process.env.MT_SESSION_TTL_HOURS ?? 12) * 3_600_000
-const DOCKER_SOCKET = process.env.MT_DOCKER_SOCKET ?? '/var/run/docker.sock'
-const TOKEN_CACHE_MS = 10_000
 const SESSION_COOKIE = 'mt_session'
 const PREFIX = '/__mt'
 
@@ -118,9 +116,55 @@ const sessionSecret = (() => {
   return created
 })()
 
-const tokenCache = new Map()
-const addressCache = new Map()
-const ADDRESS_CACHE_MS = 30_000
+/**
+ * Shared key that authorizes a runtime registration.
+ *
+ * A node posts its tenants' endpoints and launch tokens here; without this key
+ * any container that can reach the gateway could claim a tenant and intercept
+ * its traffic.
+ */
+const registryKey = (() => {
+  const file = path.join(STATE_DIR, 'registry.key')
+  if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8').trim()
+  const created = crypto.randomBytes(32).toString('base64url')
+  fs.writeFileSync(file, `${created}\n`, { mode: 0o600 })
+  return created
+})()
+
+/** Runtime endpoints and launch tokens, keyed by tenant id. */
+const RUNTIMES_FILE = path.join(STATE_DIR, 'runtimes.json')
+
+/**
+ * Read the runtime table.
+ *
+ * The gateway no longer inspects containers: it proxies to whatever a node
+ * registered, which is what lets the control plane and the runtimes live on
+ * different machines.
+ *
+ * @returns the table, empty when nothing has registered yet.
+ */
+function loadRuntimes() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(RUNTIMES_FILE, 'utf8'))
+    return new Map(Object.entries(parsed.runtimes ?? {}))
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.error(`mt-gateway: cannot read the runtime table: ${error.message}`)
+    }
+    return new Map()
+  }
+}
+
+let runtimes = loadRuntimes()
+
+/** Persist the runtime table (rewritten whole; it is small and node-owned). */
+function saveRuntimes() {
+  const body = JSON.stringify({
+    runtimes: Object.fromEntries([...runtimes].sort(([left], [right]) => left.localeCompare(right))),
+  }, null, 2)
+  fs.writeFileSync(RUNTIMES_FILE, `${body}\n`, { mode: 0o600 })
+}
+
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -138,11 +182,15 @@ function dshCookieName(authority) {
   return 'dsh-auth-' + base64url(crypto.createHash('sha256').update(authority).digest())
 }
 
-/** Authority the tenant runtime sees: the loopback rewrite this gateway applies. */
-const tenantAuthority = (tenant) => `127.0.0.1:${tenant.internalPort}`
-
-/** Container name of a tenant runtime (for launch-token, address, and readiness lookups). */
-const tenantContainer = (tenant) => tenant.container ?? `mt-dsh-${tenant.id}`
+/**
+ * Authority the tenant runtime sees as its Host header.
+ *
+ * A stable name per tenant rather than `127.0.0.1:<port>`: DSH derives its
+ * cookie name from this string, so two runtimes that happened to use the same
+ * loopback port on different hosts would otherwise share a cookie name. The
+ * name also makes a runtime's location irrelevant to the browser session.
+ */
+const tenantAuthority = (tenant) => `dsh-${tenant.id}.internal`
 
 function parseCookies(header) {
   const out = new Map()
@@ -214,126 +262,55 @@ function audit(entry) {
 }
 
 /**
- * Read one container's inspect document.
- * @param container - container name.
- * @returns the parsed inspect document.
+ * Registered runtime of one tenant.
+ * @param tenant - tenant record.
+ * @returns the entry, or undefined when the tenant has not registered.
  */
-function inspectContainer(container) {
-  return new Promise((resolve, reject) => {
-    const request = http.request({
-      socketPath: DOCKER_SOCKET,
-      path: `/containers/${encodeURIComponent(container)}/json`,
-      method: 'GET',
-      timeout: 10_000,
-    }, (response) => {
-      const chunks = []
-      response.on('data', (chunk) => chunks.push(chunk))
-      response.on('end', () => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`docker inspect ${container}: HTTP ${String(response.statusCode)}`))
-          return
-        }
-        try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-        } catch (error) {
-          reject(new Error(`docker inspect ${container}: unparsable response (${error.message})`))
-        }
-      })
-    })
-    request.on('timeout', () => { request.destroy(new Error(`docker inspect ${container}: timeout`)) })
-    request.on('error', reject)
-    request.end()
-  })
+function runtimeOf(tenant) {
+  return runtimes.get(tenant.id)
 }
 
 /**
- * Current address of one tenant runtime on its compose network.
+ * Where to send one tenant's traffic.
  *
- * The gateway runs in the host network namespace (this host cannot forward
- * between its physical interface and a bridge, so a published port would never
- * reach a LAN client), which also means Docker's embedded DNS does not apply to
- * it. The address therefore comes from the Docker API, the same source the
- * launch tokens come from.
+ * The gateway never inspects containers: a node registers an endpoint and the
+ * gateway proxies to it, so the control plane and the runtimes can live on
+ * different machines. A tenant that has not registered is a configuration
+ * state, not an outage, and is reported as such.
  *
  * @param tenant - tenant record.
- * @returns the tenant container's IPv4 address on `mt-net`.
+ * @returns `{ host, port }` parsed from the registered endpoint.
  */
-async function tenantAddress(tenant) {
-  const cached = addressCache.get(tenant.id)
-  if (cached !== undefined && cached.expiresAt > Date.now()) return cached.ip
-  const info = await inspectContainer(tenantContainer(tenant))
-  const networks = info?.NetworkSettings?.Networks ?? {}
-  const network = networks[tenant.network ?? 'mt-net'] ?? Object.values(networks)[0]
-  const ip = network?.IPAddress
-  if (typeof ip !== 'string' || ip === '') {
-    throw new Error(`tenant ${tenant.id} has no address on its network yet`)
+function tenantAddress(tenant) {
+  const entry = runtimeOf(tenant)
+  if (entry === undefined) {
+    throw Object.assign(new Error(`tenant ${tenant.id} has not registered a runtime`), { code: 'MT_NOT_REGISTERED' })
   }
-  addressCache.set(tenant.id, { ip, expiresAt: Date.now() + ADDRESS_CACHE_MS })
-  return ip
+  let url
+  try {
+    url = new URL(entry.endpoint)
+  } catch {
+    throw Object.assign(new Error(`tenant ${tenant.id} registered an invalid endpoint: ${String(entry.endpoint)}`), { code: 'MT_BAD_ENDPOINT' })
+  }
+  return { host: url.hostname, port: Number(url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : url.port) }
 }
 
 // ---------------------------------------------------------------------------
-// tenant launch-token lookup through the Docker API
+// launch tokens
 // ---------------------------------------------------------------------------
 
 /**
- * Read one container's combined log stream.
- * @param container - container name.
- * @returns the demultiplexed log text.
- */
-function containerLogs(container) {
-  return new Promise((resolve, reject) => {
-    const request = http.request({
-      socketPath: DOCKER_SOCKET,
-      path: `/containers/${encodeURIComponent(container)}/logs?stdout=1&stderr=1&tail=400`,
-      method: 'GET',
-      timeout: 10_000,
-    }, (response) => {
-      if (response.statusCode !== 200) {
-        response.resume()
-        reject(new Error(`docker logs ${container}: HTTP ${String(response.statusCode)}`))
-        return
-      }
-      const chunks = []
-      response.on('data', (chunk) => chunks.push(chunk))
-      response.on('end', () => {
-        const buffer = Buffer.concat(chunks)
-        const parts = []
-        let offset = 0
-        // Docker frames non-TTY output as [type:1][pad:3][size:4 BE][payload].
-        while (offset + 8 <= buffer.length) {
-          const size = buffer.readUInt32BE(offset + 4)
-          const start = offset + 8
-          const end = start + size
-          if (end > buffer.length) break
-          parts.push(buffer.subarray(start, end))
-          offset = end
-        }
-        resolve(parts.length > 0 ? Buffer.concat(parts).toString('utf8') : buffer.toString('utf8'))
-      })
-    })
-    request.on('timeout', () => { request.destroy(new Error(`docker logs ${container}: timeout`)) })
-    request.on('error', reject)
-    request.end()
-  })
-}
-
-/**
- * Current launch token of a tenant runtime, cached briefly.
+ * Current launch token of a tenant runtime.
+ *
+ * The token is printed by the runtime at startup; the node that started the
+ * container reads it and registers it here. The gateway cannot read it itself,
+ * which is the point: it holds no Docker access.
+ *
  * @param tenant - tenant record.
- * @param fresh - bypass and replace the cached value (a just-used token failed).
- * @returns the token, or undefined when the container has not printed a URL yet.
+ * @returns the token, or undefined when the registration carries none yet.
  */
-async function tenantToken(tenant, fresh = false) {
-  const cached = tokenCache.get(tenant.id)
-  if (!fresh && cached !== undefined && cached.expiresAt > Date.now()) return cached.token
-  const logs = await containerLogs(tenantContainer(tenant))
-  const matches = [...logs.matchAll(/dsh web:\s*(\S+)/gu)]
-  const token = matches.length === 0
-    ? undefined
-    : new URL(matches[matches.length - 1][1]).searchParams.get('token') ?? undefined
-  tokenCache.set(tenant.id, { token, expiresAt: Date.now() + TOKEN_CACHE_MS })
-  return token
+function tenantToken(tenant) {
+  return runtimeOf(tenant)?.token
 }
 
 // ---------------------------------------------------------------------------
@@ -381,8 +358,16 @@ function loginPage({ error } = {}) {
     </form>`)
 }
 
-function errorPage(status, message) {
-  return htmlPage(`DSH ${String(status)}`, `<h1>${String(status)}</h1><p class="sub">${message}</p>`)
+/**
+ * Render one error page.
+ * @param status - HTTP status to show as the heading.
+ * @param message - headline sentence.
+ * @param detail - optional second line; may contain markup.
+ * @returns the page HTML.
+ */
+function errorPage(status, message, detail = '') {
+  const extra = detail === '' ? '' : `<p class="sub">${detail}</p>`
+  return htmlPage(`DSH ${String(status)}`, `<h1>${String(status)}</h1><p class="sub">${message}</p>${extra}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +428,7 @@ async function proxyRequest(req, res, session) {
   let activation
   if (presented === undefined || refreshing) {
     try {
-      activation = await activateTenant(tenant, refreshing)
+      activation = await activateTenant(tenant)
     } catch (error) {
       audit({ tenant: tenant.id, user: session.user, url: req.url, status: 502, error: error.message })
       send(res, 502, { 'content-type': 'text/plain; charset=utf-8' }, `activation failed: ${error.message}\n`)
@@ -463,18 +448,21 @@ async function proxyRequest(req, res, session) {
 
   let address
   try {
-    address = await tenantAddress(tenant)
+    address = tenantAddress(tenant)
   } catch (error) {
-    audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status: 502, error: error.message })
-    send(res, 502, { 'content-type': 'text/plain; charset=utf-8' }, `tenant runtime address unavailable: ${error.message}\n`)
+    audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status: 503, error: error.message })
+    const unregistered = error.code === 'MT_NOT_REGISTERED'
+    send(res, 503, { 'content-type': 'text/html; charset=utf-8' }, unregistered
+      ? errorPage(503, `租户 ${tenant.id} 的运行时还没有注册。`,
+        `在运行它的机器上执行 <code>bin/mt.sh register ${tenant.id}</code>，然后刷新本页。`)
+      : errorPage(503, '租户运行时地址无效。', `${String(error.message)}`))
     return
   }
 
-  let attempts = 0
   const sendUpstream = () => {
     const upstream = http.request({
-      host: address,
-      port: tenant.internalPort,
+      host: address.host,
+      port: address.port,
       method: req.method,
       path: req.url,
       headers,
@@ -493,6 +481,18 @@ async function proxyRequest(req, res, session) {
           audit({ tenant: tenant.id, user: session.user, url: req.url, status: 503, note: 'activation-rejected' })
           send(res, 503, { 'content-type': 'text/html; charset=utf-8' },
             errorPage(503, '租户运行时拒绝了激活，可能仍在启动中。请稍后刷新重试。'))
+          return
+        }
+        if (refreshing) {
+          // One refresh already happened and the runtime refused again. The usual
+          // cause is a launch token from a previous run: DSH mints a new one on
+          // every start, so the registration has to be refreshed too. Report it
+          // instead of redirecting again, which would loop forever.
+          audit({ tenant: tenant.id, user: session.user, url: req.url, status: 503, note: 'refresh-rejected' })
+          send(res, 503, { 'content-type': 'text/html; charset=utf-8' },
+            errorPage(503, `租户 ${tenant.id} 拒绝了本次访问。`,
+              '运行时的启动 token 可能已过期（它每次启动都会变）。在运行它的机器上执行 ' +
+              `<code>bin/mt.sh register ${tenant.id}</code> 重新注册，然后刷新本页。`))
           return
         }
         // The browser held a cookie this runtime no longer accepts: force one
@@ -519,31 +519,14 @@ async function proxyRequest(req, res, session) {
     })
 
     upstream.on('error', (error) => {
-      // A recreated tenant container gets a new address, so a cached one goes
-      // stale the moment the runtime is redeployed. Drop it and retry a
-      // bodyless request once instead of failing the first navigation after a
-      // deploy.
-      addressCache.delete(tenant.id)
-      const bodyless = req.method === 'GET' || req.method === 'HEAD'
-      if (bodyless && attempts === 0) {
-        attempts += 1
-        tenantAddress(tenant).then((fresh) => {
-          address = fresh
-          sendUpstream()
-        }).catch((retryError) => {
-          audit({ tenant: tenant.id, user: session.user, url: req.url, status: 502, error: retryError.message })
-          if (!res.headersSent) {
-            send(res, 502, { 'content-type': 'text/plain; charset=utf-8' },
-              `tenant runtime unreachable: ${retryError.message}\n`)
-          } else {
-            res.destroy()
-          }
-        })
-        return
-      }
+      // The endpoint comes from the runtime table, so a failure here means the
+      // registered runtime is not answering — most often because its container
+      // was recreated and the node has not re-registered the new address yet.
       audit({ tenant: tenant.id, user: session.user, method: req.method, url: req.url, status: 502, ms: Date.now() - started, error: error.message })
       if (!res.headersSent) {
-        send(res, 502, { 'content-type': 'text/plain; charset=utf-8' }, `tenant runtime unreachable: ${error.message}\n`)
+        send(res, 502, { 'content-type': 'text/plain; charset=utf-8' },
+          `tenant runtime unreachable at ${address.host}:${String(address.port)}: ${error.message}\n` +
+          `check the registration with bin/mt.sh runtimes\n`)
       } else {
         res.destroy()
       }
@@ -571,8 +554,8 @@ function withCookie(header, name, value) {
 function tenantRequest(tenant, address, path) {
   return new Promise((resolve, reject) => {
     const request = http.request({
-      host: address,
-      port: tenant.internalPort,
+      host: address.host,
+      port: address.port,
       method: 'GET',
       path,
       headers: { host: tenantAuthority(tenant) },
@@ -599,13 +582,12 @@ function tenantRequest(tenant, address, path) {
  * redirect handling.
  *
  * @param tenant - tenant record.
- * @param fresh - re-read the launch token instead of trusting the short cache.
  * @returns the tenant's `Set-Cookie` value and its `name=value` pair, or undefined.
  */
-async function activateTenant(tenant, fresh = false) {
-  const token = await tenantToken(tenant, fresh)
+async function activateTenant(tenant) {
+  const token = tenantToken(tenant)
   if (token === undefined) return undefined
-  const address = await tenantAddress(tenant)
+  const address = tenantAddress(tenant)
   const response = await tenantRequest(tenant, address, `/?token=${encodeURIComponent(token)}`)
   const raw = response.headers['set-cookie']
   const setCookie = Array.isArray(raw) ? raw[0] : raw
@@ -685,14 +667,29 @@ function handleLogin(req, res) {
 
 function handleHealth(req, res) {
   Promise.all([...tenants.values()].map(async (tenant) => {
-    let token
-    try {
-      token = await tenantToken(tenant)
-    } catch (error) {
-      token = undefined
-      return { id: tenant.id, container: tenant.container, ready: false, error: error.message }
+    const entry = runtimeOf(tenant)
+    if (entry === undefined) {
+      return { id: tenant.id, registered: false, ready: false }
     }
-    return { id: tenant.id, container: tenant.container, ready: token !== undefined }
+    let reachable = false
+    try {
+      // A runtime answers 401 without its cookie, which is proof enough that it
+      // is listening. The endpoint comes from the node's registration.
+      const address = tenantAddress(tenant)
+      const response = await tenantRequest(tenant, address, '/')
+      reachable = response.status > 0
+    } catch {
+      reachable = false
+    }
+    return {
+      id: tenant.id,
+      node: entry.node ?? 'local',
+      endpoint: entry.endpoint,
+      registered: true,
+      reachable,
+      ready: reachable,
+      registeredAt: entry.registeredAt,
+    }
   })).then((rows) => {
     send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({
       tenants: rows,
@@ -701,12 +698,141 @@ function handleHealth(req, res) {
   })
 }
 
+/**
+ * Accept one node's registration of a tenant runtime.
+ *
+ * This is the only way the gateway learns where a tenant runs, which is what
+ * lets the control plane and the runtimes live on different machines. The body
+ * carries the endpoint the gateway should proxy to and the launch token the
+ * runtime printed; the caller is authenticated by the shared registry key, so a
+ * container that can reach the gateway cannot claim a tenant.
+ *
+ * @param req - HTTP request carrying the JSON body.
+ * @param res - HTTP response.
+ */
+function handleRegister(req, res) {
+  const presented = req.headers['x-mt-registry-key']
+  if (typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey)) {
+    audit({ tenant: '-', user: '-', status: 401, note: 'registry-key-rejected', url: req.url })
+    send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
+    return
+  }
+  readJsonBody(req, (error, body) => {
+    if (error !== undefined) {
+      send(res, 400, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: error.message }))
+      return
+    }
+    const action = new URL(req.url ?? '/', 'http://gateway.invalid').pathname.endsWith('/unregister') ? 'unregister' : 'register'
+    const id = typeof body?.tenant === 'string' ? body.tenant : ''
+    if (!tenants.has(id)) {
+      send(res, 404, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: `no such tenant: ${id}` }))
+      return
+    }
+    if (action === 'unregister') {
+      runtimes.delete(id)
+      saveRuntimes()
+      audit({ tenant: id, user: '-', status: 200, note: 'runtime-unregistered', node: body?.node })
+      console.log(`mt-gateway: runtime unregistered: ${id}`)
+      send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: true, tenant: id }))
+      return
+    }
+    const endpoint = typeof body?.endpoint === 'string' ? body.endpoint : ''
+    let parsed
+    try {
+      parsed = new URL(endpoint)
+    } catch {
+      send(res, 400, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: `endpoint must be an http(s) URL: ${JSON.stringify(endpoint)}` }))
+      return
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      send(res, 400, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: `unsupported endpoint scheme: ${parsed.protocol}` }))
+      return
+    }
+    const previous = runtimes.get(id)
+    runtimes.set(id, {
+      endpoint,
+      token: typeof body?.token === 'string' && body.token !== '' ? body.token : previous?.token,
+      node: typeof body?.node === 'string' && body.node !== '' ? body.node : 'local',
+      authority: tenantAuthority(tenants.get(id)),
+      registeredAt: new Date().toISOString(),
+    })
+    saveRuntimes()
+    audit({ tenant: id, user: '-', status: 200, note: previous === undefined ? 'runtime-registered' : 'runtime-updated', node: runtimes.get(id).node, endpoint })
+    console.log(`mt-gateway: runtime ${previous === undefined ? 'registered' : 'updated'}: ${id} -> ${endpoint}`)
+    send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: true, tenant: id, endpoint }))
+  })
+}
+
+/**
+ * Constant-time comparison of two strings of possibly different lengths.
+ * @param left - presented value.
+ * @param right - expected value.
+ * @returns whether they are equal.
+ */
+function timingSafeEqualString(left, right) {
+  const a = Buffer.from(left)
+  const b = Buffer.from(right)
+  if (a.length !== b.length) return false
+  return crypto.timingSafeEqual(a, b)
+}
+
+/**
+ * Read and parse a small JSON request body.
+ * @param req - HTTP request.
+ * @param done - called with an error, or with the parsed body.
+ */
+function readJsonBody(req, done) {
+  const chunks = []
+  let size = 0
+  req.on('data', (chunk) => {
+    size += chunk.length
+    if (size > 65_536) {
+      req.destroy()
+      done(new Error('body too large'))
+      return
+    }
+    chunks.push(chunk)
+  })
+  req.on('end', () => {
+    try {
+      done(undefined, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
+    } catch (error) {
+      done(new Error(`body is not JSON: ${error.message}`))
+    }
+  })
+  req.on('error', (error) => { done(error) })
+}
+
 function handleRequest(req, res) {
   const url = new URL(req.url ?? '/', 'http://gateway.invalid')
   const localPort = req.socket.localPort
 
   // Operational endpoint: it enumerates tenants and usernames, so it answers
   // loopback callers only (bin/mt.sh status / smoke / accept all run locally).
+  // Node-facing: a node reports where one tenant runtime is and which launch
+  // token it printed. Key-authenticated, because claiming a tenant would let the
+  // caller intercept that tenant's traffic.
+  if (url.pathname === `${PREFIX}/registry/register` || url.pathname === `${PREFIX}/registry/unregister`) {
+    if (req.method !== 'POST') {
+      send(res, 405, { 'content-type': 'text/plain; charset=utf-8', allow: 'POST' }, 'method not allowed\n')
+      return
+    }
+    handleRegister(req, res)
+    return
+  }
+  if (url.pathname === `${PREFIX}/registry`) {
+    const presented = req.headers['x-mt-registry-key']
+    const remote = req.socket.remoteAddress ?? ''
+    const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
+    if (!loopback && (typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey))) {
+      send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
+      return
+    }
+    send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({
+      runtimes: Object.fromEntries([...runtimes].sort(([left], [right]) => left.localeCompare(right))),
+    }, null, 2))
+    return
+  }
   if (url.pathname === `${PREFIX}/health`) {
     const remote = req.socket.remoteAddress ?? ''
     if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
@@ -799,27 +925,30 @@ function handleUpgrade(req, socket, head) {
     return
   }
   const tenant = session.tenant
-  tenantAddress(tenant).then((address) => {
-    const upstream = net.connect(tenant.internalPort, address, () => {
-      const headers = { ...req.headers, host: tenantAuthority(tenant) }
-      const lines = [`${req.method} ${req.url} HTTP/1.1`]
-      for (const [name, value] of Object.entries(headers)) {
-        if (value === undefined) continue
-        lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : String(value)}`)
-      }
-      upstream.write(lines.join('\r\n') + '\r\n\r\n')
-      if (head?.length) upstream.write(head)
-      socket.pipe(upstream)
-      upstream.pipe(socket)
-    })
-    const close = () => { socket.destroy(); upstream.destroy() }
-    upstream.on('error', close)
-    socket.on('error', close)
-    socket.on('close', close)
-    upstream.on('close', close)
-  }).catch(() => {
-    socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
+  let address
+  try {
+    address = tenantAddress(tenant)
+  } catch (error) {
+    socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
+    return
+  }
+  const upstream = net.connect(address.port, address.host, () => {
+    const headers = { ...req.headers, host: tenantAuthority(tenant) }
+    const lines = [`${req.method} ${req.url} HTTP/1.1`]
+    for (const [name, value] of Object.entries(headers)) {
+      if (value === undefined) continue
+      lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : String(value)}`)
+    }
+    upstream.write(lines.join('\r\n') + '\r\n\r\n')
+    if (head?.length) upstream.write(head)
+    socket.pipe(upstream)
+    upstream.pipe(socket)
   })
+  const close = () => { socket.destroy(); upstream.destroy() }
+  upstream.on('error', close)
+  socket.on('error', close)
+  socket.on('close', close)
+  upstream.on('close', close)
 }
 
 // ---------------------------------------------------------------------------
@@ -865,8 +994,8 @@ function listen(port, options = {}) {
  *
  * Adding or removing a tenant must not disturb the tenants already being used,
  * so this never restarts the process: it swaps the registry, opens a listener
- * for a new edge port, closes one whose tenant is gone, and drops cached
- * addresses and launch tokens of tenants that no longer exist.
+ * for a new edge port, closes one whose tenant is gone, and forgets the runtime
+ * registration of a tenant that no longer exists.
  *
  * @param reason - why this ran, for the audit line.
  */
@@ -898,10 +1027,11 @@ function applyRegistry(reason) {
     console.log(`mt-gateway stopped listening on :${String(port)}`)
   }
 
+  let runtimeChanged = false
   for (const id of removed) {
-    tokenCache.delete(id)
-    addressCache.delete(id)
+    runtimeChanged = runtimes.delete(id) || runtimeChanged
   }
+  if (runtimeChanged) saveRuntimes()
 
   if (added.length > 0 || removed.length > 0) {
     console.log(`mt-gateway registry ${reason}: +${added.join(',') || '-'} -${removed.join(',') || '-'} (now ${String(tenants.size)})`)
@@ -913,7 +1043,9 @@ applyRegistry('boot')
 // Polling instead of fs.watch: the registry arrives through a bind mount, whose
 // watch semantics differ across kernels.
 fs.watchFile(CONFIG_FILE, { interval: 2000 }, () => { applyRegistry('reload') })
+const registeredCount = [...tenants.keys()].filter((id) => runtimes.has(id)).length
 console.log(`mt-gateway serving ${String(tenants.size)} tenant(s): ${[...tenants.keys()].join(', ')}` +
-  (TLS_OPTIONS === undefined
-    ? ' — 公开端口为明文 HTTP（尚未生成 TLS 证书）'
-    : ` — 公开端口为 HTTPS，运维入口为 http://127.0.0.1:${String(OPS_PORT)}`))
+  ` — ${String(registeredCount)} registered runtime(s)`)
+console.log(TLS_OPTIONS === undefined
+  ? 'mt-gateway public ports are plain HTTP (no TLS certificate yet)'
+  : `mt-gateway public ports are HTTPS, ops entry http://127.0.0.1:${String(OPS_PORT)}`)

@@ -114,14 +114,18 @@ echo "== 6. 租户 DSH cookie 不可跨运行时复用 =="
 DSH_COOKIE="$(awk '/dsh-auth/ { print $6"="$7 }' "$JAR" | tail -1)"
 if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
   OUT="$(docker run --rm --network mt-net \
-    -e "COOKIE=$DSH_COOKIE" -e "OWN=dsh-${TENANT}:${TENANT_PORT}" -e "OTHER=dsh-${PEER}:${PEER_PORT}" \
+    -e "COOKIE=$DSH_COOKIE" -e "OWN=dsh-${TENANT}:${TENANT_PORT}:dsh-${TENANT}.internal" \
+    -e "OTHER=dsh-${PEER}:${PEER_PORT}:dsh-${PEER}.internal" \
     "$IMAGE" node -e '
       // node:http (not fetch) because fetch drops an explicit Host header.
       const http = require("node:http")
+      // Each runtime is addressed with the authority the control plane uses;
+      // DSH derives its cookie name from that string, so probing with any other
+      // Host would just report a name mismatch instead of testing isolation.
       const ask = (target) => new Promise((resolve) => {
-        const [host, port] = target.split(":")
+        const [host, port, authority] = target.split(":")
         const request = http.request(
-          { host, port, path: "/", method: "GET", headers: { host: `127.0.0.1:${port}`, cookie: process.env.COOKIE } },
+          { host, port, path: "/", method: "GET", headers: { host: authority, cookie: process.env.COOKIE } },
           (response) => { response.resume(); resolve(response.statusCode) },
         )
         request.on("error", (error) => resolve(`err:${error.message}`))

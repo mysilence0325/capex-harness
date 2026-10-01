@@ -173,13 +173,55 @@ DSH 本身几乎不往 stdout 写（实测一个租户跑了几轮对话只有 1
 **注意**：这是本部署的容器。宿主 `daemon.json` 没有全局 `log-opts`，**其它系统的容器仍然无上限**，
 那不属于本部署的范围。
 
+## 0.4 运行时注册（控制面与运行时解耦）
+
+控制面**不再自己找容器**：它不挂 Docker socket，也不读容器日志。租户运行时的地址和启动
+token 由**运行它的那台机器**注册进来。
+
+```bash
+bin/mt.sh runtimes              # 控制面当前认识哪些运行时
+bin/mt.sh register <租户>        # 注册本机上的某个租户（自动取地址与 token）
+bin/mt.sh register <租户> --endpoint=http://10.0.0.9:3181 --token=<启动token> --node=node2
+bin/mt.sh unregister <租户>      # 让控制面忘掉它（数据不动）
+```
+
+`bin/mt.sh up` / `add` / `restart` / `model` 都会自动重新注册——**容器重建会换掉 bridge 地址，
+重启会换掉启动 token**，两者都必须重新上报，否则控制面会代理到旧地址，或拿着上一次的 token
+去激活（DSH 每次启动都会换 token，用旧的会被拒）。
+
+**协议**（节点 → 控制面，用 `state/registry.key` 认证）：
+
+```
+POST /__mt/registry/register    {"tenant":"alpha","endpoint":"http://…","token":"…","node":"node2"}
+POST /__mt/registry/unregister  {"tenant":"alpha"}
+GET  /__mt/registry             列出全部（loopback 免密钥，远端需要密钥）
+```
+
+**为什么这样设计**：
+
+| | 以前 | 现在 |
+|---|---|---|
+| 控制面怎么找运行时 | 读本地 Docker API 查容器 IP、读容器日志取 token | 只读注册表 |
+| 控制面权限 | 挂 `/var/run/docker.sock`（只读）——攻破网关等同于拿到宿主 root | 不挂任何 Docker |
+| 运行时在哪 | 必须与控制面同机 | 任意机器，只要能注册进来 |
+| 出故障时的可诊断性 | 容器不在本机就无从查起 | 未注册时页面直接提示该执行哪条命令 |
+
+**新增一个节点的三件事**：
+
+1. 该节点的租户容器要能被控制面连上；
+2. 租户的 profile patch 里必须有 `connection.trustedHosts`，值是控制面代理时使用的 authority
+   （`dsh-<租户>.internal`）——**DSH 的 Host/Origin 防护网拒绝它没被告知的非 loopback authority，
+   会对所有 `/api/*` 回 403**，表现为"界面能打开但什么都点不动"。`bin/render.js` 自动维护这个块，
+   老租户下次渲染时自动补上，不需要 `--force-patch`；
+3. 在该节点执行 `bin/mt.sh register <租户> --endpoint=… --node=<节点名>`。
+
 ## 1. 隔离模型
 
 | 维度 | 隔离方式 |
 |---|---|
 | 身份 | 网关按租户校验用户名/密码（scrypt），签发只属于该租户的会话 cookie |
 | 会话 | 每个租户一个容器，`DSH_HOME`、`workspace`、`profiles` 都是独立目录 |
-| DSH cookie | DSH 的浏览器 cookie 名由 Host authority 派生；网关对每个租户改写为 `127.0.0.1:<租户端口>`，因此 **一个租户的 cookie 在另一个租户那里必然 401** |
+| DSH cookie | DSH 的浏览器 cookie 名由 Host authority 派生；网关对每个租户改写为 `dsh-<租户>.internal`（稳定名字，与运行位置无关），因此 **一个租户的 cookie 在另一个租户那里必然 401** |
 | 凭据 | 每个租户自己的 `.credentials.yaml`（各自随机签名密钥），模型 key 按租户注入 |
 | 执行 | 每租户一个容器（独立 PID/挂载/网络命名空间）+ 内存/CPU/PID 限额；宿主内核 3.10 无法跑 DSH 自带文件沙箱，容器即边界 |
 | 网络 | 租户容器不发布任何端口，只有网关能被访问；出网必须经 `mt-egress-proxy`，私网目标被拒 |

@@ -22,6 +22,9 @@
 #   bin/mt.sh key <id> <value>   set a tenant's model key in .env
 #   bin/mt.sh model              apply model.patch.yml + model.env to every tenant and restart them
 #   bin/mt.sh render             re-render docker-compose.yml from tenants.json
+#   bin/mt.sh register <id>      register a tenant runtime with the control plane
+#   bin/mt.sh unregister <id>    make the control plane forget a tenant runtime
+#   bin/mt.sh runtimes           list the runtimes the control plane knows about
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +44,8 @@ fi
 [ -f .env ] && set -a && . ./.env && set +a
 
 node_run() { docker run --rm -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"; }
+# 需要从 stdin 读数据的场合：docker run 不挂 -i 时，容器里读到的是空输入。
+node_run_stdin() { docker run --rm -i -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"; }
 
 require_render() {
   if [ ! -f docker-compose.yml ]; then
@@ -62,8 +67,8 @@ cmd_up() {
   ensure_egress_proxy
   # 收紧租户容器对宿主端口的访问；失败只提示，不让 up 半途而废（doctor 会报出来）。
   bash bin/isolate.sh apply || echo "    !! 租户隔离规则未应用，执行 bin/isolate.sh status 查看"
-  # 重建容器会换掉租户的 bridge 地址，网关缓存里可能还是旧的；重启一次让它从零开始。
-  docker restart mt-gateway >/dev/null 2>&1 || true
+  # 网关只认注册表里的运行时地址，自己不看 Docker；容器重建后地址会变，必须重新注册。
+  register_all_tenants
   cmd_wait
   cmd_url
 }
@@ -75,6 +80,158 @@ gw_base() {
   else
     echo "http://127.0.0.1:${MT_EDGE_PORT:-8090}"
   fi
+}
+
+# 租户容器的名字（注册表里优先，取不到就按约定）。
+tenant_container() {
+  local id="$1" name
+  name="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.container ?? ("mt-dsh-"+t.id)))' "$id" 2>/dev/null | tr -d '\r')"
+  if [ -n "$name" ]; then echo "$name"; else echo "mt-dsh-$id"; fi
+}
+
+# 从容器日志里取 DSH 打印的启动 token。
+#
+# 只取"本次启动之后"的日志：容器重启后 docker logs 仍保留上一次的 token 行，
+# 直接取最后一条会在 DSH 打印新 token 之前抓到旧值，注册上去就是过期凭据。
+tenant_token() {
+  local container="$1" started
+  started="$(docker inspect "$container" --format '{{.State.StartedAt}}' 2>/dev/null | tr -d '\r')"
+  if [ -n "$started" ]; then
+    docker logs --since "$started" "$container" 2>&1 | grep -oE 'dsh web: *\S+' | tail -1 | sed 's/.*token=//' | tr -d '\r'
+  else
+    docker logs "$container" 2>&1 | grep -oE 'dsh web: *\S+' | tail -1 | sed 's/.*token=//' | tr -d '\r'
+  fi
+}
+
+tenant_port() {
+  node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.internalPort ?? ""))' "$1" 2>/dev/null | tr -d '\r'
+}
+
+# 向控制面注册一个租户的运行时：地址 + 启动 token。
+#
+# 这一步是控制面与运行时解耦的关键：网关不再自己找容器，只代理注册进来的地址。
+# 因此任何能创建容器的地方（本机现在、节点代理或 Swarm 以后）只要会调这个接口就能接入。
+register_tenant() {
+  local id="$1" endpoint="${2:-}" token="${3:-}" node="${4:-${MT_NODE:-local}}"
+  local container key port body response
+  container="$(tenant_container "$id")"
+  if [ -z "$endpoint" ]; then
+    local ip
+    ip="$(docker inspect "$container" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\r')"
+    if [ -z "$ip" ]; then
+      echo "    !! ${id}: 容器 ${container} 没有网络地址（还没启动？）" >&2
+      return 1
+    fi
+    port="$(tenant_port "$id")"
+    if [ -z "$port" ]; then
+      echo "    !! ${id}: 注册表里没有 internalPort" >&2
+      return 1
+    fi
+    endpoint="http://${ip}:${port}"
+    # 本机注册：等 DSH 打印出启动 token 再上报，否则激活会失败。
+    # （远端节点会用 --endpoint 显式注册，不在这里等。）
+    if [ -z "$token" ]; then
+      local waited=0
+      token="$(tenant_token "$container")"
+      while [ -z "$token" ] && [ "$waited" -lt "${MT_REGISTER_WAIT:-90}" ]; do
+        sleep 3
+        waited=$((waited + 3))
+        token="$(tenant_token "$container")"
+      done
+    fi
+  fi
+  key="$(tr -d '\r\n' < state/registry.key 2>/dev/null || true)"
+  if [ -z "$key" ]; then
+    echo "    !! 控制面还没生成注册密钥 state/registry.key（先启动网关）" >&2
+    return 1
+  fi
+  body="$(printf '{"tenant":"%s","endpoint":"%s","token":"%s","node":"%s"}' "$id" "$endpoint" "$token" "$node")"
+  response="$(curl -sS --max-time 10 -X POST \
+    -H "x-mt-registry-key: ${key}" -H 'content-type: application/json' \
+    --data "$body" "$(gw_base)/__mt/registry/register" 2>&1 || true)"
+  case "$response" in
+    *'"ok":true'*) return 0 ;;
+    *) echo "    !! ${id}: 注册失败 -> ${response}" >&2; return 1 ;;
+  esac
+}
+
+# 注册本机上所有已就绪的租户。容器重建会换掉 bridge 地址，所以每次 up 都要重来一遍。
+register_all_tenants() {
+  echo "==> 注册运行时地址到控制面"
+  local ids id ok=0 failed=0
+  ids="$(node_run -e 'const r=require("/w/tenants.json");process.stdout.write((r.tenants??[]).map(t=>t.id).join(" "))' 2>/dev/null | tr -d '\r')"
+  for id in $ids; do
+    if register_tenant "$id"; then
+      ok=$((ok + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done
+  echo "    已注册 ${ok} 个租户$([ "$failed" -gt 0 ] && echo "，${failed} 个失败" || true)"
+  return 0
+}
+
+# 手动注册（远端节点或排查时用）。
+cmd_register() {
+  local id="" endpoint="" token="" node="${MT_NODE:-local}" arg
+  for arg in "$@"; do
+    case "$arg" in
+      --endpoint=*) endpoint="${arg#*=}" ;;
+      --token=*) token="${arg#*=}" ;;
+      --node=*) node="${arg#*=}" ;;
+      *) [ -z "$id" ] && id="$arg" ;;
+    esac
+  done
+  if [ -z "$id" ]; then
+    echo "用法: bin/mt.sh register <租户> [--endpoint=http://host:port] [--token=<启动token>] [--node=<节点名>]" >&2
+    return 2
+  fi
+  if register_tenant "$id" "$endpoint" "$token" "$node"; then
+    echo "已注册 ${id}（节点 ${node}）"
+    return 0
+  fi
+  return 1
+}
+
+cmd_unregister() {
+  local id="${1:-}" key
+  if [ -z "$id" ]; then echo "用法: bin/mt.sh unregister <租户>" >&2; return 2; fi
+  key="$(tr -d '\r\n' < state/registry.key 2>/dev/null || true)"
+  curl -sS --max-time 10 -X POST -H "x-mt-registry-key: ${key}" -H 'content-type: application/json' \
+    --data "{\"tenant\":\"${id}\"}" "$(gw_base)/__mt/registry/unregister" 2>&1 | sed 's/^/  /'
+  echo
+}
+
+# 列出控制面当前认识的运行时。
+cmd_runtimes() {
+  local body
+  body="$(curl -sS --max-time 10 "$(gw_base)/__mt/registry" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    echo "控制面没有响应（bin/mt.sh status 看容器状态）" >&2
+    return 1
+  fi
+  printf '%s' "$body" | node_run_stdin -e '
+let text = ""
+process.stdin.on("data", (chunk) => { text += chunk })
+process.stdin.on("end", () => {
+  const table = JSON.parse(text || "{}").runtimes ?? {}
+  const ids = Object.keys(table).sort()
+  if (ids.length === 0) {
+    console.log("  还没有租户注册运行时：bin/mt.sh register <租户>")
+    return
+  }
+  console.log("  租户       节点        地址                                     注册时间")
+  for (const id of ids) {
+    const entry = table[id]
+    console.log(
+      "  " + id.padEnd(11) +
+      String(entry.node ?? "?").padEnd(12) +
+      String(entry.endpoint ?? "?").padEnd(40) +
+      String(entry.registeredAt ?? "").slice(0, 19),
+    )
+  }
+})
+'
 }
 
 health() { curl -fsS "$(gw_base)/__mt/health" 2>/dev/null; }
@@ -113,52 +270,36 @@ ensure_egress_proxy() {
   "${COMPOSE[@]}" up -d 2>&1 | tail -2
 }
 
-# 某个租户的运行时是否真的在接受连接。
+# 等待「全部」租户就绪。
 #
-# DSH 在 stdout 打出 "dsh web: http://…" 那行之后才绑定端口，网关健康接口的 ready
-# 只看那行日志，因此刚重启完的一小段时间里它会说 ready 而连接仍被拒（502）。
-# 这里直接连一次它的内部端口：任何 HTTP 状态（401/403 都是 DSH 的正常拒绝）都算在监听。
-tenant_listening() {
-  local id="$1" ip port code
-  ip="$(docker inspect "mt-dsh-${id}" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
-  if [ -z "$ip" ]; then return 1; fi
-  port="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.internalPort ?? ""))' "$id" 2>/dev/null | tr -d '\r')"
-  if [ -z "$port" ]; then return 1; fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://${ip}:${port}/" 2>/dev/null || true)"
-  if [ -n "$code" ] && [ "$code" != "000" ]; then return 0; fi
-  return 1
-}
-
-# 等待「全部」租户真的可服务：既要网关认为就绪，也要端口真的在监听。
+# ready 由控制面给出：它逐个探测注册进来的地址，所以"就绪"现在是"真的连得上"，
+# 而不是早期那种"日志里出现了启动行"。
 cmd_wait() {
   echo "==> 等待租户运行时就绪"
-  local ids ready total id pending
-  ids="$(node_run -e 'const r=require("/w/tenants.json");process.stdout.write(r.tenants.map(t=>t.id).join(" "))' 2>/dev/null | tr -d '\r')"
+  local ready total pending
   for _ in $(seq 1 90); do
     ready="$(health | tr -d ' \n' | grep -o '"ready":true' | wc -l | tr -d ' ')"
     total="$(health | tr -d ' \n' | grep -o '"id":"' | wc -l | tr -d ' ')"
-    pending=""
     if [ -n "$total" ] && [ "$total" != "0" ] && [ "$ready" = "$total" ]; then
-      for id in $ids; do
-        if ! tenant_listening "$id"; then pending="$pending $id"; fi
-      done
-      if [ -z "$pending" ]; then break; fi
+      pending=""
+      break
     fi
+    pending="yes"
     sleep 2
   done
   if [ -n "${pending:-}" ]; then
-    echo "    !! 以下租户仍在启动（端口尚未监听）:$pending"
+    echo "    !! 仍有租户未就绪（${ready:-0}/${total:-0}）：bin/mt.sh runtimes 看注册情况，bin/mt.sh logs <租户> 看运行时日志"
   fi
-  health || echo "(网关还没就绪，查看 bin/mt.sh logs)"
+  health || echo "(网关还没就绪，查看 bin/mt.sh logs gateway)"
   echo
 }
 
 # 等待单个租户就绪，用于重启某一个租户之后。
-# 模式里允许 id 与 ready 之间存在其它字段（例如 container），否则会把已就绪的租户误判为未就绪。
+# 模式里允许 id 与 ready 之间存在其它字段（例如 container/endpoint），否则会误判。
 wait_tenant_ready() {
   local id="$1" tries="${2:-60}"
   for _ in $(seq 1 "$tries"); do
-    if health | tr -d ' \n' | grep -qE "\"id\":\"${id}\"[^}]*\"ready\":true" && tenant_listening "$id"; then
+    if health | tr -d ' \n' | grep -qE "\"id\":\"${id}\"[^}]*\"ready\":true"; then
       return 0
     fi
     sleep 2
@@ -193,10 +334,16 @@ cmd_logs() {
 }
 
 cmd_restart() {
-  if [ -n "${1:-}" ]; then
-    docker restart "mt-dsh-${1}"
+  local id="${1:-}"
+  if [ -n "$id" ]; then
+    docker restart "mt-dsh-${id}"
+    # 重启后容器地址可能变，控制面只认注册表，所以必须重新注册。
+    register_tenant "$id"
+    wait_tenant_ready "$id" 60 || echo "    !! ${id} 未在预期时间内就绪" >&2
   else
     "${COMPOSE[@]}" restart
+    register_all_tenants
+    cmd_wait
   fi
 }
 
@@ -296,6 +443,8 @@ cmd_add() {
   echo "==> 启动租户 ${id}（只动这一个 service）"
   "${COMPOSE[@]}" up -d "$service" 2>&1 | tail -2
 
+  # 控制面只看注册表，新租户必须先注册（等它打出启动 token）。
+  register_tenant "$id"
   if wait_tenant_ready "$id" 60; then
     echo "    ${id} 已就绪"
   else
@@ -324,6 +473,8 @@ cmd_model() {
   for id in $(grep -o '"id": *"[^"]*"' tenants.json 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' || true); do
     docker restart "mt-dsh-${id}" >/dev/null
   done
+  # 重启后容器地址可能变，控制面只认注册表，所以统一重新注册。
+  register_all_tenants
   cmd_wait
   echo "==> 模型配置已应用到全部租户"
 }
@@ -341,6 +492,9 @@ case "${1:-}" in
   accept)  shift; cmd_accept "$@" ;;
   doctor)  bash bin/doctor.sh ;;
   isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
+  register)   shift; cmd_register "$@" ;;       # 向控制面注册租户运行时（地址 + 启动 token）
+  unregister) shift; cmd_unregister "$@" ;;     # 让控制面忘掉某个租户的运行时
+  runtimes)   cmd_runtimes ;;                   # 列出控制面当前认识的运行时
   usage)   shift; bash bin/usage.sh "$@" ;;     # 按租户汇总模型用量（--tenant/--tail）
   cert)    shift; bash bin/make-cert.sh "$@" ;;   # 生成自签证书；之后 bin/mt.sh up 切到 HTTPS
   backup)  shift; bash bin/backup.sh "$@" ;;
@@ -353,5 +507,6 @@ case "${1:-}" in
   passwd)  shift; node_run bin/registry.js passwd "$@"; node_run bin/render.js ;;
   remove)  shift; cmd_remove "$@" ;;
   key)     shift; cmd_key "$@" ;;
+  *)       echo "未知命令: ${1:-}" >&2; sed -n '/^#   bin\/mt.sh/,/^#$/p' "$0" | sed 's/^#   /  /; s/^#$//' >&2; exit 2 ;;
   *)       sed -n '2,22p' "$0" ;;
 esac

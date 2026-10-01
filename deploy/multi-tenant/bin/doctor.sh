@@ -84,6 +84,43 @@ if [ -n "$HEALTH" ]; then
 else
   bad "健康接口无响应（本机 curl $GW_BASE/__mt/health）"
 fi
+head_ "运行时注册"
+# 控制面不再看 Docker，只代理注册进来的地址。没有注册 = 该租户登录后必然 503。
+REGISTRY="$(curl -fsS "$GW_BASE/__mt/registry" 2>/dev/null || true)"
+if [ -z "$REGISTRY" ]; then
+  bad "注册表接口无响应（$GW_BASE/__mt/registry）"
+else
+  REG_COUNT="$(printf '%s' "$REGISTRY" | tr -d ' \n' | grep -o '"endpoint":"' | wc -l)"
+  TENANT_COUNT="$(printf '%s\n' "$TENANTS" | grep -c . || true)"
+  if [ "${REG_COUNT:-0}" = "${TENANT_COUNT:-0}" ]; then
+    ok "${REG_COUNT}/${TENANT_COUNT} 个租户都已注册运行时"
+  else
+    bad "只有 ${REG_COUNT}/${TENANT_COUNT} 个租户注册了运行时：bin/mt.sh runtimes 查看，bin/mt.sh register <租户> 补注册"
+  fi
+  # 逐个核对：注册了但要连不上，同样是故障。
+  for t in $TENANTS; do
+    ENTRY="$(printf '%s' "$REGISTRY" | tr -d ' \n' | grep -o "\"${t}\":{[^}]*}" || true)"
+    if [ -z "$ENTRY" ]; then
+      bad "  $t 未注册"
+      continue
+    fi
+    EP="$(printf '%s' "$ENTRY" | grep -o '"endpoint":"[^"]*"' | cut -d'"' -f4)"
+    NODE="$(printf '%s' "$ENTRY" | grep -o '"node":"[^"]*"' | cut -d'"' -f4)"
+    CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 4 "$EP/" 2>/dev/null || true)"
+    if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then
+      ok "  $t -> $EP （节点 $NODE，HTTP $CODE）"
+    else
+      bad "  $t -> $EP 连不上（节点 $NODE）"
+    fi
+  done
+fi
+# 控制面不该再需要 Docker：一旦挂上了 socket，"攻破网关 = 拿到宿主" 就回来了。
+if docker inspect mt-gateway --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'docker.sock'; then
+  bad "网关仍挂载 Docker socket（等于宿主 root 等价物）"
+else
+  ok "网关未挂载 Docker socket"
+fi
+
 for p in 8090 8091 8092 8093; do
   if printf '%s\n' "$LISTEN" | grep -q ":$p "; then ok "端口 $p 在监听"; else warn "端口 $p 未监听"; fi
 done
