@@ -1,5 +1,5 @@
 <div class="_markdown_404681">
-  <p>
+  <p data-has-math="true">
     #text "Einstein wrote "
     <span class="katex">
       <span class="katex-mathml">
@@ -182,7 +182,7 @@
             #text "∇"
           <span class="mord mathnormal">
             #text "p"
-  <p>
+  <p data-has-math="true">
     #text "Backslash inline "
     <span class="katex">
       <span class="katex-mathml">

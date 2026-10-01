@@ -1,5 +1,5 @@
 <div class="_markdown_404681">
-  <p>
+  <p data-has-math="true">
     #text "Trusted commands stay off: "
     <span class="katex">
       <span class="katex-mathml">
@@ -18,7 +18,7 @@
             <span class="mord" style="color: rgb(204, 0, 0);">
               #text "\\href"
     #text "."
-  <p>
+  <p data-has-math="true">
     #text "Unbalanced errors render the error arm: "
     <span class="katex-error" style="color: rgb(204, 0, 0);" title="ParseError: KaTeX parse error: Unexpected end of input in a macro argument, expected '}' at end of input: \\frac{">
       #text "\\frac{"
@@ -123,3 +123,120 @@
               <span class="vlist-r">
                 <span class="vlist" style="height: 0.0839em;">
                   <span>
+  <ul data-has-math="true">
+    <li>
+      <p>
+        #text "Math fence in a list:"
+      <span class="katex-display">
+        <span class="katex">
+          <span class="katex-mathml">
+            <math display="block" xmlns="http://www.w3.org/1998/Math/MathML">
+              <semantics>
+                <mrow>
+                  <munderover>
+                    <mo>
+                      #text "∑"
+                    <mrow>
+                      <mi>
+                        #text "n"
+                      <mo>
+                        #text "="
+                      <mn>
+                        #text "1"
+                    <mi mathvariant="normal">
+                      #text "∞"
+                  <mfrac>
+                    <mn>
+                      #text "1"
+                    <msup>
+                      <mi>
+                        #text "n"
+                      <mn>
+                        #text "2"
+                <annotation encoding="application/x-tex">
+                  #text "\\sum_{n=1}^{\\infty} \\frac{1}{n^2}\n"
+          <span aria-hidden="true" class="katex-html">
+            <span class="base">
+              <span class="strut" style="height: 2.9185em; vertical-align: -1.2671em;">
+              <span class="mop op-limits">
+                <span class="vlist-t vlist-t2">
+                  <span class="vlist-r">
+                    <span class="vlist" style="height: 1.6514em;">
+                      <span style="top: -1.8829em; margin-left: 0em;">
+                        <span class="pstrut" style="height: 3.05em;">
+                        <span class="sizing reset-size6 size3 mtight">
+                          <span class="mord mtight">
+                            <span class="mord mathnormal mtight">
+                              #text "n"
+                            <span class="mrel mtight">
+                              #text "="
+                            <span class="mord mtight">
+                              #text "1"
+                      <span style="top: -3.05em;">
+                        <span class="pstrut" style="height: 3.05em;">
+                        <span>
+                          <span class="mop op-symbol large-op">
+                            #text "∑"
+                      <span style="top: -4.3em; margin-left: 0em;">
+                        <span class="pstrut" style="height: 3.05em;">
+                        <span class="sizing reset-size6 size3 mtight">
+                          <span class="mord mtight">
+                            <span class="mord mtight">
+                              #text "∞"
+                    <span class="vlist-s">
+                      #text "​"
+                  <span class="vlist-r">
+                    <span class="vlist" style="height: 1.2671em;">
+                      <span>
+              <span class="mspace" style="margin-right: 0.1667em;">
+              <span class="mord">
+                <span class="mopen nulldelimiter">
+                <span class="mfrac">
+                  <span class="vlist-t vlist-t2">
+                    <span class="vlist-r">
+                      <span class="vlist" style="height: 1.3214em;">
+                        <span style="top: -2.314em;">
+                          <span class="pstrut" style="height: 3em;">
+                          <span class="mord">
+                            <span class="mord">
+                              <span class="mord mathnormal">
+                                #text "n"
+                              <span class="msupsub">
+                                <span class="vlist-t">
+                                  <span class="vlist-r">
+                                    <span class="vlist" style="height: 0.7401em;">
+                                      <span style="top: -2.989em; margin-right: 0.05em;">
+                                        <span class="pstrut" style="height: 2.7em;">
+                                        <span class="sizing reset-size6 size3 mtight">
+                                          <span class="mord mtight">
+                                            #text "2"
+                        <span style="top: -3.23em;">
+                          <span class="pstrut" style="height: 3em;">
+                          <span class="frac-line" style="border-bottom-width: 0.04em;">
+                        <span style="top: -3.677em;">
+                          <span class="pstrut" style="height: 3em;">
+                          <span class="mord">
+                            <span class="mord">
+                              #text "1"
+                      <span class="vlist-s">
+                        #text "​"
+                    <span class="vlist-r">
+                      <span class="vlist" style="height: 0.686em;">
+                        <span>
+                <span class="mclose nulldelimiter">
+  <h2 data-has-math="true">
+    #text "Heading math "
+    <span class="katex">
+      <span class="katex-mathml">
+        <math xmlns="http://www.w3.org/1998/Math/MathML">
+          <semantics>
+            <mrow>
+              <mi>
+                #text "θ"
+            <annotation encoding="application/x-tex">
+              #text "\\theta"
+      <span aria-hidden="true" class="katex-html">
+        <span class="base">
+          <span class="strut" style="height: 0.6944em;">
+          <span class="mord mathnormal" style="margin-right: 0.0278em;">
+            #text "θ"
