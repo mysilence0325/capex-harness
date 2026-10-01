@@ -1,0 +1,15 @@
+# 部署实例的私密与运行时数据：不进版本库
+.env
+model.env
+tenants.json
+tenants/
+state/
+logs/
+entry-urls.txt
+
+# 由 bin/render.js 生成
+docker-compose.yml
+
+# 工具残留
+__pycache__/
+*.pyc

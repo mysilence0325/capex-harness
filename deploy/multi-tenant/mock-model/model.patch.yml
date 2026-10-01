@@ -1,0 +1,16 @@
+# 验收用的模型目录：两个模型，指向 mt-net 上的假模型服务。
+# bin/accept.sh 会把它临时拼进被测租户的 profile patch，测完恢复原状。
+- id: llm-pi-ai
+  config:
+    providers:
+      accept-mock:
+        displayName: 验收假模型
+        api: openai-completions
+        baseURL: http://mock-model:8080/v1
+        apiKeyEnv: MOCK_MODEL_KEY
+        models:
+          - id: mock-cheap
+          - id: mock-strong
+            reasoningEfforts:
+              off:
+              high: high

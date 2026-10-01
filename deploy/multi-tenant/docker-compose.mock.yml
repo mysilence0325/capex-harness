@@ -1,0 +1,14 @@
+# 验收用覆盖文件：把一个 OpenAI 兼容的假模型放进 mt-net。
+# 只在 `bin/mt.sh accept` 期间启动，不参与生产 compose。
+#
+#   docker-compose -f docker-compose.yml -f docker-compose.mock.yml up -d mock-model
+services:
+  mock-model:
+    build: ./mock-model
+    image: mt-mock-model:local
+    container_name: mt-mock-model
+    restart: "no"
+    networks: [mt-net]
+    environment:
+      MOCK_MODEL_PORT: "8080"
+    # 不发布端口：只有 mt-net 上的租户容器能访问它。

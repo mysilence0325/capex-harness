@@ -1,0 +1,48 @@
+{
+  "tenants": [
+    {
+      "id": "alpha",
+      "title": "Alpha",
+      "internalPort": 3181,
+      "service": "dsh-alpha",
+      "container": "mt-dsh-alpha",
+      "hosts": [
+        "alpha.dsh.local"
+      ],
+      "users": [
+        {
+          "name": "alice",
+          "passwordHash": "scrypt$<salt-hex>$<digest-hex>"
+        }
+      ],
+      "limits": {
+        "memory": "2g",
+        "cpus": "1.5",
+        "pids": 512
+      },
+      "edgePort": 8091
+    },
+    {
+      "id": "beta",
+      "title": "Beta",
+      "internalPort": 3182,
+      "service": "dsh-beta",
+      "container": "mt-dsh-beta",
+      "hosts": [
+        "beta.dsh.local"
+      ],
+      "users": [
+        {
+          "name": "bob",
+          "passwordHash": "scrypt$<salt-hex>$<digest-hex>"
+        }
+      ],
+      "limits": {
+        "memory": "2g",
+        "cpus": "1.5",
+        "pids": 512
+      },
+      "edgePort": 8092
+    }
+  ]
+}

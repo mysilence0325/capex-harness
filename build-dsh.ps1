@@ -6,24 +6,27 @@
   Modes:
     build      Build every face: native system, host libs, client bundles, Web dist, Desktop main bundle.
     dev        Build, then launch the Desktop application from source (no packaging, no runtime download).
-    dir        Full unpacked Windows application (electron-builder --dir): fastest shippable output.
+    dir        Unpacked Windows application (electron-builder --dir): the fastest shippable output.
     installer  Windows installer (unsigned by default; -Signed selects the signed path).
 
-  This checkout has no .git, so the build record needs an explicit commit hash: the script
-  exports DSH_CLIENT_COMMIT_HASH (-CommitHash, default 0000000) before every pnpm step.
+  Both build records need a source commit. A checkout with .git supplies it; otherwise
+  -CommitHash supplies the client record (7-40 hex) and its repetition the 40-character
+  desktop record. Desktop packaging always reads the checkout with git, so it needs a
+  repository: run "git init" and commit once when the tree was extracted without .git.
 
   dir/installer run the release pipeline: official build, npm packs of dsh/desktop-host/vendor,
-  the bundled Node + Python runtime download, electron-builder, and a packaged-runtime smoke
-  check. Expect 20+ minutes, network access, and several GB of free space.
+  a native system build, the bundled Node + Python runtime download, electron-builder, and a
+  packaged-runtime smoke check. Expect 20+ minutes, network access, and several GB free.
+  Windows packaging also needs apps/desktop/.env.windows (copy the .example beside it).
 
 .PARAMETER Mode
   build (default) | dev | dir | installer
 
 .PARAMETER CommitHash
-  7 to 40 hexadecimal characters recorded as the source commit. Used when .git is absent.
+  7 to 40 hexadecimal characters used when .git is absent.
 
 .PARAMETER Port
-  Override the application port (default: 19387 for the Desktop shell, 3080 for Web).
+  Informational: override the application port in the profile patch (Desktop defaults to 19387).
 
 .PARAMETER Signed
   With -Mode installer, use the signed Windows packaging path (needs the signing environment).
@@ -33,15 +36,10 @@
 
 .EXAMPLE
   .\build-dsh.ps1
-  Build every face with the fixes in this checkout.
-
 .EXAMPLE
   .\build-dsh.ps1 -Mode dev
-  Build and launch the Desktop application from source.
-
 .EXAMPLE
   .\build-dsh.ps1 -Mode dir
-  Produce an unpacked Windows application under apps\\desktop\\.desktop-build.
 #>
 [CmdletBinding()]
 param(
@@ -67,8 +65,8 @@ function Write-Step([string] $message) {
 
 function Invoke-Pnpm([string[]] $arguments) {
   Write-Host ("    pnpm " + ($arguments -join ' ')) -ForegroundColor DarkGray
-  # pnpm writes progress and warnings to stderr; ErrorActionPreference Stop would
-  # turn those into terminating errors, so failures are read from the exit code.
+  # pnpm writes progress and warnings to stderr, and ErrorActionPreference Stop would turn
+  # those into terminating errors; failures are read from the exit code instead.
   $previous = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try { & pnpm @arguments } finally { $ErrorActionPreference = $previous }
@@ -84,20 +82,29 @@ foreach ($tool in @('node', 'pnpm')) {
   if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool is not on PATH" }
 }
 
-# Two build records reject a missing or stale commit, and their resolvers call git when
-# no explicit value is present: the client record takes 7-40 hex characters and the desktop
-# release record needs exactly 40. Both are derived from -CommitHash on a git-less checkout.
-$env:DSH_CLIENT_COMMIT_HASH = $CommitHash
-$repeats = [math]::Ceiling(40 / $CommitHash.Length)
-$env:DSH_DESKTOP_BUILD_COMMIT = ($CommitHash * $repeats).Substring(0, 40).ToLowerInvariant()
+# --- Build identity ------------------------------------------------------------------------
+$gitCommit = $null
+if (Test-Path (Join-Path $repo '.git')) {
+  $gitCommit = (& git -C $repo rev-parse HEAD 2>$null | Select-Object -First 1)
+}
+if ($gitCommit -match '^[0-9a-fA-F]{40}$') {
+  $env:DSH_CLIENT_COMMIT_HASH = $gitCommit.Substring(0, 7).ToLowerInvariant()
+  $env:DSH_DESKTOP_BUILD_COMMIT = $gitCommit.ToLowerInvariant()
+  $identity = "git $($env:DSH_CLIENT_COMMIT_HASH)"
+} else {
+  $repeats = [math]::Ceiling(40 / $CommitHash.Length)
+  $env:DSH_CLIENT_COMMIT_HASH = $CommitHash
+  $env:DSH_DESKTOP_BUILD_COMMIT = ($CommitHash * $repeats).Substring(0, 40).ToLowerInvariant()
+  $identity = "explicit $CommitHash (no .git in this checkout)"
+}
 Write-Step "Repository $repo"
-Write-Host "    mode: $Mode | commit hash: $CommitHash | desktop record: $($env:DSH_DESKTOP_BUILD_COMMIT) | node: $(node --version) | pnpm: $(pnpm --version)"
+Write-Host "    mode: $Mode | source: $identity | node: $(node --version) | pnpm: $(pnpm --version)"
 
 if ($Mode -eq 'dev') {
-  $running = Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue
-  if ($running) {
-    throw ('the Desktop application is running (pid ' + (($running | ForEach-Object { $_.Id }) -join ', ') +
-      '); it holds the single-instance lock on the desktop profile. Quit it from the system tray and rerun.')
+  $running = @(Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue)
+  if ($running.Count -gt 0) {
+    $pids = ($running | ForEach-Object { $_.Id }) -join ', '
+    throw "the Desktop application is running (pid $pids) and holds the single-instance lock on the desktop profile; quit it from the system tray and rerun"
   }
 }
 
@@ -111,22 +118,22 @@ Write-Step 'Building every face (native system, host libs, client bundles, Web d
 Invoke-Pnpm @('run', 'build')
 
 if ($Port -ne 0) {
-  Write-Host "    port override requested: $Port (set webserver.config.port in the profile patch; the Desktop shell defaults to 19387)" -ForegroundColor Yellow
+  Write-Host "    port $Port requested: set webserver.config.port in the profile patch; the Desktop shell defaults to 19387" -ForegroundColor Yellow
 }
 
-# --- Mode-specific completion --------------------------------------------------------------
 switch ($Mode) {
   'build' {
     Write-Step 'Build complete'
-    Write-Host '    artifacts: packages/*/lib (bundles), apps/web/dist (shell), apps/desktop/lib (main bundle)'
+    Write-Host '    artifacts: packages/*/lib (plugin bundles), apps/web/dist (Web shell), apps/desktop/lib (Desktop main bundle)'
   }
   'dev' {
     Write-Step 'Launching the Desktop application from source'
     Invoke-Pnpm @('run', 'start:desktop')
   }
   'dir' {
-    Write-Step 'Packaging an unpacked Windows application'
-    Invoke-Pnpm @('run', 'package:desktop:win:x64:dir')
+    # Local packaging is unsigned: the signed path validates the certificate environment.
+    Write-Step 'Packaging an unpacked Windows application (unsigned)'
+    Invoke-Pnpm @('--filter', '@deepseek-ai/dsh-desktop', 'run', 'package:dir', '--', '--unsigned')
     Write-Step 'Package complete'
     if (Test-Path $desktopBuildRoot) {
       Get-ChildItem $desktopBuildRoot -Recurse -Directory -Filter 'artifacts' -ErrorAction SilentlyContinue |
@@ -134,9 +141,10 @@ switch ($Mode) {
     }
   }
   'installer' {
-    $task = if ($Signed) { 'package:desktop:win:x64' } else { 'package:desktop:win:x64:unsigned' }
-    Write-Step "Packaging a Windows installer ($task)"
-    Invoke-Pnpm @('run', $task)
+    $forward = if ($Signed) { @() } else { @('--', '--unsigned') }
+    $label = if ($Signed) { 'signed' } else { 'unsigned' }
+    Write-Step "Packaging a Windows installer ($label)"
+    Invoke-Pnpm (@('--filter', '@deepseek-ai/dsh-desktop', 'run', 'package') + $forward)
     Write-Step 'Installer complete'
     if (Test-Path $desktopBuildRoot) {
       Get-ChildItem $desktopBuildRoot -Recurse -File -Include '*.exe' -ErrorAction SilentlyContinue |

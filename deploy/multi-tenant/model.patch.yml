@@ -1,0 +1,38 @@
+# 所有租户共用的模型服务声明（顶层 YAML 数组）。bin/render.js 会把本文件原样写进
+# 每个租户 profile patch 的标记块里（幂等：重复渲染只替换该块，不动租户自己的设置）。
+#
+# 规则（DSH 模型适配器约定）：
+#   * 自定义 route 必须给全 api / baseURL / models 三样，route 名自己起，唯一即可。
+#   * api 三选一：openai-completions | openai-responses | anthropic-messages
+#   * apiKeyEnv 是「凭据引用」= 环境变量名，不是明文；值写在 model.env 里。
+#     内网无鉴权的推理服务也要给个占位 key，或改用 headers 传 Authorization。
+#   * models 列表会整体替换该 route 的模型目录，要用的模型都要列上。
+#   * 一行 patch 替换整行 config：llm-pi-ai 这一行里要写全所有 providers。
+#
+# 本文件里只要还有 CHANGE-ME，render 就会跳过它（租户只拿到默认的官方 DeepSeek 卡片）。
+# 改完执行： bin/mt.sh up
+- id: llm-pi-ai
+  config:
+    providers:
+      # ── 示例 1：内网 OpenAI 兼容服务（vLLM / SGLang / one-api / Ollama / LM Studio…）
+      my-gateway:
+        displayName: 内网模型服务
+        api: openai-completions
+        baseURL: http://CHANGE-ME:8000/v1
+        apiKeyEnv: GATEWAY_API_KEY
+        models:
+          - id: CHANGE-ME-MODEL
+            # reasoningEfforts:
+            #   off:
+            #   high: high
+            #   max: max
+            # input: [text, image]
+      # ── 示例 2：Anthropic Messages 协议的网关
+      #my-claude:
+      #  displayName: Claude 网关
+      #  api: anthropic-messages
+      #  baseURL: https://gw.example.com
+      #  apiKeyEnv: CLAUDE_KEY
+      #  models:
+      #    - id: claude-sonnet-4-5
+      #      input: [text, image]
