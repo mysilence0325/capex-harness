@@ -657,6 +657,21 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByRole('tablist').hasAttribute('data-conversation-tabs')).toBe(true)
   })
 
+  it('mirrors the tab strip marker onto the header as tabs come and go', async () => {
+    const b = mount(sessionSnapshotOf())
+    const header = b.view.container.querySelector('header')!
+    // The session's tab strip renders inside the header's slot, so the header
+    // carries the marker its padding rule selects on.
+    expect(header.hasAttribute('data-header-tabs')).toBe(true)
+    const tabs = header.querySelector('[data-conversation-tabs]')!
+    tabs.remove()
+    await act(async () => { await Promise.resolve() })
+    expect(header.hasAttribute('data-header-tabs')).toBe(false)
+    header.append(tabs)
+    await act(async () => { await Promise.resolve() })
+    expect(header.hasAttribute('data-header-tabs')).toBe(true)
+  })
+
   it('rolls the pending workspace label back when switching fails', async () => {
     const selectWorkspace = vi.fn(async () => { throw new Error('connect failed') })
     const b = mount(

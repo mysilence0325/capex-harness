@@ -19,6 +19,7 @@ export function ConversationHeader({ sessionId, useSession, useConversation, ren
   // every engine, including the ones that cannot evaluate :has().
   useEffect(() => {
     const header = headerRef.current
+    /* v8 ignore next -- the ref is attached before effects run. */
     if (header === null) return
     const sync = (): void => {
       if (header.querySelector('[data-conversation-tabs]') === null) header.removeAttribute('data-header-tabs')

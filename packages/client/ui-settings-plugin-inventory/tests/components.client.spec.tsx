@@ -476,6 +476,25 @@ describe('PluginInventorySettingsTab', () => {
     expect(screen.queryByText(en.presetEnabledTag)).toBeNull()
   })
 
+  it('marks the card before an open one instead of testing a sibling', async () => {
+    const view = await renderReady()
+    fireEvent.click(globalToggle())
+    const button = screen.getByRole('button', { name: 'tool-bash, bash-host, Via presets' })
+    const card = button.closest('li')!
+    const previous = card.previousElementSibling!
+    expect(previous.hasAttribute('data-followed-by-open')).toBe(false)
+
+    fireEvent.click(button)
+    // The neighbour below an open card keeps its own height in the two-column
+    // grid, which the stylesheet reads from the card above it.
+    expect(previous.hasAttribute('data-followed-by-open')).toBe(true)
+    expect(card.hasAttribute('data-followed-by-open')).toBe(false)
+    expect(view.container.querySelectorAll('[data-followed-by-open]')).toHaveLength(1)
+
+    fireEvent.click(button)
+    expect(previous.hasAttribute('data-followed-by-open')).toBe(false)
+  })
+
   it('switches the inspected preset in place, including broken ones', async () => {
     const view = await renderReady()
     const pickPreset = (label: string): void => {
