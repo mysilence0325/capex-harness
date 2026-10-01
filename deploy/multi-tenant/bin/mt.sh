@@ -73,13 +73,29 @@ cmd_up() {
   cmd_url
 }
 
-# 脚本自己访问网关用的地址：TLS 开着时公开端口是 HTTPS，本机脚本改走 loopback 明文运维端口。
+# 脚本自己访问网关用的地址。
+#   - TLS 开着时公开端口是 HTTPS，本机脚本走 loopback 明文运维端口；
+#   - 远端节点用 MT_GATEWAY_URL 指向控制面（它没有本机的运维端口）。
 gw_base() {
+  if [ -n "${MT_GATEWAY_URL:-}" ]; then
+    echo "${MT_GATEWAY_URL%/}"
+    return 0
+  fi
   if [ -f state/tls/server.crt ] || [ -n "${MT_TLS_CERT:-}" ]; then
     echo "http://127.0.0.1:${MT_HTTP_PORT:-8099}"
   else
     echo "http://127.0.0.1:${MT_EDGE_PORT:-8090}"
   fi
+  return 0
+}
+
+# 注册密钥：本机控制面用 state/registry.key，远端节点用 MT_REGISTRY_KEY_FILE 指过去。
+registry_key() {
+  local file="${MT_REGISTRY_KEY_FILE:-state/registry.key}"
+  if [ -f "$file" ]; then
+    tr -d '\r\n' < "$file" || true
+  fi
+  return 0
 }
 
 # 租户容器的名字（注册表里优先，取不到就按约定）。
@@ -93,14 +109,19 @@ tenant_container() {
 #
 # 只取"本次启动之后"的日志：容器重启后 docker logs 仍保留上一次的 token 行，
 # 直接取最后一条会在 DSH 打印新 token 之前抓到旧值，注册上去就是过期凭据。
+#
+# 结尾的 `|| true` 是必须的：DSH 还没打出那行时 grep 无匹配、管道在 pipefail 下返回 1，
+# 而"还没打印"正是这里的常态。没有它，调用处（cmd_add / cmd_restart 是普通调用，
+# 处在 set -e 之下）会静默中断整个脚本。
 tenant_token() {
   local container="$1" started
-  started="$(docker inspect "$container" --format '{{.State.StartedAt}}' 2>/dev/null | tr -d '\r')"
+  started="$(docker inspect "$container" --format '{{.State.StartedAt}}' 2>/dev/null | tr -d '\r' || true)"
   if [ -n "$started" ]; then
-    docker logs --since "$started" "$container" 2>&1 | grep -oE 'dsh web: *\S+' | tail -1 | sed 's/.*token=//' | tr -d '\r'
+    docker logs --since "$started" "$container" 2>&1 | grep -oE 'dsh web: *\S+' | tail -1 | sed 's/.*token=//' | tr -d '\r' || true
   else
-    docker logs "$container" 2>&1 | grep -oE 'dsh web: *\S+' | tail -1 | sed 's/.*token=//' | tr -d '\r'
+    docker logs "$container" 2>&1 | grep -oE 'dsh web: *\S+' | tail -1 | sed 's/.*token=//' | tr -d '\r' || true
   fi
+  return 0
 }
 
 tenant_port() {
@@ -117,7 +138,7 @@ register_tenant() {
   container="$(tenant_container "$id")"
   if [ -z "$endpoint" ]; then
     local ip
-    ip="$(docker inspect "$container" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\r')"
+    ip="$(docker inspect "$container" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\r' || true)"
     if [ -z "$ip" ]; then
       echo "    !! ${id}: 容器 ${container} 没有网络地址（还没启动？）" >&2
       return 1
@@ -129,7 +150,8 @@ register_tenant() {
     fi
     endpoint="http://${ip}:${port}"
     # 本机注册：等 DSH 打印出启动 token 再上报，否则激活会失败。
-    # （远端节点会用 --endpoint 显式注册，不在这里等。）
+    # 拿不到 token 就不上报——控制面会拒绝没有 token 的注册（它没法用）。
+    # （远端节点用节点代理，或显式传 --endpoint/--token。）
     if [ -z "$token" ]; then
       local waited=0
       token="$(tenant_token "$container")"
@@ -139,10 +161,14 @@ register_tenant() {
         token="$(tenant_token "$container")"
       done
     fi
+    if [ -z "$token" ]; then
+      echo "    !! ${id}: ${MT_REGISTER_WAIT:-90} 秒内没等到启动 token，本次不注册（bin/mt.sh register ${id} 可重试）" >&2
+      return 1
+    fi
   fi
-  key="$(tr -d '\r\n' < state/registry.key 2>/dev/null || true)"
+  key="$(registry_key)"
   if [ -z "$key" ]; then
-    echo "    !! 控制面还没生成注册密钥 state/registry.key（先启动网关）" >&2
+    echo "    !! 读不到注册密钥 ${MT_REGISTRY_KEY_FILE:-state/registry.key}：控制面未启动，或本机不是控制面（远端节点请用节点代理）" >&2
     return 1
   fi
   body="$(printf '{"tenant":"%s","endpoint":"%s","token":"%s","node":"%s"}' "$id" "$endpoint" "$token" "$node")"
@@ -194,12 +220,20 @@ cmd_register() {
 }
 
 cmd_unregister() {
-  local id="${1:-}" key
+  local id="${1:-}" key response
   if [ -z "$id" ]; then echo "用法: bin/mt.sh unregister <租户>" >&2; return 2; fi
-  key="$(tr -d '\r\n' < state/registry.key 2>/dev/null || true)"
-  curl -sS --max-time 10 -X POST -H "x-mt-registry-key: ${key}" -H 'content-type: application/json' \
-    --data "{\"tenant\":\"${id}\"}" "$(gw_base)/__mt/registry/unregister" 2>&1 | sed 's/^/  /'
-  echo
+  key="$(registry_key)"
+  if [ -z "$key" ]; then
+    echo "读不到注册密钥 ${MT_REGISTRY_KEY_FILE:-state/registry.key}（远端节点请用 MT_REGISTRY_KEY_FILE 指过去）" >&2
+    return 1
+  fi
+  response="$(curl -sS --max-time 10 -X POST -H "x-mt-registry-key: ${key}" -H 'content-type: application/json' \
+    --data "{\"tenant\":\"${id}\"}" "$(gw_base)/__mt/registry/unregister" 2>&1 || true)"
+  printf '%s\n' "$response" | sed 's/^/  /'
+  case "$response" in
+    *'"ok":true'*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # 列出控制面当前认识的运行时。
@@ -327,7 +361,7 @@ cmd_status() { "${COMPOSE[@]}" ps; echo; cmd_wait; }
 
 cmd_logs() {
   if [ -n "${1:-}" ]; then
-    docker logs -f --tail 80 "mt-dsh-${1}"
+    docker logs -f --tail 80 "$(tenant_container "$1")"
   else
     docker logs -f --tail 80 mt-gateway
   fi
@@ -336,7 +370,7 @@ cmd_logs() {
 cmd_restart() {
   local id="${1:-}"
   if [ -n "$id" ]; then
-    docker restart "mt-dsh-${id}"
+    docker restart "$(tenant_container "$id")"
     # 重启后容器地址可能变，控制面只认注册表，所以必须重新注册。
     register_tenant "$id"
     wait_tenant_ready "$id" 60 || echo "    !! ${id} 未在预期时间内就绪" >&2
@@ -471,7 +505,7 @@ cmd_model() {
   "${COMPOSE[@]}" up -d
   local id
   for id in $(grep -o '"id": *"[^"]*"' tenants.json 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' || true); do
-    docker restart "mt-dsh-${id}" >/dev/null
+    docker restart "$(tenant_container "$id")" >/dev/null
   done
   # 重启后容器地址可能变，控制面只认注册表，所以统一重新注册。
   register_all_tenants
@@ -508,5 +542,4 @@ case "${1:-}" in
   remove)  shift; cmd_remove "$@" ;;
   key)     shift; cmd_key "$@" ;;
   *)       echo "未知命令: ${1:-}" >&2; sed -n '/^#   bin\/mt.sh/,/^#$/p' "$0" | sed 's/^#   /  /; s/^#$//' >&2; exit 2 ;;
-  *)       sed -n '2,22p' "$0" ;;
 esac

@@ -125,7 +125,11 @@ const sessionSecret = (() => {
  */
 const registryKey = (() => {
   const file = path.join(STATE_DIR, 'registry.key')
-  if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8').trim()
+  if (fs.existsSync(file)) {
+    const existing = fs.readFileSync(file, 'utf8').trim()
+    if (existing !== '') return existing
+    console.error(`mt-gateway: ${file} is empty; regenerating it`)
+  }
   const created = crypto.randomBytes(32).toString('base64url')
   fs.writeFileSync(file, `${created}\n`, { mode: 0o600 })
   return created
@@ -157,12 +161,21 @@ function loadRuntimes() {
 
 let runtimes = loadRuntimes()
 
-/** Persist the runtime table (rewritten whole; it is small and node-owned). */
+/**
+ * Persist the runtime table.
+ *
+ * Written to a temporary file and renamed: a reader must never see a truncated
+ * table, and a truncated table means every tenant looks unregistered after a
+ * restart. Nothing watches this inode (unlike the bind-mounted tenants.json), so
+ * the rename is safe here.
+ */
 function saveRuntimes() {
   const body = JSON.stringify({
     runtimes: Object.fromEntries([...runtimes].sort(([left], [right]) => left.localeCompare(right))),
   }, null, 2)
-  fs.writeFileSync(RUNTIMES_FILE, `${body}\n`, { mode: 0o600 })
+  const temporary = `${RUNTIMES_FILE}.tmp`
+  fs.writeFileSync(temporary, `${body}\n`, { mode: 0o600 })
+  fs.renameSync(temporary, RUNTIMES_FILE)
 }
 
 
@@ -189,8 +202,12 @@ function dshCookieName(authority) {
  * cookie name from this string, so two runtimes that happened to use the same
  * loopback port on different hosts would otherwise share a cookie name. The
  * name also makes a runtime's location irrelevant to the browser session.
+ *
+ * Lower-cased deliberately: DSH normalizes the authority it sees (a Host header
+ * is case-insensitive) before deriving the cookie name, so an id with capitals
+ * would give the two sides different names.
  */
-const tenantAuthority = (tenant) => `dsh-${tenant.id}.internal`
+const tenantAuthority = (tenant) => `dsh-${String(tenant.id).toLowerCase()}.internal`
 
 function parseCookies(header) {
   const out = new Map()
@@ -275,11 +292,16 @@ function runtimeOf(tenant) {
  *
  * The gateway never inspects containers: a node registers an endpoint and the
  * gateway proxies to it, so the control plane and the runtimes can live on
- * different machines. A tenant that has not registered is a configuration
- * state, not an outage, and is reported as such.
+ * different machines. The endpoint may carry a path — a node agent serves
+ * `http://<node>:3199/proxy/<tenant>` — and that prefix has to be prepended to
+ * every proxied request, or the request lands on the agent's root instead of the
+ * tenant.
+ *
+ * A tenant that has not registered is a configuration state, not an outage, and
+ * is reported as such.
  *
  * @param tenant - tenant record.
- * @returns `{ host, port }` parsed from the registered endpoint.
+ * @returns the upstream host, port, and path prefix (empty when the endpoint has none).
  */
 function tenantAddress(tenant) {
   const entry = runtimeOf(tenant)
@@ -292,7 +314,11 @@ function tenantAddress(tenant) {
   } catch {
     throw Object.assign(new Error(`tenant ${tenant.id} registered an invalid endpoint: ${String(entry.endpoint)}`), { code: 'MT_BAD_ENDPOINT' })
   }
-  return { host: url.hostname, port: Number(url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : url.port) }
+  return {
+    host: url.hostname,
+    port: Number(url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : url.port),
+    prefix: url.pathname.replace(/\/+$/u, ''),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +464,11 @@ async function proxyRequest(req, res, session) {
 
   const headers = { ...req.headers }
   headers.host = tenantAuthority(tenant)
+  // DSH's fence compares an attached Origin's host against the Host header, so
+  // rewriting one without the other makes every browser POST and every
+  // WebSocket upgrade fail with 403 while curl (no Origin) succeeds. The scheme
+  // is not compared, but keep it looking like the authority it now claims.
+  if (headers.origin !== undefined) headers.origin = `http://${tenantAuthority(tenant)}`
   headers['x-forwarded-for'] = req.socket.remoteAddress ?? ''
   headers['x-forwarded-proto'] = 'http'
   headers['x-mt-tenant'] = tenant.id
@@ -464,7 +495,9 @@ async function proxyRequest(req, res, session) {
       host: address.host,
       port: address.port,
       method: req.method,
-      path: req.url,
+      // An endpoint may carry a path prefix (a node agent serves
+      // /proxy/<tenant>); dropping it would send the request to the agent's root.
+      path: `${address.prefix}${req.url}`,
       headers,
       // No upstream keep-alive: a pooled socket the tenant closes while idle
       // surfaces as ECONNRESET on the next request, which is noise for a proxy
@@ -557,7 +590,7 @@ function tenantRequest(tenant, address, path) {
       host: address.host,
       port: address.port,
       method: 'GET',
-      path,
+      path: `${address.prefix}${path}`,
       headers: { host: tenantAuthority(tenant) },
       agent: false,
       timeout: 10_000,
@@ -669,8 +702,12 @@ function handleHealth(req, res) {
   Promise.all([...tenants.values()].map(async (tenant) => {
     const entry = runtimeOf(tenant)
     if (entry === undefined) {
-      return { id: tenant.id, registered: false, ready: false }
+      return { id: tenant.id, registered: false, hasToken: false, ready: false }
     }
+    // A registration without a launch token cannot complete an activation, so
+    // reporting it ready would send the operator looking in the wrong place: the
+    // first login gets the 401 → refresh → 503 page instead.
+    const hasToken = typeof entry.token === 'string' && entry.token !== ''
     let reachable = false
     try {
       // A runtime answers 401 without its cookie, which is proof enough that it
@@ -687,7 +724,8 @@ function handleHealth(req, res) {
       endpoint: entry.endpoint,
       registered: true,
       reachable,
-      ready: reachable,
+      hasToken,
+      ready: reachable && hasToken,
       registeredAt: entry.registeredAt,
     }
   })).then((rows) => {
@@ -712,7 +750,10 @@ function handleHealth(req, res) {
  */
 function handleRegister(req, res) {
   const presented = req.headers['x-mt-registry-key']
-  if (typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey)) {
+  // An empty configured key must never authenticate: timingSafeEqual over two
+  // empty buffers is true, which would let anyone who can reach the port claim a
+  // tenant.
+  if (registryKey === '' || typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey)) {
     audit({ tenant: '-', user: '-', status: 401, note: 'registry-key-rejected', url: req.url })
     send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
     return
@@ -727,6 +768,12 @@ function handleRegister(req, res) {
     if (!tenants.has(id)) {
       send(res, 404, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: `no such tenant: ${id}` }))
       return
+    }
+    // 拒绝指向自己的 endpoint：网关是 host 网络，代理到自己会让请求无限套娃。
+    const ownAuthorities = new Set([`127.0.0.1:${String(EDGE_PORT)}`, `localhost:${String(EDGE_PORT)}`])
+    if (OPS_PORT !== undefined) {
+      ownAuthorities.add(`127.0.0.1:${String(OPS_PORT)}`)
+      ownAuthorities.add(`localhost:${String(OPS_PORT)}`)
     }
     if (action === 'unregister') {
       runtimes.delete(id)
@@ -748,10 +795,28 @@ function handleRegister(req, res) {
       send(res, 400, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: `unsupported endpoint scheme: ${parsed.protocol}` }))
       return
     }
+    if (ownAuthorities.has(parsed.host)) {
+      // The gateway runs in the host network namespace, so an endpoint naming its
+      // own port would make it proxy to itself: the loopback session cookie would
+      // validate again and the request would recurse.
+      send(res, 400, { 'content-type': 'application/json; charset=utf-8' },
+        JSON.stringify({ ok: false, error: `endpoint must not point back at the gateway itself: ${parsed.host}` }))
+      return
+    }
     const previous = runtimes.get(id)
+    const endpointChanged = previous !== undefined && previous.endpoint !== endpoint
+    const token = typeof body?.token === 'string' ? body.token : ''
+    if (token === '' && (previous === undefined || endpointChanged)) {
+      // Registering a runtime with no launch token is not usable, and carrying
+      // one across an endpoint change would hand the new endpoint a live token
+      // for the tenant it just claimed.
+      send(res, 400, { 'content-type': 'application/json; charset=utf-8' },
+        JSON.stringify({ ok: false, error: 'registration needs a launch token (the runtime may still be starting)' }))
+      return
+    }
     runtimes.set(id, {
       endpoint,
-      token: typeof body?.token === 'string' && body.token !== '' ? body.token : previous?.token,
+      token: token === '' ? previous.token : token,
       node: typeof body?.node === 'string' && body.node !== '' ? body.node : 'local',
       authority: tenantAuthority(tenants.get(id)),
       registeredAt: new Date().toISOString(),
@@ -828,9 +893,11 @@ function handleRequest(req, res) {
       send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
       return
     }
-    send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({
-      runtimes: Object.fromEntries([...runtimes].sort(([left], [right]) => left.localeCompare(right))),
-    }, null, 2))
+    // Launch tokens are deliberately omitted: this listing is readable from any
+    // local process on a host-networked gateway, and a token is a credential.
+    const safe = Object.fromEntries([...runtimes].sort(([left], [right]) => left.localeCompare(right))
+      .map(([id, entry]) => [id, { endpoint: entry.endpoint, node: entry.node, authority: entry.authority, registeredAt: entry.registeredAt, hasToken: typeof entry.token === 'string' && entry.token !== '' }]))
+    send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ runtimes: safe }, null, 2))
     return
   }
   if (url.pathname === `${PREFIX}/health`) {
@@ -934,7 +1001,10 @@ function handleUpgrade(req, socket, head) {
   }
   const upstream = net.connect(address.port, address.host, () => {
     const headers = { ...req.headers, host: tenantAuthority(tenant) }
-    const lines = [`${req.method} ${req.url} HTTP/1.1`]
+    // Same Host/Origin pairing as the HTTP path: the upgrade carries the
+    // browser's Origin too, and the fence refuses a mismatch.
+    if (headers.origin !== undefined) headers.origin = `http://${tenantAuthority(tenant)}`
+    const lines = [`${req.method} ${address.prefix}${req.url} HTTP/1.1`]
     for (const [name, value] of Object.entries(headers)) {
       if (value === undefined) continue
       lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : String(value)}`)
@@ -1027,9 +1097,15 @@ function applyRegistry(reason) {
     console.log(`mt-gateway stopped listening on :${String(port)}`)
   }
 
+  // Prune every row whose tenant is gone, not only the ones removed while this
+  // process was running: a tenant deleted between restarts, or one that a
+  // restore brought back, would otherwise leave a row pointing at a dead
+  // endpoint and a stale token that doctor would report as a mismatch.
   let runtimeChanged = false
-  for (const id of removed) {
-    runtimeChanged = runtimes.delete(id) || runtimeChanged
+  for (const id of [...runtimes.keys()]) {
+    if (tenants.has(id)) continue
+    runtimes.delete(id)
+    runtimeChanged = true
   }
   if (runtimeChanged) saveRuntimes()
 

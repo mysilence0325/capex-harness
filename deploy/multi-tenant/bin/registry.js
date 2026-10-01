@@ -7,7 +7,7 @@
  *
  * Usage:
  *   node bin/registry.js list
- *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--no-edge-port] [--password <pw>]
+ *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--no-edge-port] [--password <pw>] [--node <name>]
  *   node bin/registry.js passwd <id> <user> [--password <pw>]
  *   node bin/registry.js remove <id>
  *   node bin/registry.js ensure-model-keys
@@ -98,7 +98,7 @@ switch (command) {
   case 'list': {
     for (const tenant of registry.tenants) {
       const users = tenant.users.map((user) => user.name).join(', ')
-      console.log(`${tenant.id}\t内部端口=${String(tenant.internalPort)}\t入口端口=${String(tenant.edgePort ?? '-')}\t用户=${users}\t主机=${(tenant.hosts ?? []).join(',') || '-'}`)
+      console.log(`${tenant.id}\t节点=${tenant.node ?? 'local'}\t内部端口=${String(tenant.internalPort)}\t入口端口=${String(tenant.edgePort ?? '-')}\t用户=${users}\t主机=${(tenant.hosts ?? []).join(',') || '-'}`)
     }
     break
   }
@@ -115,9 +115,15 @@ switch (command) {
     }
     const user = flag(args, 'user') ?? 'admin'
     const password = flag(args, 'password') ?? crypto.randomBytes(9).toString('base64url')
+    const node = flag(args, 'node') ?? 'local'
     const tenant = {
       id,
       title: flag(args, 'title') ?? id,
+      // Which machine runs this tenant. `local` means the control plane's own
+      // host: bin/render.js emits a compose service for it and bin/mt.sh starts
+      // it. Any other value marks a runtime on another node, which that node's
+      // agent registers; the control host neither creates nor starts it.
+      node,
       internalPort: Number(flag(args, 'internal-port') ?? nextPort('internalPort', 3181)),
       // Compose service name (proxy target) and container name (log lookup).
       service: `dsh-${id}`,
@@ -140,7 +146,7 @@ switch (command) {
     }
     registry.tenants.push(tenant)
     save()
-    console.log(`added tenant ${id}`)
+    console.log(`added tenant ${id} (node: ${node})`)
     console.log(`  user:     ${user}`)
     console.log(`  password: ${password}`)
     const clash = registry.tenants.find((entry) => entry !== tenant

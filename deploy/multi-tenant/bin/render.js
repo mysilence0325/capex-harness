@@ -242,7 +242,18 @@ const modelEntries = sharedModelEntries()
 const createdPatches = []
 const modelApplied = []
 const trustApplied = []
+const remoteTenants = []
+/** Whether this host runs the tenant, or another node's agent does. */
+const isLocalTenant = (tenant) => (tenant.node ?? 'local') === 'local'
+
 for (const tenant of tenants) {
+  // A tenant on another node keeps its data and its containers there; this host
+  // only needs its registry entry, so it must not create a second home or a
+  // compose service that would start a duplicate runtime.
+  if (!isLocalTenant(tenant)) {
+    remoteTenants.push(tenant.id)
+    continue
+  }
   const home = path.join(ROOT, 'tenants', tenant.id, 'home')
   const workspace = path.join(ROOT, 'tenants', tenant.id, 'workspace')
   const profileDir = path.join(home, 'profiles', 'web')
@@ -482,7 +493,7 @@ ${loggingBlock()}
       - ./state:/state
       - ./logs:/logs
 
-${tenants.map(tenantService).join('\n')}
+${tenants.filter(isLocalTenant).map(tenantService).join('\n')}
 networks:
   mt-net:
     name: mt-net
@@ -507,6 +518,9 @@ fs.writeFileSync(path.join(ROOT, 'entry-urls.txt'), entryLines.join('\n') + '\n'
 
 console.log(`rendered docker-compose.yml for ${String(tenants.length)} tenant(s): ${tenants.map((t) => t.id).join(', ')}`)
 if (createdPatches.length > 0) console.log(`created profile patches for: ${createdPatches.join(', ')}`)
+if (remoteTenants.length > 0) {
+  console.log(`tenants on other nodes (no local container, their agent registers them): ${remoteTenants.join(', ')}`)
+}
 if (trustApplied.length > 0) {
   console.log(`updated the host-trust block for: ${trustApplied.join(', ')} (restart those tenants to take effect)`)
 }

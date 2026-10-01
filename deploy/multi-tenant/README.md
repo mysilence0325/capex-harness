@@ -225,10 +225,46 @@ GET  /__mt/registry             列出全部（loopback 免密钥，远端需要
 | 凭据 | 每个租户自己的 `.credentials.yaml`（各自随机签名密钥），模型 key 按租户注入 |
 | 执行 | 每租户一个容器（独立 PID/挂载/网络命名空间）+ 内存/CPU/PID 限额；宿主内核 3.10 无法跑 DSH 自带文件沙箱，容器即边界 |
 | 网络 | 租户容器不发布任何端口，只有网关能被访问；出网必须经 `mt-egress-proxy`，私网目标被拒 |
-| 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.1） |
+| 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.2） |
 | 审计 | 网关按请求写 `logs/access.jsonl`（租户、用户、方法、URL、状态码、耗时） |
 
-## 1.1 限制租户对宿主端口的访问
+## 1.1 多机部署（节点代理）
+
+控制面与运行时解耦之后，租户可以分布在多台机器上。每台跑租户的机器上放一个**节点代理**：
+
+```bash
+# 在节点上（node-agent/ 目录随项目一起放过去）
+docker build -t mt-node-agent:local ./node-agent
+scp <控制面>:/home/dsh-mt/state/registry.key  /home/dsh-node/state/registry.key
+scp <控制面>:/home/dsh-mt/state/tls/ca.crt    /home/dsh-node/ca.crt
+docker run -d --name mt-node-agent --network host --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /home/dsh-node/state:/key:ro -v /home/dsh-node/ca.crt:/ca/ca.crt:ro \
+  -e MT_NODE_NAME=node2 -e MT_NODE_ADDRESS=<本机局域网IP> \
+  -e MT_CONTROL_PLANE=https://<控制面>:8090 -e MT_CONTROL_PLANE_CA=/ca/ca.crt \
+  -e MT_REGISTRY_KEY_FILE=/key/registry.key \
+  -e MT_NETWORK=mt-net -e MT_CONTAINER_PREFIX=mt-dsh- \
+  mt-node-agent:local
+```
+
+代理做三件事：**发现**本机租户容器（Docker API）、**上报**给控制面（地址 + 启动 token，变了就重报）、
+**转发**控制面发来的请求（保留控制面的 Host/Origin，DSH 的 cookie 名依赖它）。
+
+控制面这边只需要在注册表里标出该租户住在哪个节点，并且**不要**为它生成本地容器：
+
+```bash
+bin/mt.sh add gamma2 --user gina --node node2   # 控制面只登记，不启动
+bin/mt.sh render                                 # 不会为它生成 compose 服务
+bin/mt.sh runtimes                               # 等代理上报后能看到它
+```
+
+**为什么必须经过代理**：租户容器不发布端口，而 `ip_forward=0` 的机器上发布了也到不了；
+只有节点宿主自己能"本地投递"到容器。代理跑在宿主网络里，正好是这一跳。
+
+**端点可以带路径**：代理注册的是 `http://<节点>:3199/proxy/<租户>`，控制面会把这段前缀
+拼在转发路径前面——少了它请求会打到代理根路径（404）。
+
+## 1.2 限制租户对宿主端口的访问
 
 ```bash
 bin/mt.sh isolate status     # 查看状态（doctor 每次也会实测）
@@ -367,7 +403,7 @@ DSH 的 cookie 默认 30 天，期间不用重复登录网关也会自动续上�
 处理方式（不改宿主全局设置）：
 
 - **控制面 `mt-gateway` 用 `network_mode: host`**，直接监听宿主 8090–8093；对外访问走 INPUT 路径，不需要转发。
-- **租户容器仍留在 `mt-net`**，不发布任何宿主端口；网关通过 Docker API 解析它们的 bridge 地址（`tenantAddress()`），Host 头仍改写为 `127.0.0.1:<租户端口>`，cookie 语义不变。
+- **租户容器仍留在 `mt-net`**，不发布任何宿主端口；控制面只按注册进来的地址代理（`tenantAddress()`），Host 与 Origin 一并改写为租户的 authority（`dsh-<租户>.internal`），cookie 语义不变。
 - 如果你希望整机恢复标准的 Docker 端口映射行为，可以自行执行 `sysctl -w net.ipv4.ip_forward=1` 并持久化——但那会同时把上面列出的其它服务端口暴露给网段，属于全机范围的变更，本部署刻意没有替你做。
 
 ## 6. 模型接入
@@ -423,7 +459,7 @@ bin/mt.sh model        # 渲染 + 应用到所有租户 + 重启
 
 ## 8. 安全边界与已知限制
 
-- **网关是唯一的信任边界**：它读取 Docker socket 以获得各租户当前的启动 token 并与租户容器通信。宿主 root 与网关容器等价，租户容器不挂载该 socket。
+- **控制面是唯一的对外入口，但不再是宿主 root 等价物**：它只监听公开端口、按注册表代理，**不挂 Docker socket、不读容器日志**。需要宿主级权限的是**节点代理**（它要发现本机容器并读它们的启动 token），而节点代理不对外提供任何用户入口。
 - **/__mt/health 只答 loopback**：它会列出全部租户与用户名，因此外部访问返回 404；in/mt.sh status/smoke/accept 都在本机跑，不受影响。
 - **租户之间不共享任何进程状态**：不共享 cookie 密钥、不共享会话、不共享凭据、不共享文件系统。
 - **租户内部的 agent 拥有其容器的完全权限**（可 `rm -rf /` 于容器内、可访问网络）。这是形态 C 的设计：容器即隔离边界；`DSH_PERMISSION_MODE=danger-full-access` 是宿主内核不支持 DSH 文件沙箱时的必然选择。
