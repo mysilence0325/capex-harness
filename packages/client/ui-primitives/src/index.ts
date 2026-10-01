@@ -30,6 +30,7 @@ export type { MenuItemButtonProps, MenuEntry, MenuItem, MenuSeparator, MenuLabel
 export { useAnchoredMaxHeight } from './useAnchoredMaxHeight.ts'
 export { useAnchoredPosition } from './useAnchoredPosition.ts'
 export type { AnchoredPositionOptions } from './useAnchoredPosition.ts'
+export { useNarrowAttribute } from './useNarrowAttribute.ts'
 export { useDismissOnOutsidePointer } from './useDismissOnOutsidePointer.ts'
 export { HoverCard } from './HoverCard.tsx'
 export { ShortcutKeys } from './ShortcutKeys.tsx'
