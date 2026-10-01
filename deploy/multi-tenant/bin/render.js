@@ -391,6 +391,11 @@ function tenantService(tenant) {
     container_name: mt-dsh-${tenant.id}
     restart: unless-stopped
     networks: [mt-net]
+    # A node agent discovers tenant runtimes by this label, not by container
+    # name: an orchestrator renames containers (a Swarm task is
+    # <stack>_<service>.<slot>.<id>) while a label survives.
+    labels:
+      mt.tenant: "${tenant.id}"
     working_dir: /workspace
     command: ["dsh", "web", "--no-open"]
 ${fs.existsSync(MODEL_ENV_FILE) ? '    env_file:\n      - ./model.env\n' : ''}    environment:

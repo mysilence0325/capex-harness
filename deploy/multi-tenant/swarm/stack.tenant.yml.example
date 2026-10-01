@@ -1,0 +1,55 @@
+# 租户服务模板（每个租户一个 stack）
+#
+# 用法：
+#   docker stack deploy -c swarm/stack.tenant.yml.example dsh-alpha
+#
+# 与 docker-compose.yml 的区别，以及为什么这样写，见 swarm/README.md。
+#
+# 需要替换的占位：<TENANT>、<PORT>、<NODE>、<DATA_ROOT>、<IMAGE>、<NETWORK>
+version: "3.8"
+
+services:
+  runtime:
+    image: ${DSH_IMAGE:-dsh-web:0.2.0-rc.2}
+    # 租户数据在这台机器的磁盘上，静态绑定正好允许把它钉在同一个节点上。
+    # 换节点 = 手工迁移数据，这是刻意的取舍（见 README 的「绑定语义」）。
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == <NODE>
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.5"
+      restart_policy:
+        condition: any
+    # 节点代理按这个标签发现运行时，不依赖容器名（Swarm 会把名字改掉）。
+    labels:
+      mt.tenant: "<TENANT>"
+    environment:
+      DSH_HOME: /dsh-home
+      DSH_PERMISSION_MODE: danger-full-access
+      DSH_TELEMETRY_DISABLED: "1"
+      DEEPSEEK_API_KEY: "<占位 key，从控制面 tenants.json 取 modelKey>"
+      DEEPSEEK_BASE_URL: "http://<模型网关地址>:8080/anthropic"
+      HTTPS_PROXY: "http://<出口代理地址>:3128"
+      HTTP_PROXY: "http://<出口代理地址>:3128"
+      NO_PROXY: "localhost,127.0.0.1,::1,mock-model,mt-model-gateway"
+      TZ: Asia/Shanghai
+    volumes:
+      - <DATA_ROOT>/<TENANT>/home:/dsh-home
+      - <DATA_ROOT>/<TENANT>/workspace:/workspace
+    networks:
+      - mt-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: ["dsh", "web", "--no-open"]
+
+networks:
+  mt-net:
+    external: true
+    name: mt-net

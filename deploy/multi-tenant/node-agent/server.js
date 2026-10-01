@@ -43,6 +43,15 @@ const CA_FILE = process.env.MT_CONTROL_PLANE_CA ?? ''
 const DOCKER_SOCKET = process.env.MT_DOCKER_SOCKET ?? '/var/run/docker.sock'
 const NETWORK = process.env.MT_NETWORK ?? 'mt-net'
 const CONTAINER_PREFIX = process.env.MT_CONTAINER_PREFIX ?? 'mt-dsh-'
+/**
+ * Label carrying the tenant id on its container.
+ *
+ * Discovery keys on this rather than on the container name because an orchestrator
+ * renames containers: a Swarm service's tasks are `<stack>_<service>.<slot>.<id>`,
+ * while a label survives the renaming. The name prefix stays as a fallback for
+ * containers that predate the label.
+ */
+const TENANT_LABEL = process.env.MT_TENANT_LABEL ?? 'mt.tenant'
 /** Static mapping used when the Docker socket is absent: `alpha=http://ip:port,...` */
 const STATIC_TENANTS = process.env.MT_TENANTS ?? ''
 const SYNC_INTERVAL_MS = Number(process.env.MT_SYNC_INTERVAL ?? 15) * 1000
@@ -174,6 +183,18 @@ async function currentRuntime(container) {
 }
 
 /**
+ * Tenant id one container belongs to, if any.
+ * @param container - entry from the container list.
+ * @param name - the container's name without its leading slash.
+ * @returns the tenant id, or undefined when this container is not a tenant runtime.
+ */
+function tenantOf(container, name) {
+  const labelled = container.Labels?.[TENANT_LABEL]
+  if (typeof labelled === 'string' && labelled !== '') return labelled
+  return name.startsWith(CONTAINER_PREFIX) ? name.slice(CONTAINER_PREFIX.length) : undefined
+}
+
+/**
  * Tenant runtimes on this node.
  * @returns a map of tenant id to `{ ip, port }` of its local container.
  */
@@ -192,8 +213,8 @@ async function discover() {
   const containers = await docker('GET', '/containers/json')
   for (const container of containers ?? []) {
     const name = String(container.Names?.[0] ?? '').replace(/^\//u, '')
-    if (!name.startsWith(CONTAINER_PREFIX)) continue
-    const id = name.slice(CONTAINER_PREFIX.length)
+    const id = tenantOf(container, name)
+    if (id === undefined) continue
     // Only containers on the configured network: falling back to whichever
     // network a container happens to have would make this agent claim runtimes
     // that belong to another node.
@@ -206,7 +227,7 @@ async function discover() {
       console.log(`mt-node-agent: ${name} has not printed its URL yet; skipping this pass`)
       continue
     }
-    found.set(id, { ip, port })
+    found.set(id, { ip, port, container: name })
   }
   return found
 }
