@@ -773,6 +773,55 @@ describe('ChatView', () => {
     expect([...view.container.querySelectorAll<HTMLElement>('[data-chat-group-key]')]).toEqual(roots)
   })
 
+  it('settles a quiet scroll where the realm has no scrollend event', async () => {
+    // Chromium 90 ships no scrollend event, so an open group settles once its
+    // own scrolling stops, through a passive listener it also releases.
+    Reflect.deleteProperty(window, 'onscrollend')
+    // The listener the fallback binds is only bound while the group follows.
+    class Observer implements ResizeObserver {
+      constructor(readonly callback: ResizeObserverCallback) {}
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', Observer)
+    const add = vi.spyOn(EventTarget.prototype, 'addEventListener')
+    const remove = vi.spyOn(EventTarget.prototype, 'removeEventListener')
+    try {
+      const snapshot = chatSnapshotFixture({ nodes: [user(1, 'inside')] })
+      const h = makeHarness({}, {}, snapshot)
+      const key = 'quiet-process' as GroupKey
+      const groups = new ConversationGroupStore<ProcessGroupData>()
+      const group: GroupSnapshot<ProcessGroupData> = {
+        key, members: [{ kind: 'node', key: snapshot.order[0] as NodeKey }],
+        data: { turn: 1, closed: false, summary: { counts: [], running: undefined, runningDetail: '' } },
+      }
+      groups.prepareAndInstall({
+        entries: [{ kind: 'group', key }],
+        groups: { kind: 'replace', snapshots: [group] },
+      }, key => snapshot.nodes.get(key))
+      h.setGrouped(groups)
+      const view = render(<h.ChatView {...h.props} />)
+      const body = view.container.querySelector<HTMLElement>('[data-step-process-body]')!
+      // The open group's own scrolling is the only passive scroll listener here.
+      const quiet = add.mock.calls.filter(([type, , options]) =>
+        type === 'scroll' && (options as AddEventListenerOptions | undefined)?.passive === true)
+      expect(quiet).toHaveLength(1)
+
+      // The settle runs after the scrolling stops, not on the scroll itself.
+      fireEvent.scroll(body)
+      await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 200) }) })
+
+      view.unmount()
+      const released = remove.mock.calls.filter(([type]) => type === 'scroll')
+      expect(released).toHaveLength(1)
+    } finally {
+      Object.defineProperty(window, 'onscrollend', { value: null, configurable: true, writable: true })
+      add.mockRestore()
+      remove.mockRestore()
+    }
+  })
+
   it.each([
     { initialHeight: 200, closed: true },
     { initialHeight: 600, closed: true },

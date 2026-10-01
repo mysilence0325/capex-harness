@@ -28,7 +28,7 @@ Web 客户端此前假定运行环境是较新的引擎。客户端产物按 ES2
 
 ## Verification
 
-[compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及两条语料不变量：客户端样式表中每个 `color-mix()` 都能解析；源码语料固定为记录在案的十三条 `:has()` 规则，且没有任何容器查询与 `scrollbar-gutter` 声明，因此该下限丢弃的特性不会悄悄扩散。
+[compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及两条语料不变量：客户端样式表中每个 `color-mix()` 都能解析；源码语料固定为记录在案的九类被整条丢弃特性的处数——十三条 `:has()` 规则、无容器查询、无 `scrollbar-gutter` 声明，以及锚点定位、`@starting-style`、`field-sizing`、`accent-color`、`text-wrap` 与 `:nth-child(An+B of S)` 各自的处数——因此它们都不会悄悄扩散。
 
 Chromium 90.0.4430.0 快照构建（revision 857891）实测报告：所有被 polyfill 的 API 均缺失，所有被改写的 CSS 特性均不支持；它能启动服务端提供的客户端，并渲染出侧栏、工作区列表、输入框与设置。
 

@@ -129,20 +129,32 @@ describe('client stylesheet downleveling', () => {
     expect([...unresolved]).toEqual([])
   })
 
-  it('keeps the selectors outside the floor at their recorded count', () => {
+  it('keeps the features the floor drops at their recorded count', () => {
     // A ratchet, not a target: Chromium 90 drops each of these whole, so a new
     // occurrence is a silent loss on that engine rather than a broken parse.
     // Lower a number in the change that converts one; raising one is a decision
     // the Agent Note records.
-    const counts = { has: 0, container: 0, gutter: 0 }
+    const counts = {
+      has: 0, container: 0, gutter: 0, fieldSizing: 0, accentColor: 0,
+      anchorPositioning: 0, startingStyle: 0, textWrap: 0, selectorList: 0,
+    }
     for (const file of globSync('packages/**/src/**/*.css', { cwd: process.cwd() })) {
       // Comments name the properties they explain; only declarations count.
       const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ')
       counts.has += [...source.matchAll(/:has\(/g)].length
       counts.container += [...source.matchAll(/@container\b/g)].length
       counts.gutter += [...source.matchAll(/scrollbar-gutter\s*:/g)].length
+      counts.fieldSizing += [...source.matchAll(/field-sizing\s*:/g)].length
+      counts.accentColor += [...source.matchAll(/accent-color\s*:/g)].length
+      counts.anchorPositioning += [...source.matchAll(/anchor-name\s*:|position-anchor\s*:|anchor\(/g)].length
+      counts.startingStyle += [...source.matchAll(/@starting-style\b/g)].length
+      counts.textWrap += [...source.matchAll(/\btext-wrap\s*:/g)].length
+      counts.selectorList += [...source.matchAll(/:nth-(?:last-)?child\([^)]*\bof\b/g)].length
     }
-    expect(counts).toEqual({ has: 13, container: 0, gutter: 0 })
+    expect(counts).toEqual({
+      has: 13, container: 0, gutter: 0, fieldSizing: 2, accentColor: 5,
+      anchorPositioning: 4, startingStyle: 1, textWrap: 1, selectorList: 1,
+    })
   })
 })
 
