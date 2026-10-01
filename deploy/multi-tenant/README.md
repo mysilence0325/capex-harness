@@ -1,4 +1,4 @@
-﻿# DSH 多租户部署（形态 C：共享控制面 + 每租户隔离运行时）
+# DSH 多租户部署（形态 C：共享控制面 + 每租户隔离运行时）
 
 在一台 Docker 主机上把 DeepSeek Harness 变成"一个入口、多个互相隔离的租户"。
 
@@ -39,42 +39,76 @@ bin/mt.sh url                     # 打印入口地址
 
 ## 0.0 模型接入
 
-管理员统一配置模型，租户在界面里自选。凭据放在 `model.env`（`env_file` 注入每个租户容器，
-0600 且不进版本库）：
+管理员统一配置模型，租户在界面里自选。
+
+**真凭据只放在 `.env`，只注入模型网关容器：**
 
 ```bash
-# model.env
-DEEPSEEK_API_KEY=sk-...        # 共享给所有租户；单个租户要独立 key 时用 bin/mt.sh key
+# .env
+MT_UPSTREAM_API_KEY=sk-...                  # 管理员自己的 key，租户永远拿不到
+#MT_UPSTREAM_BASE=https://api.deepseek.com  # 换成私有化端点时改这里
 ```
 
-DSH 内置的 `deepseek-official` 卡片指向 `https://api.deepseek.com`，提供两个模型
-（`deepseek-flash` = DeepSeek-V41-Flash、`deepseek-v4-pro` = DeepSeek-V4-Pro），
-配好 key 后租户在模型选择器里直接能看到，不需要写 `model.patch.yml`。
+DSH 内置的 `deepseek-official` 卡片提供两个模型（`deepseek-flash` = DeepSeek-V41-Flash、
+`deepseek-v4-pro` = DeepSeek-V4-Pro），配好 key 后租户在模型选择器里直接能看到，
+不需要写 `model.patch.yml`。要接**别的** OpenAI 兼容端点时写 `model.patch.yml` 再 `bin/mt.sh model`。
 
-要接**别的** OpenAI 兼容端点（私有化部署的模型）时，写 `model.patch.yml` 再应用：
+### 为什么需要一个模型网关
+
+租户的 agent 以 `danger-full-access` 运行（内核 3.10 跑不了 DSH 自带沙箱），**容器里的任何凭据
+都等于租户手里的凭据**。原先真 key 通过 `env_file` 注入每个租户容器，一条 `env` 就能读走，
+还能经出口代理外发。
+
+现在租户容器里只有一个**按租户生成的占位 key**（`sk-mt-<租户>-…`），请求发往 `mt-model-gateway`：
+
+```
+租户容器 ──x-api-key: sk-mt-alpha-…──▶ mt-model-gateway ──x-api-key: <真 key>──▶ 出口代理 ──▶ api.deepseek.com
+             （占位，读走也没用）          （唯一持有真凭据）        （容器出网的唯一通道）
+```
+
+网关做的事：
+
+- 用占位 key 认出是哪个租户；**认不出的 key 一律 401**（否则网关就是任何人可用的中转）；
+- 换成真 key 转发上游，路径与方法原样透传，所以 Messages API、文件上传、流式响应都照常；
+- 按租户记录 token 用量到 `logs/model-usage.jsonl`。
+
+网关不占宿主端口：它在 `mt-net` 上，经出口代理出网（这也是本机 `ip_forward=0` 下 bridge 容器
+唯一的出网方式）。
+
+**注意**：租户要访问网关，所以 `mt-model-gateway` 必须在 `NO_PROXY` 里，否则请求会被出口代理
+按"私网地址"拒掉——默认值已经包含它。
+
+### 用量账本
 
 ```bash
-bin/mt.sh model                    # 应用到全部租户并重启它们
-bin/model-check.sh --tenant alpha --user alice --password <pw>          # 真实调用验证
-bin/model-check.sh --tenant alpha --user alice --password <pw> --model <id> --provider <id>
+bin/mt.sh usage                  # 按租户汇总：调用次数、输入/输出 token、缓存命中、平均耗时
+bin/mt.sh usage --tail 20        # 再看最近 20 条明细
+bin/mt.sh usage --tenant alpha
 ```
 
-`bin/model-check.sh` 固定选 `deepseek-flash` 做测试，不依赖会话默认值，避免测试打到更贵的模型上；
-它会核对回复确实来自选定的那个模型。
+因为真凭据只在网关，这份账本是可信的：租户绕不过它（除非管理员另外给它一把真 key）。
+
+### 验证某个租户真的能对话
+
+```bash
+bin/model-check.sh --tenant alpha --user alice --password <pw>
+bin/model-check.sh --tenant alpha --user alice --password <pw> --model deepseek-v4-pro
+```
+
+固定选 `deepseek-flash` 做测试，不依赖会话默认值，避免测试打到更贵的模型上；它会核对回复
+确实来自选定的那个模型。
 
 ### 租户怎么出网：出口代理
 
-**本机 `net.ipv4.ip_forward=0`，bridge 容器没有任何外网路由**——连公网 DNS 都解析不了，
-模型调用必然失败。因此部署里有一个 `mt-egress-proxy`：它跑在宿主网络命名空间里（用的是宿主的出口），
-监听一个**宿主防火墙未放行**的端口，所以只有租户容器连得上，局域网连不上。
+**本机 `net.ipv4.ip_forward=0`，bridge 容器没有任何外网路由**——连公网 DNS 都解析不了。
+`mt-egress-proxy` 跑在宿主网络命名空间里（用宿主的出口），监听一个**宿主防火墙未放行**的端口，
+所以只有容器连得上，局域网连不上。租户容器的 `HTTPS_PROXY`/`HTTP_PROXY` 由 `bin/mt.sh up`
+自动探测并写入 `.env` 的 `MT_EGRESS_PROXY`。
 
-租户容器的 `HTTPS_PROXY`/`HTTP_PROXY` 由 `bin/mt.sh up` 自动探测并写入 `.env` 的 `MT_EGRESS_PROXY`。
+它同时是租户的**出网边界**：目标是私网、回环、链路本地地址时一律 403。要限制只能访问特定域名，
+设 `MT_EGRESS_ALLOW`。本部署自己的内网服务（模型网关、验收用的假模型）要放进 `MT_NO_PROXY`。
 
-代理同时是租户的**出网边界**：目标是私网、回环、链路本地地址时一律 403，
-租户无法借它跳进内网（那些地址本来也路由不到）。要限制只能访问特定域名，设 `MT_EGRESS_ALLOW`。
-本部署自己的内网服务（例如验收用的假模型）要放进 `MT_NO_PROXY` 才能被租户访问。
-
-`bin/mt.sh doctor` 会实测一次：从租户容器经代理访问公网应通、访问内网地址应被拒。
+`bin/mt.sh doctor` 会实测：从租户容器经代理访问公网应通、访问内网地址应被拒。
 
 ## 0.1 用本地源码构建运行时镜像
 
@@ -174,6 +208,8 @@ docker 区域的 ACCEPT 在第 5 步，规则必须挂在第 3 步才拦得住�
 | `state/tls/` | TLS 证书与私钥（`ca.crt` 给客户端导入） |
 | `egress-proxy/server.js` | 租户出口代理：宿主网络 + 未放行端口 = 只有容器可达 |
 | `bin/isolate.sh` | 租户→宿主 端口限制（firewalld direct 规则） |
+| `model-gateway/server.js` | 模型网关：真凭据的唯一持有者，按租户的占位 key 识别、换成真 key、计量 |
+| `logs/model-usage.jsonl` | 按租户的模型用量账本（`bin/mt.sh usage` 读它） |
 | `backups/` | `bin/mt.sh backup` 的归档 |
 
 ## 3. 日常操作
@@ -196,6 +232,7 @@ bin/mt.sh publish-image            # 用已上传的覆盖层构建本地源码�
 bin/mt.sh cert [额外SAN]           # 生成自签 CA + 服务端证书，之后 bin/mt.sh up 切到 HTTPS
 bin/mt.sh model                    # 应用 model.patch.yml / model.env 到全部租户
 bin/mt.sh isolate [apply|remove|status]   # 限制租户可访问的宿主端口
+bin/mt.sh usage [--tenant <id>] [--tail <n>]   # 按租户汇总模型用量
 ```
 
 ### 开通新租户

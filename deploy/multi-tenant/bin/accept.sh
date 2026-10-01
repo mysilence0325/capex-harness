@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # End-to-end acceptance: admin-provided model catalog → tenant picks a model →
 # a real turn runs → the reply lands in that tenant's own session log.
 #

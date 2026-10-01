@@ -50,11 +50,13 @@ require_render() {
 }
 
 cmd_up() {
+  # 老租户可能还没有占位 key；先补发，否则渲染出来的租户没有模型凭据。
+  node_run bin/registry.js ensure-model-keys | sed "s/^/    /"
   node_run bin/render.js "${1:-}"
   echo "==> 构建镜像并启动"
   # 经典构建器：本机 Docker Hub 不可达，buildkit 会去远端解析基础镜像元数据而失败，
   # 经典构建器直接使用本地已有的 node:22-bookworm-slim。
-  DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build gateway egress-proxy
+  DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build gateway egress-proxy model-gateway
   "${COMPOSE[@]}" up -d
   # 网络建立后才能探测到网关地址；首次运行或网段变化时补上租户出口代理。
   ensure_egress_proxy
@@ -339,6 +341,7 @@ case "${1:-}" in
   accept)  shift; cmd_accept "$@" ;;
   doctor)  bash bin/doctor.sh ;;
   isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
+  usage)   shift; bash bin/usage.sh "$@" ;;     # 按租户汇总模型用量（--tenant/--tail）
   cert)    shift; bash bin/make-cert.sh "$@" ;;   # 生成自签证书；之后 bin/mt.sh up 切到 HTTPS
   backup)  shift; bash bin/backup.sh "$@" ;;
   restore) shift; bash bin/restore.sh "$@" ;;

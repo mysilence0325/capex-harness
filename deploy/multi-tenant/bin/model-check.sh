@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # 用真实模型跑一次对话，确认某个租户的模型接入确实可用。
 #
 # 与 bin/accept.sh 的区别：那个用假模型验证多租户链路，这个走真实 provider，

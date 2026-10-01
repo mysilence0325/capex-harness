@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Isolation smoke test for the DSH multi-tenant deployment.
 #
 # Verifies, against the running stack:

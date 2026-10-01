@@ -19,6 +19,7 @@
 'use strict'
 
 const http = require('node:http')
+const https = require('node:https')
 const net = require('node:net')
 const dns = require('node:dns').promises
 
@@ -117,7 +118,9 @@ server.on('connect', (req, clientSocket, head) => {
   }).catch(() => { deny(clientSocket, 'judge-failed') })
 })
 
-// Plain HTTP through the proxy: an absolute request URI.
+// Plain HTTP through the proxy: an absolute request URI. An `https:` URI is
+// forwarded with TLS to the origin, which is what lets a bridge-network service
+// (the model gateway) reach the internet without a CONNECT tunnel of its own.
 server.on('request', (req, res) => {
   let target
   try {
@@ -134,10 +137,12 @@ server.on('request', (req, res) => {
       res.end(`egress proxy refused this destination: ${verdict.reason}\n`)
       return
     }
-    console.log(`egress http: ${target.hostname}`)
-    const upstream = http.request({
+    const secure = target.protocol === 'https:'
+    console.log(`egress ${secure ? 'https' : 'http'}: ${target.hostname}${target.pathname}`)
+    const transport = secure ? https : http
+    const upstream = transport.request({
       host: target.hostname,
-      port: target.port === '' ? 80 : Number(target.port),
+      port: target.port === '' ? (secure ? 443 : 80) : Number(target.port),
       method: req.method,
       path: `${target.pathname}${target.search}`,
       headers: { ...req.headers, host: target.host },

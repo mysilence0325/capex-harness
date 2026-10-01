@@ -10,6 +10,7 @@
  *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--no-edge-port] [--password <pw>]
  *   node bin/registry.js passwd <id> <user> [--password <pw>]
  *   node bin/registry.js remove <id>
+ *   node bin/registry.js ensure-model-keys
  *
  * `add` allocates the internal port and, unless --no-edge-port is given, a
  * dedicated entry port automatically, so bin/mt.sh add needs only an id.
@@ -61,6 +62,36 @@ function nextPort(key, base) {
   return used.length === 0 ? base : Math.max(...used) + 1
 }
 
+/**
+ * Mint the placeholder model key a tenant presents to the model gateway.
+ *
+ * It is not a credential for the upstream provider: the gateway maps it to the
+ * tenant and substitutes the real key. It is still unguessable, because anyone
+ * holding it could spend the deployment's model quota from inside mt-net.
+ *
+ * @param id - tenant id.
+ * @returns a fresh placeholder key.
+ */
+function mintModelKey(id) {
+  return `sk-mt-${id}-${crypto.randomBytes(18).toString('base64url')}`
+}
+
+/**
+ * Give every tenant a placeholder key, keeping the ones already issued.
+ *
+ * @returns the tenants that gained a key.
+ */
+function ensureModelKeys() {
+  const minted = []
+  for (const tenant of registry.tenants) {
+    if (typeof tenant.modelKey === 'string' && tenant.modelKey !== '') continue
+    tenant.modelKey = mintModelKey(tenant.id)
+    minted.push(tenant.id)
+  }
+  if (minted.length > 0) save()
+  return minted
+}
+
 const [command, ...args] = process.argv.slice(2)
 
 switch (command) {
@@ -93,6 +124,9 @@ switch (command) {
       container: `mt-dsh-${id}`,
       hosts: [`${id}.dsh.local`],
       users: [{ name: user, passwordHash: hashPassword(password) }],
+      // Placeholder the tenant presents to the model gateway; the real upstream
+      // credential never enters a tenant container.
+      modelKey: mintModelKey(id),
       limits: { memory: flag(args, 'memory') ?? '2g', cpus: flag(args, 'cpus') ?? '1.5', pids: 512 },
     }
     const edgePort = flag(args, 'edge-port')
@@ -131,6 +165,16 @@ switch (command) {
     save()
     console.log(`updated ${tenant.id}/${user.name}`)
     console.log(`  password: ${password}`)
+    break
+  }
+
+  case 'ensure-model-keys': {
+    const minted = ensureModelKeys()
+    if (minted.length === 0) {
+      console.log('every tenant already has a model key')
+    } else {
+      console.log(`issued model keys for: ${minted.join(', ')}`)
+    }
     break
   }
 

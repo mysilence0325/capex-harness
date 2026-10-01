@@ -205,8 +205,73 @@ else
 fi
 
 head_ "模型接入"
+MG_STATE="$(docker inspect mt-model-gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+if [ "$MG_STATE" = running ]; then
+  ok "模型网关容器运行中"
+  UP_LEN="$(docker exec mt-model-gateway sh -c 'printf %s "${#MT_UPSTREAM_KEY}"' 2>/dev/null || echo 0)"
+  if [ "${UP_LEN:-0}" -gt 0 ]; then
+    ok "  网关持有真凭据（长度 ${UP_LEN}）"
+  else
+    bad "  网关没有上游凭据：在 .env 设置 MT_UPSTREAM_API_KEY 后 bin/mt.sh up"
+  fi
+  # 伪造 key 必须被拒——否则网关成了任何人可用的中转。
+  FORGED="$(docker exec "$(docker ps --filter name=mt-dsh- --format '{{.Names}}' | head -1)" node -e '
+    fetch("http://mt-model-gateway:8080/anthropic/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": "sk-mt-forged" },
+      body: "{}",
+    }).then((r) => console.log(String(r.status))).catch(() => console.log("unreachable"))
+  ' 2>/dev/null | tr -d '\r')"
+  if [ "$FORGED" = "401" ]; then
+    ok "  未知 key 被拒（401）"
+  else
+    bad "  未知 key 未被拒绝：${FORGED:-无响应}"
+  fi
+else
+  bad "模型网关容器状态: $MG_STATE（bin/mt.sh up）"
+fi
+
+# 真凭据绝不能出现在租户容器里：环境变量、容器配置、容器文件三者都查。
+REAL_KEY="$(grep -E '^MT_UPSTREAM_API_KEY=.+' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+if [ -n "$REAL_KEY" ]; then
+  REAL_TAIL="${REAL_KEY: -8}"
+  LEAKED=""
+  for t in $TENANTS; do
+    if docker exec "mt-dsh-$t" sh -c 'env' 2>/dev/null | grep -q "$REAL_TAIL" \
+      || docker inspect "mt-dsh-$t" 2>/dev/null | grep -q "$REAL_TAIL"; then
+      LEAKED="$LEAKED $t"
+    fi
+  done
+  if [ -z "$LEAKED" ]; then
+    ok "  真凭据未出现在任何租户容器里"
+  else
+    bad "  真凭据泄漏到租户容器:$LEAKED"
+  fi
+else
+  warn "  .env 里没有 MT_UPSTREAM_API_KEY（模型调用会失败）"
+fi
+
+# 每个租户应持有占位 key，且 base URL 指向网关。
+KEY_OK=0; KEY_BAD=0; KEY_MISSING=0
+for t in $TENANTS; do
+  KEY_HEAD="$(docker exec "mt-dsh-$t" sh -c 'printf %s "${DEEPSEEK_API_KEY:-}"' 2>/dev/null | cut -c1-6)"
+  BASE="$(docker exec "mt-dsh-$t" sh -c 'printf %s "${DEEPSEEK_BASE_URL:-}"' 2>/dev/null)"
+  case "$KEY_HEAD" in
+    sk-mt-) KEY_OK=$((KEY_OK + 1)) ;;
+    "") KEY_MISSING=$((KEY_MISSING + 1)); warn "  $t 没有 DEEPSEEK_API_KEY：bin/mt.sh up 会补发占位 key" ;;
+    *) KEY_BAD=$((KEY_BAD + 1)); bad "  $t 的 DEEPSEEK_API_KEY 不是占位 key" ;;
+  esac
+  case "$BASE" in
+    http://mt-model-gateway:*|"") ;;
+    *) KEY_BAD=$((KEY_BAD + 1)); bad "  $t 的 DEEPSEEK_BASE_URL 未指向模型网关：$BASE" ;;
+  esac
+done
+if [ "$KEY_BAD" = 0 ] && [ "$KEY_MISSING" = 0 ]; then
+  ok "  ${KEY_OK} 个租户都持有占位 key，模型请求都经网关"
+fi
+
 if grep -q 'CHANGE-ME' model.patch.yml 2>/dev/null; then
-  warn "model.patch.yml 仍是模板：租户只能用内置 DeepSeek 卡片，且需要 key 才能真的对话"
+  warn "model.patch.yml 仍是模板：租户只能用内置 DeepSeek 卡片（已由网关代理）"
 else
   ok "model.patch.yml 已填写"
   grep -oE '^ +[a-z0-9-]+:' model.patch.yml 2>/dev/null | sed 's/^/      路由 /' || true
@@ -214,7 +279,17 @@ fi
 # `grep -c` 无匹配时打印 0 且退出码为 1，这里按行取值，避免把 "0" 与默认值拼在一起。
 KEYS="$(grep -cE '^[A-Z_]+=.+' model.env 2>/dev/null)"
 KEYS="${KEYS:-0}"
-[ "$KEYS" -gt 0 ] && ok "model.env 里有 $KEYS 个非空变量" || warn "model.env 里没有非空变量（租户无法发起模型请求）"
+[ "$KEYS" -gt 0 ] && ok "model.env 里有 $KEYS 个非空变量" || warn "model.env 里没有非空变量"
+if grep -qE '^DEEPSEEK_API_KEY=.+' model.env 2>/dev/null; then
+  warn "model.env 里仍有 DEEPSEEK_API_KEY：真凭据会被注入所有租户容器，请删掉并放到 .env 的 MT_UPSTREAM_API_KEY"
+fi
+# 用量记录：网关每次请求都会追加一行，用来回答"哪个租户花了多少"。
+if [ -f logs/model-usage.jsonl ]; then
+  USAGE_LINES="$(wc -l < logs/model-usage.jsonl 2>/dev/null | tr -d ' ')"
+  ok "模型用量记录 logs/model-usage.jsonl（${USAGE_LINES:-0} 条）"
+else
+  warn "还没有模型用量记录（租户尚未发起过模型请求）"
+fi
 
 head_ "资源与备份"
 AVAIL="$(df -h / | awk 'NR==2{print $4}')"

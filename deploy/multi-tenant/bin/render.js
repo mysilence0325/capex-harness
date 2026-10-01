@@ -248,9 +248,13 @@ const TLS_READY = fs.existsSync(TLS_CERT_FILE) && fs.existsSync(TLS_KEY_FILE)
  *
  * The egress proxy refuses private addresses, which is what keeps a tenant out
  * of the internal network, so anything this deployment runs itself must bypass
- * it. `mock-model` is the acceptance harness's stand-in provider on mt-net.
+ * it: `mock-model` is the acceptance harness's stand-in provider, and
+ * `mt-model-gateway` is where tenant model calls actually go.
  */
-const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1,mock-model'
+const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1,mock-model,mt-model-gateway'
+
+/** Where tenants send model requests: the gateway that holds the real credential. */
+const MODEL_GATEWAY_URL = 'http://mt-model-gateway:8080'
 
 // ---------------------------------------------------------------------------
 // compose file
@@ -315,7 +319,11 @@ ${fs.existsSync(MODEL_ENV_FILE) ? '    env_file:\n      - ./model.env\n' : ''}  
       DSH_PERMISSION_MODE: \${DSH_PERMISSION_MODE:-danger-full-access}
       DSH_TELEMETRY_DISABLED: "1"
       TZ: \${TZ:-Asia/Shanghai}
-${credentialLine('GATEWAY_API_KEY', envKeyFor(tenant, 'GATEWAY_API_KEY'))}${credentialLine('DEEPSEEK_API_KEY', envKeyFor(tenant, 'DEEPSEEK_API_KEY'))}${literalEnvLine('HTTPS_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('HTTP_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('NO_PROXY', envValues.get('MT_NO_PROXY') ?? DEFAULT_NO_PROXY)}${limitLines.join('\n')}
+${tenant.modelKey === undefined
+  ? '      # !! 没有 modelKey：执行 bin/mt.sh up（会先补发占位 key），否则模型调用不可用\n'
+  : `      # 占位 key：模型网关按它识别租户并换成真凭据，真 key 不进容器\n      DEEPSEEK_API_KEY: ${tenant.modelKey}\n`}      # 模型请求发往网关而不是公网；本机 ip_forward=0，容器本来也出不去
+      DEEPSEEK_BASE_URL: ${MODEL_GATEWAY_URL}/anthropic
+${credentialLine('GATEWAY_API_KEY', envKeyFor(tenant, 'GATEWAY_API_KEY'))}${literalEnvLine('HTTPS_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('HTTP_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('NO_PROXY', envValues.get('MT_NO_PROXY') ?? DEFAULT_NO_PROXY)}${limitLines.join('\n')}
     volumes:
       - ./tenants/${tenant.id}/home:/dsh-home
       - ./tenants/${tenant.id}/workspace:/workspace
@@ -357,6 +365,27 @@ services:
       MT_EGRESS_PORT: \${MT_EGRESS_PORT:-3128}
       MT_EGRESS_BIND: \${MT_EGRESS_BIND:-0.0.0.0}
       MT_EGRESS_ALLOW: \${MT_EGRESS_ALLOW:-}
+
+  model-gateway:
+    build: ./model-gateway
+    image: mt-model-gateway:local
+    container_name: mt-model-gateway
+    restart: unless-stopped
+    # On the tenant network, so it needs no host port of its own; it reaches the
+    # internet through the egress proxy like everything else here.
+    networks: [mt-net]
+    environment:
+      MT_PORT: "8080"
+      MT_UPSTREAM_BASE: \${MT_UPSTREAM_BASE:-https://api.deepseek.com}
+      # 真凭据只到这里。为空时网关拒绝启动（doctor 会报），租户容器永远拿不到它。
+      MT_UPSTREAM_KEY: \${MT_UPSTREAM_API_KEY:-}
+      MT_EGRESS_PROXY: \${MT_EGRESS_PROXY:-}
+      MT_REGISTRY: /config/tenants.json
+      MT_LOG_DIR: /logs
+      TZ: \${TZ:-Asia/Shanghai}
+    volumes:
+      - ./tenants.json:/config/tenants.json:ro
+      - ./logs:/logs
 
   gateway:
     build: ./gateway
