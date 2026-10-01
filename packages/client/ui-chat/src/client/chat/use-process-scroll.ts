@@ -7,6 +7,15 @@ const AT_REST: ScrollEdges = { canScrollUp: false, canScrollDown: false }
 const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
 
 /**
+ * Quiet period that stands in for a missing scrollend event.
+ *
+ * Chromium 90 never fires scrollend, and the settle it announces decides whether
+ * a group keeps following its content, so an engine without the event settles on
+ * the end of a quiet period after the last scroll instead.
+ */
+const SCROLL_SETTLE_DELAY_MS = 120
+
+/**
  * Observe one group's body and content without coupling its follow intent to the outer transcript.
  * Wheel, touchstart, any pointerdown, and unprevented scroll keys interrupt active animations,
  * including events from editable controls; subsequent position sampling determines follow intent.
@@ -75,13 +84,27 @@ export function useProcessScroll(
     const unbind = follow.bind(body)
     const observer = new ResizeObserver(() => { sync('resize') })
     const onScrollEnd = (event: Event): void => { if (event.target === body) sync('scrollend') }
+    let settleTimer: number | undefined
+    const onScrollQuiet = (event: Event): void => {
+      if (event.target !== body) return
+      if (settleTimer !== undefined) clearTimeout(settleTimer)
+      settleTimer = window.setTimeout(() => {
+        settleTimer = undefined
+        sync('scrollend')
+      }, SCROLL_SETTLE_DELAY_MS)
+    }
+    // Asked of the realm, not the element: an aliased `in` narrows the element itself.
+    const hasNativeScrollEnd = 'onscrollend' in window
     body.addEventListener('scrollend', onScrollEnd)
+    if (!hasNativeScrollEnd) body.addEventListener('scroll', onScrollQuiet, { passive: true })
     observer.observe(body)
     if (contentRef.current !== null) observer.observe(contentRef.current)
     return () => {
       unbind()
       observer.disconnect()
       body.removeEventListener('scrollend', onScrollEnd)
+      if (!hasNativeScrollEnd) body.removeEventListener('scroll', onScrollQuiet)
+      if (settleTimer !== undefined) clearTimeout(settleTimer)
     }
   }, [bodyRef, contentRef, follow, open, sync])
   return { edges, events, initialize }

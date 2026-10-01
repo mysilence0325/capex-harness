@@ -189,11 +189,13 @@ async function fail(runtime: SlotTestRuntime, seq: number, code: string): Promis
 
 /** The account settings card's top-up link, which requests the shared page. */
 function settingsTopUp() {
-  return screen.getAllByRole('link', { name: en.topUp }).at(-1)!
+  // The card stays mounted while an overlay covers it, and the inert fallback
+  // hides that region from assistive technology on engines without inert.
+  return screen.getAllByRole('link', { name: en.topUp, hidden: true }).at(-1)!
 }
 /** The account settings card's usage link, which requests the shared page. */
 function settingsUsage() {
-  return screen.getAllByRole('link', { name: en.usage }).at(-1)!
+  return screen.getAllByRole('link', { name: en.usage, hidden: true }).at(-1)!
 }
 
 describe('shared Platform page ownership', () => {
