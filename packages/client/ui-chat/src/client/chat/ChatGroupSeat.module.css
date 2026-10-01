@@ -86,9 +86,9 @@
 .body {
   --dsh-chat-flow-gap: 6px;
   max-height: min(400px, 50vh);
-  overflow-y: auto;
+  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
+  overflow-y: scroll;
   overscroll-behavior-y: auto;
-  scrollbar-gutter: stable;
 }
 
 .label {
@@ -135,5 +135,4 @@
 .expandedBody {
   max-height: none;
   overflow: visible;
-  scrollbar-gutter: auto;
 }

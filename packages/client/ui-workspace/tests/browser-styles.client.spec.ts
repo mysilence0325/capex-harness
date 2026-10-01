@@ -38,9 +38,9 @@ describe('WorkspaceBrowser.module.css list', () => {
   const listArea = declarations('.listArea')
   const list = declarations('.list')
 
-  it('is the scrolling region', () => {
+  it('is the scrolling region, reserving the bar whether or not the list overflows', () => {
     expect(list).toBeDefined()
-    expect(list!.get('overflow-y')).toBe('auto')
+    expect(list!.get('overflow-y')).toBe('scroll')
   })
 
   it('counts the themed scrollbar inside the shell trailing inset', () => {
@@ -63,10 +63,6 @@ describe('WorkspaceBrowser.module.css list', () => {
       ')',
     ].join(' '))
     expect(declarations('.list::-webkit-scrollbar')).toBeUndefined()
-  })
-
-  it('reserves the scrollbar whether or not the list overflows', () => {
-    expect(list!.get('scrollbar-gutter')).toBe('stable')
   })
 
   it('keeps 2px between rows and 4px between workspace groups', () => {

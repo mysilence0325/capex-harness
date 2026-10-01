@@ -3647,7 +3647,8 @@ describe('Mock detail metrics shared with the task list', () => {
   it('states the Plugins-aligned list-page column, heading, search field, and row metrics', () => {
     // jsdom computes no layout, so the values are read from the applied
     // stylesheet the way the detail-metric assertions above read it.
-    expect(rule('pageScroll')).toMatch(/overflow:\s*auto;/)
+    expect(rule('pageScroll')).toMatch(/overflow-x:\s*auto;/)
+    expect(rule('pageScroll')).toMatch(/overflow-y:\s*scroll;/)
     expect(rule('pageContent')).toMatch(/max-width:\s*960px;/)
     expect(rule('pageContent')).toMatch(/margin:\s*0 auto;/)
     // The Plugins page's own column inset, shared by both first-level pages:

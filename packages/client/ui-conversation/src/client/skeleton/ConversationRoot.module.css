@@ -407,12 +407,12 @@ button.crumb:hover {
      `.list`, ui-sidebar-files FilesBody `.body`): the bar sits 2px clear of
      the column's edge instead of flush against it. */
   margin-right: 2px;
-  overflow-y: auto;
   /* Reserved unconditionally: the composer seat rides this box's content box in
      Chat and its padding box under a view's composer overlay, so an `auto`
      gutter moves the input card sideways by the bar's width whenever the two
-     differ ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
-  scrollbar-gutter: stable;
+     differ ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)).
+     Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
+  overflow-y: scroll;
 }
 
 /* The bar also stops 2px short of the scroller's ends, matching its 2px edge
@@ -473,10 +473,10 @@ button.crumb:hover {
   overflow-y: auto;
   /* The view owns its own scrollers (the trajectory ledger scrolls inside the
      view), so this box never scrolls here; reserving a gutter would only
-     narrow the view's content by the bar's width. Chat keeps the reservation
-     on the same element, so the seat below compensates with the bar's width
+     narrow the view's content by the bar's width, and `overflow-y: auto`
+     drops the base rule's reservation here. Chat keeps the reservation on the
+     same element, so the seat below compensates with the bar's width
      ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
-  scrollbar-gutter: auto;
 }
 
 .root[data-composer-overlay] .scrollBody > :global([data-slot='conversation.session']) > .viewArea {

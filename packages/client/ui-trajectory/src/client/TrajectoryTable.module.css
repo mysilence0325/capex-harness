@@ -1009,9 +1009,9 @@
   flex: 1;
   min-height: 0;
   overflow-x: hidden;
-  overflow-y: auto;
+  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
+  overflow-y: scroll;
   padding-bottom: var(--dsh-trajectory-bottom-clearance, 0px);
-  scrollbar-gutter: stable;
 }
 
 .detailBodySummary {

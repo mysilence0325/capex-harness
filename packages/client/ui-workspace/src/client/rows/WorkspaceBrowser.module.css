@@ -352,13 +352,13 @@
 }
 
 /* List: the only scrolling region. Block children keep their design heights
-   under content overflow. The 2px edge offset, stable 5px themed scrollbar,
-   and remaining padding equal the shell's right inset, with or without
-   overflow, so moving the bar does not move the rows. */
+   under content overflow. The 2px edge offset, the always-present 5px themed
+   scrollbar, and remaining padding equal the shell's right inset, with or
+   without overflow, so moving the bar does not move the rows. Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
 .list {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: scroll;
   margin-left: -4px;
   margin-right: var(--dsh-session-list-scrollbar-offset);
   padding-left: 4px;
@@ -370,7 +370,6 @@
   /* Clears the compact bottom fade overlay: at scroll end the last row sits
      above the gradient instead of under it. */
   padding-bottom: 16px;
-  scrollbar-gutter: stable;
 }
 
 .flatList > * + *,

@@ -59,9 +59,9 @@
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
+  overflow-y: scroll;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
   padding: 0 24px 24px 28px;
   font-size: 16px;
   color: var(--dsw-alias-label-primary);

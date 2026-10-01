@@ -26,8 +26,9 @@
 .pageScroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  scrollbar-gutter: stable;
+  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
+  overflow-x: auto;
+  overflow-y: scroll;
   /* A 9px rail carries the 5px thumb inset 2px from the pane edge (rendered by
      ui-theme styles/scrollbar.css). */
   --dsh-scrollbar-width: 9px;
@@ -621,14 +622,14 @@
 
 /* The theme's WebKit bar takes layout space: the reservation keeps the content
    box at one width while a transient status row or the footer's session notice
-   changes this region's height. The widened rail insets the thumb from the
-   panel edge, as on the list pane. */
+   changes this region's height. Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. The widened rail insets
+   the thumb from the panel edge, as on the list pane. */
 .detailScroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: scroll;
   padding: 24px var(--detail-gutter) 28px;
-  scrollbar-gutter: stable;
   --dsh-scrollbar-width: 9px;
   --dsh-scrollbar-thumb-border: 2px;
 }
@@ -638,7 +639,6 @@
   flex-direction: column;
   overflow: hidden;
   padding: 0;
-  scrollbar-gutter: auto;
 }
 
 .detailRecords > .notice {
