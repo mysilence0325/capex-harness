@@ -149,6 +149,7 @@
     "verify-cordis-config": "tsx scripts/verify-cordis-config.ts",
     "rescope-vendor": "tsx scripts/rescope-vendor.ts",
     "rescope-vendor:check": "tsx scripts/rescope-vendor.ts --check",
+    "verify-client-browser-floor": "tsx scripts/verify-client-browser-floor.ts",
     "verify-client-domain-graph": "tsx scripts/verify-client-domain-graph.ts",
     "gen-tsconfig-paths": "tsx scripts/gen-tsconfig-paths.ts",
     "verify-tsconfig-paths": "tsx scripts/gen-tsconfig-paths.ts --check",

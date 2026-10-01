@@ -131,6 +131,40 @@ function browserSourcePath(source: string, sourcemapPath: string): string {
 }
 
 /**
+ * Lower one raw JavaScript payload to the script floor.
+ *
+ * A payload embedded as text — a third-party Worker script, for example — never
+ * passes through the bundle's own transform, so it carries whatever syntax its
+ * publisher emitted and the artifact can ship a construct the floor cannot
+ * parse. A bare Rolldown build applies exactly the floor's lowering and nothing
+ * else: no bundling graph, no wrapping, and the payload stays a module.
+ * @param code - Payload source to lower.
+ * @param id - Module id reported in diagnostics, usually the payload's file.
+ * @returns Lowered module source.
+ */
+export async function downlevelClientScript(code: string, id: string): Promise<string> {
+  const virtualId = 'dsh-floor-payload.mjs'
+  const build = await Rolldown.rolldown({
+    input: virtualId,
+    platform: 'browser',
+    transform: { target: CLIENT_SCRIPT_TARGET },
+    plugins: [{
+      name: 'dsh-floor-payload',
+      resolveId: (source: string) => (source === virtualId ? virtualId : null),
+      load: (candidate: string) => (candidate === virtualId ? code : null),
+    }],
+  })
+  try {
+    const result = await build.generate({ format: 'esm', minify: true })
+    const chunk = result.output[0]
+    if (chunk?.type !== 'chunk') throw new Error(`client browser floor: ${id} did not emit a JavaScript chunk`)
+    return chunk.code
+  } finally {
+    await build.close()
+  }
+}
+
+/**
  * Build the tsdown config for one UI plugin package: the node-half lib build
  * plus the browser client bundle. Client packages emit both halves during the
  * Client pass by default; packages needed for Host reflection may opt into the

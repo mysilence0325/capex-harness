@@ -21,6 +21,10 @@ const FLOOR = [
   'AbortSignal.any',
   'AbortSignal.timeout',
   'AbortSignal.prototype.throwIfAborted',
+  'Iterator',
+  'Promise.try',
+  'URL.parse',
+  'Uint8Array.fromBase64',
 ]
 
 /** Undo one removal of a realm API. */
@@ -41,6 +45,18 @@ function without(owner: object, key: string): Restoration {
 }
 
 /**
+ * Define a stand-in for a floor API the test realm itself lacks.
+ * @param owner - object carrying the property.
+ * @param key - property name.
+ * @param value - stand-in value.
+ * @returns the removal of that stand-in.
+ */
+function withNative(owner: object, key: string, value: unknown): Restoration {
+  Object.defineProperty(owner, key, { value, writable: true, configurable: true })
+  return () => { Reflect.deleteProperty(owner, key) }
+}
+
+/**
  * Load a module instance whose install flag is unset, as a fresh page load has.
  * @returns the module under test.
  */
@@ -53,6 +69,12 @@ describe('browser compatibility floor', () => {
   const restorations: Restoration[] = []
 
   beforeAll(async () => {
+    // The test realm can trail the engines the client ships to: stand in for the
+    // two floor APIs Node lacks, so a complete engine still installs nothing.
+    restorations.push(
+      withNative(Promise, 'try', (callback: () => unknown) => Promise.resolve(callback())),
+      withNative(Uint8Array, 'fromBase64', () => new Uint8Array()),
+    )
     // An engine that ships every API: the floor installs nothing.
     const complete = await freshCompat()
     expect(complete.installBrowserCompat()).toEqual([])
@@ -70,6 +92,10 @@ describe('browser compatibility floor', () => {
       without(AbortSignal, 'any'),
       without(AbortSignal, 'timeout'),
       without(AbortSignal.prototype, 'throwIfAborted'),
+      without(globalThis, 'Iterator'),
+      without(Promise, 'try'),
+      without(URL, 'parse'),
+      without(Uint8Array, 'fromBase64'),
     )
     // An engine that lacks them: the floor installs each one once. Loading the
     // side-effect entry afterwards covers the shell's own import path.
@@ -206,5 +232,36 @@ describe('browser compatibility floor', () => {
     })
     expect(signal.aborted).toBe(true)
     expect((signal.reason as DOMException).name).toBe('TimeoutError')
+  })
+  it('names the shared iterator prototype third-party code patches', () => {
+    // pdf.js writes Iterator.prototype.join before it checks anything else.
+    const iteratorGlobal = (globalThis as { Iterator?: { prototype: object } }).Iterator
+    expect(iteratorGlobal).toBeDefined()
+    const inner = Reflect.getPrototypeOf([][Symbol.iterator]())
+    const shared = inner === null ? null : Reflect.getPrototypeOf(inner)
+    expect(iteratorGlobal?.prototype).toBe(shared)
+    interface Patched { describe?: () => string }
+    const patched = shared as Patched
+    patched.describe = () => 'ok'
+    expect((Reflect.getPrototypeOf([1, 2][Symbol.iterator]()) as Patched).describe?.()).toBe('ok')
+  })
+
+  it('runs a callback through Promise.try', async () => {
+    const promiseTry = Promise as { try?: <T>(callback: () => T) => Promise<T> }
+    await expect(promiseTry.try?.(() => 2)).resolves.toBe(2)
+    await expect(promiseTry.try?.(() => { throw new Error('boom') })).rejects.toThrow('boom')
+  })
+
+  it('parses a URL without throwing on invalid input', () => {
+    const urlParse = URL as { parse?: (value: string, base?: string) => URL | null }
+    expect(urlParse.parse?.('https://example.com/a')?.pathname).toBe('/a')
+    expect(urlParse.parse?.('/a', 'https://example.com')?.href).toBe('https://example.com/a')
+    expect(urlParse.parse?.('http://')).toBeNull()
+  })
+
+  it('decodes base64 bytes', () => {
+    const fromBase64 = Uint8Array as { fromBase64?: (value: string) => Uint8Array }
+    expect([...(fromBase64.fromBase64?.('AQID') ?? new Uint8Array())]).toEqual([1, 2, 3])
+    expect(fromBase64.fromBase64?.('')?.length).toBe(0)
   })
 })

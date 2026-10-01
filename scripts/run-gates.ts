@@ -397,6 +397,10 @@ function ciPrimaryGates(): Gate[] {
       needs: ['build'],
     }),
     builtPackageInvariantsGate(['build']),
+    pnpmScript('browser-floor', 'verify-client-browser-floor', {
+      label: 'client browser floor',
+      needs: ['build'],
+    }),
     builtBinSmokeGate(),
   ]
 }

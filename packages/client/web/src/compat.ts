@@ -54,6 +54,19 @@ interface AbortSignalCompat {
   timeout?: (milliseconds: number) => AbortSignal
 }
 
+/** Statics Chromium 90 lacks on the constructors pdf.js reaches unguarded. */
+interface PromiseTryCompat {
+  try?: <T>(callback: () => T | PromiseLike<T>) => Promise<T>
+}
+
+interface UrlCompat {
+  parse?: (url: string, base?: string) => URL | null
+}
+
+interface Uint8ArrayCompat {
+  fromBase64?: (value: string) => Uint8Array
+}
+
 interface AbortSignalPrototypeCompat {
   throwIfAborted?: () => void
 }
@@ -305,6 +318,75 @@ function installStructuredClone(installedApis: string[]): void {
 }
 
 /**
+ * Install the `Iterator` global the shared iterator prototype is reachable through.
+ *
+ * Chromium 90 has the internal prototype every built-in iterator inherits from
+ * but no global naming it, and pdf.js reaches it unguarded to add helpers:
+ * `Iterator.prototype.join != 'function' && (Iterator.prototype.join = ...)`
+ * throws before its own check can run.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installIteratorGlobal(installedApis: string[]): void {
+  const scope = globalThis as { Iterator?: unknown }
+  if (scope.Iterator !== undefined) return
+  const inner = Reflect.getPrototypeOf([][Symbol.iterator]())
+  const shared = inner === null ? null : Reflect.getPrototypeOf(inner)
+  if (shared === null) return
+  const IteratorGlobal = function Iterator(): void {
+    // The global only names the prototype built-in iterators already share.
+  }
+  Object.defineProperty(IteratorGlobal, 'prototype', { value: shared })
+  Object.defineProperty(globalThis, 'Iterator', { value: IteratorGlobal, writable: true, configurable: true })
+  installedApis.push('Iterator')
+}
+
+/**
+ * Install `Promise.try`.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installPromiseTry(installedApis: string[]): void {
+  const promise = Promise as PromiseTryCompat
+  if (promise.try !== undefined) return
+  promise.try = <T>(callback: () => T | PromiseLike<T>): Promise<T> =>
+    new Promise<T>((resolve) => { resolve(callback()) })
+  installedApis.push('Promise.try')
+}
+
+/**
+ * Install `URL.parse`, which reports an unparsable input as null instead of throwing.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installUrlParse(installedApis: string[]): void {
+  const url = URL as UrlCompat
+  if (url.parse !== undefined) return
+  url.parse = (value: string, base?: string): URL | null => {
+    try {
+      return base === undefined ? new URL(value) : new URL(value, base)
+    } catch (error) {
+      if (error instanceof TypeError) return null
+      throw error
+    }
+  }
+  installedApis.push('URL.parse')
+}
+
+/**
+ * Install `Uint8Array.fromBase64`, which pdf.js calls for base64 transfer-encoded bodies.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installUint8ArrayFromBase64(installedApis: string[]): void {
+  const view = Uint8Array as Uint8ArrayCompat
+  if (view.fromBase64 !== undefined) return
+  view.fromBase64 = (value: string): Uint8Array => {
+    const binary = atob(value)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+    return bytes
+  }
+  installedApis.push('Uint8Array.fromBase64')
+}
+
+/**
  * Install every missing API of the client's browser floor.
  *
  * Idempotent per realm: the first call installs what the engine lacks, later
@@ -323,5 +405,9 @@ export function installBrowserCompat(): string[] {
   installStructuredClone(installedApis)
   installAbortSignalStatics(installedApis)
   installAbortSignalAbortCheck(installedApis)
+  installIteratorGlobal(installedApis)
+  installPromiseTry(installedApis)
+  installUrlParse(installedApis)
+  installUint8ArrayFromBase64(installedApis)
   return installedApis
 }

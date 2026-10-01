@@ -2,7 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { Rolldown, type UserConfig } from 'tsdown'
-import { clientBundle } from '../tsdown.client.ts'
+import { clientBundle, downlevelClientScript } from '../tsdown.client.ts'
+import { CLIENT_FLOOR_WORKER_PREAMBLE, CLIENT_SCRIPT_TARGET } from '../../../scripts/client-browser-floor.ts'
 
 const bundle = clientBundle('@deepseek-ai/dsh-client-ui-sidebar-documentpreview', ['lib/types/index.js'], {
   clientBanner: fileName => fileName.endsWith('client.pdf.js') ? pdfLicenseBanner()
@@ -59,11 +60,14 @@ const pdfWorker: NonNullable<UserConfig['plugins']> = [{
   resolveId(source) {
     return source === workerSpecifier ? workerModule : null
   },
-  load(id) {
+  async load(id) {
     if (id !== workerModule) return null
     const path = require.resolve('pdfjs-dist/build/pdf.worker.min.mjs')
     this.addWatchFile(path)
-    return `export default ${JSON.stringify(readFileSync(path, 'utf8'))};`
+    // The payload is embedded as text, so only this explicit pass lowers it; the
+    // preamble travels with it because the Worker realm installs no compat entry.
+    const source = await downlevelClientScript(readFileSync(path, 'utf8'), path)
+    return `export default ${JSON.stringify(CLIENT_FLOOR_WORKER_PREAMBLE + source)};`
   },
 }]
 
@@ -77,7 +81,7 @@ const excelWorker: NonNullable<UserConfig['plugins']> = [{
     const worker = await Rolldown.rolldown({
       input: join(import.meta.dirname, 'src/client/excel/worker.ts'), platform: 'browser',
       resolve: { mainFields: ['browser', 'module', 'main'], aliasFields: [['browser']] },
-      transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') } },
+      transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') }, target: CLIENT_SCRIPT_TARGET },
       plugins: [{
         name: 'dsh-excel-worker-dependencies',
         async resolveId(source, importer) {
@@ -92,7 +96,7 @@ const excelWorker: NonNullable<UserConfig['plugins']> = [{
       const chunk = result.output[0]
       if (chunk?.type !== 'chunk') throw new Error('Excel parser did not emit a JavaScript chunk')
       for (const path of Object.keys(chunk.modules)) this.addWatchFile(path)
-      return `export default ${JSON.stringify(chunk.code)};`
+      return `export default ${JSON.stringify(CLIENT_FLOOR_WORKER_PREAMBLE + chunk.code)};`
     } finally { await worker.close() }
   },
 }]

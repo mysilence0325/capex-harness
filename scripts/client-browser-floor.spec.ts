@@ -8,7 +8,9 @@
 import { globSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
-  CLIENT_SCRIPT_TARGET, CLIENT_STYLE_TARGETS, downlevelClientCss, loadClientThemeTokens,
+  CLIENT_FLOOR_APIS, CLIENT_FLOOR_WORKER_APIS, CLIENT_FLOOR_WORKER_PREAMBLE, CLIENT_SCRIPT_TARGET,
+  CLIENT_STYLE_TARGETS,
+  downlevelClientCss, loadClientThemeTokens,
 } from './client-browser-floor.ts'
 
 const tokens = loadClientThemeTokens(process.cwd())
@@ -124,5 +126,41 @@ describe('client stylesheet downleveling', () => {
       }
     }
     expect([...unresolved]).toEqual([])
+  })
+})
+
+describe('shell install contract', () => {
+  it('installs exactly the APIs the floor declares', () => {
+    // The shell's installer owns the implementations and this module owns the
+    // contract; a name added on one side alone is a silent gap in the other.
+    const source = readFileSync('packages/client/web/src/compat.ts', 'utf8')
+    const installed = [...source.matchAll(/installedApis\.push\('([^']+)'\)/gu)].map(match => match[1])
+    expect([...installed].sort()).toEqual([...CLIENT_FLOOR_APIS].sort())
+  })
+})
+
+describe('worker realm install', () => {
+  it('promises only APIs the shell contract lists', () => {
+    expect([...CLIENT_FLOOR_WORKER_APIS].filter(api => !CLIENT_FLOOR_APIS.includes(api))).toEqual([])
+    // structuredClone is the one entry no shipped payload calls, and its copy
+    // semantics do not belong in an injected preamble.
+    expect([...CLIENT_FLOOR_APIS].filter(api => !CLIENT_FLOOR_WORKER_APIS.includes(api))).toEqual(['structuredClone'])
+  })
+
+  it('installs every declared worker API by name', () => {
+    const installed = CLIENT_FLOOR_WORKER_PREAMBLE
+    for (const api of CLIENT_FLOOR_WORKER_APIS) {
+      const member = api.split('.').at(-1)
+      expect(member).toBeDefined()
+      // A global is installed through defineProperty, a static through define().
+      expect(api.includes('.') ? installed : installed).toContain(api.includes('.') ? `'${String(member)}'` : String(member))
+    }
+  })
+
+  it('stays feature-detected so a modern realm keeps its native members', () => {
+    expect(CLIENT_FLOOR_WORKER_PREAMBLE).toContain('if (target[name] === undefined)')
+    for (const api of CLIENT_FLOOR_WORKER_APIS) {
+      expect(CLIENT_FLOOR_WORKER_PREAMBLE).not.toContain(`${api} = `)
+    }
   })
 })

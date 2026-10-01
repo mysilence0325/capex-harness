@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'tsdown'
+import { CLIENT_FLOOR_WORKER_PREAMBLE, CLIENT_SCRIPT_TARGET } from '../../../scripts/client-browser-floor.ts'
 import { MODULE_PROXIES, MODULE_PROXY_PREFIXES } from './src/module-proxies.ts'
 
 const here = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url))
@@ -71,14 +72,16 @@ export default defineConfig([{
   outDir: 'lib',
   format: ['esm'],
   platform: 'browser',
-  target: 'es2022',
+  target: CLIENT_SCRIPT_TARGET,
   sourcemap: true,
   fixedExtension: false,
   dts: false,
   clean: false,
   noExternal: [/.*/],
   plugins: [moduleProxyPlugin, shellParserOnlyPlugin],
-  outputOptions: { inlineDynamicImports: true },
+  // A Worker is its own realm: the shell's compat entry never runs there, so the
+  // payload carries the install it needs.
+  outputOptions: { inlineDynamicImports: true, banner: CLIENT_FLOOR_WORKER_PREAMBLE },
 }, {
   // Page half: an ordinary browser ES module the deployment's page imports. It
   // is not a `dsh.client` graph row — it installs the module loader the graph is
@@ -88,9 +91,9 @@ export default defineConfig([{
   outDir: 'lib',
   format: ['esm'],
   platform: 'browser',
-  target: 'es2022',
+  target: CLIENT_SCRIPT_TARGET,
   fixedExtension: false,
   dts: false,
   clean: false,
-  outputOptions: { entryFileNames: 'client.js' },
+  outputOptions: { entryFileNames: 'client.js', banner: CLIENT_FLOOR_WORKER_PREAMBLE },
 }])

@@ -4,6 +4,174 @@ import { resolve } from 'node:path'
 import type { Targets } from 'lightningcss'
 
 /**
+ * Every standard API the floor lacks and the client calls, by installed name.
+ *
+ * This is the compatibility contract: the shell's installer must cover each
+ * entry, and a payload that ships without the shell covers
+ * {@link CLIENT_FLOOR_WORKER_APIS}.
+ */
+export const CLIENT_FLOOR_APIS: readonly string[] = [
+  'Object.hasOwn',
+  'Array.prototype.at',
+  'Array.prototype.findLast',
+  'Array.prototype.findLastIndex',
+  'Array.prototype.toSorted',
+  'Array.prototype.toReversed',
+  'Promise.withResolvers',
+  'structuredClone',
+  'AbortSignal.any',
+  'AbortSignal.timeout',
+  'AbortSignal.prototype.throwIfAborted',
+  // Third-party payloads reach these unguarded; pdf.js needs all four in the page
+  // realm and in its Worker.
+  'Iterator',
+  'Promise.try',
+  'URL.parse',
+  'Uint8Array.fromBase64',
+]
+
+/**
+ * Standard APIs the floor lacks that a browser Worker realm needs installed.
+ *
+ * A Worker is its own realm and never evaluates the shell's compat entry, so a
+ * payload that calls one of these throws there even though the page works.
+ * `structuredClone` is deliberately absent: no shipped payload calls it, and
+ * its full copy semantics do not belong in an injected preamble.
+ */
+export const CLIENT_FLOOR_WORKER_APIS: readonly string[] = [
+  'Iterator',
+  'Promise.try',
+  'URL.parse',
+  'Uint8Array.fromBase64',
+  'Object.hasOwn',
+  'Array.prototype.at',
+  'Array.prototype.findLast',
+  'Array.prototype.findLastIndex',
+  'Array.prototype.toSorted',
+  'Array.prototype.toReversed',
+  'Promise.withResolvers',
+  'AbortSignal.prototype.throwIfAborted',
+  'AbortSignal.any',
+  'AbortSignal.timeout',
+]
+
+/**
+ * Self-contained install of {@link CLIENT_FLOOR_WORKER_APIS} for a realm the
+ * shell never reaches.
+ *
+ * Worker payloads ship as text — a third-party script, or a bundle built
+ * outside the loader graph — so the install has to travel with the payload
+ * rather than being imported by it. It is plain script with no dependencies,
+ * feature-detected like the shell's installer, and safe to prepend to both
+ * classic and module workers.
+ */
+export const CLIENT_FLOOR_WORKER_PREAMBLE = `(function () {
+  function define(target, name, value) {
+    if (target[name] === undefined) Object.defineProperty(target, name, { value: value, writable: true, configurable: true });
+  }
+  if (typeof Iterator === 'undefined') {
+    var sharedIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+    var IteratorGlobal = function Iterator() {};
+    IteratorGlobal.prototype = sharedIteratorPrototype;
+    Object.defineProperty(globalThis, 'Iterator', { value: IteratorGlobal, writable: true, configurable: true });
+  }
+  define(Promise, 'try', function tryCallback(callback) {
+    var args = [];
+    for (var index = 1; index < arguments.length; index += 1) args.push(arguments[index]);
+    return new Promise(function (resolve) { resolve(callback.apply(undefined, args)); });
+  });
+  define(URL, 'parse', function parse(value, base) {
+    try {
+      return base === undefined ? new URL(value) : new URL(value, base);
+    } catch (error) {
+      if (error instanceof TypeError) return null;
+      throw error;
+    }
+  });
+  define(Uint8Array, 'fromBase64', function fromBase64(value) {
+    var binary = atob(value);
+    var bytes = new Uint8Array(binary.length);
+    for (var index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  });
+  define(Object, 'hasOwn', function hasOwn(target, key) { return Object.prototype.hasOwnProperty.call(target, key); });
+  var array = Array.prototype;
+  define(array, 'at', function at(index) {
+    var length = this.length >>> 0;
+    var relative = Math.trunc(index) || 0;
+    var resolved = relative < 0 ? length + relative : relative;
+    return resolved < 0 || resolved >= length ? undefined : this[resolved];
+  });
+  define(array, 'findLast', function findLast(predicate, thisArg) {
+    for (var index = this.length - 1; index >= 0; index -= 1) {
+      if (predicate.call(thisArg, this[index], index, this)) return this[index];
+    }
+    return undefined;
+  });
+  define(array, 'findLastIndex', function findLastIndex(predicate, thisArg) {
+    for (var index = this.length - 1; index >= 0; index -= 1) {
+      if (predicate.call(thisArg, this[index], index, this)) return index;
+    }
+    return -1;
+  });
+  define(array, 'toSorted', function toSorted(compare) {
+    var copy = [];
+    for (var index = 0; index < this.length; index += 1) copy.push(this[index]);
+    copy.sort(compare);
+    return copy;
+  });
+  define(array, 'toReversed', function toReversed() {
+    var copy = [];
+    for (var index = this.length - 1; index >= 0; index -= 1) copy.push(this[index]);
+    return copy;
+  });
+  define(Promise, 'withResolvers', function withResolvers() {
+    var resolve, reject;
+    var promise = new Promise(function (settle, fail) { resolve = settle; reject = fail; });
+    return { promise: promise, resolve: resolve, reject: reject };
+  });
+  if (typeof AbortSignal !== 'undefined') {
+    define(AbortSignal.prototype, 'throwIfAborted', function throwIfAborted() {
+      if (!this.aborted) return;
+      if (this.reason !== undefined) throw this.reason;
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    });
+    define(AbortSignal, 'any', function any(signals) {
+      var controller = new AbortController();
+      var listeners = [];
+      function release() {
+        for (var index = 0; index < listeners.length; index += 1) {
+          listeners[index][0].removeEventListener('abort', listeners[index][1]);
+        }
+        listeners = [];
+      }
+      function watch(source) {
+        var listener = function () { controller.abort(source.reason); release(); };
+        listeners.push([source, listener]);
+        source.addEventListener('abort', listener);
+      }
+      for (var index = 0; index < signals.length; index += 1) {
+        if (signals[index].aborted) {
+          controller.abort(signals[index].reason);
+          release();
+          return controller.signal;
+        }
+        watch(signals[index]);
+      }
+      return controller.signal;
+    });
+    define(AbortSignal, 'timeout', function timeout(milliseconds) {
+      var controller = new AbortController();
+      setTimeout(function () {
+        controller.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+      }, milliseconds);
+      return controller.signal;
+    });
+  }
+})();
+`
+
+/**
  * The client's browser floor: the Chromium release every client artifact must
  * run on, and the stylesheet rewrites that floor needs and no compiler
  * performs.

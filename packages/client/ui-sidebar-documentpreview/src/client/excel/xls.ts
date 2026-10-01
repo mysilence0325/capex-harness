@@ -18,7 +18,7 @@ const isDateFormat = (format: string) => spreadsheetFormatter.is_date(format)
  */
 export function convertXls(bytes: Uint8Array<ArrayBuffer>, limits: ExcelLimits): ExcelPreview {
   const compound = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].every((value, index) => bytes[index] === value)
-  const biffVersion = bytes.at(1)
+  const biffVersion = bytes[1]
   const biff = bytes[0] === 0x09 && biffVersion !== undefined && [0x00, 0x02, 0x04, 0x08].includes(biffVersion)
   if (!compound && !biff) throw new ExcelPreviewError('invalid')
   let workbook: ReturnType<typeof read>
