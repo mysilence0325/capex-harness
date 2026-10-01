@@ -3834,7 +3834,8 @@ describe('ChatView', () => {
 
       override observe(element: Element): void {
         super.observe(element)
-        if (element.closest('nav') === null) notify = this.onResize
+        // The rail band's marker observer is not the transcript's.
+        if (element.closest('[data-chat-flow]') !== null || element.querySelector('[data-chat-flow]') !== null) notify = this.onResize
       }
     }
     vi.stubGlobal('ResizeObserver', ResizeObserverStub)

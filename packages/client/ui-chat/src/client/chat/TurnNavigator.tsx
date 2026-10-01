@@ -1,9 +1,10 @@
 /** Fixed-pitch virtual turn rail with independent activation and scroll controls. */
 import {
   forwardRef, memo, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
-  type CSSProperties, type ForwardedRef,
+  type CSSProperties, type ForwardedRef, type ReactNode,
 } from 'react'
 import { defaultRangeExtractor, elementScroll, observeElementOffset, useVirtualizer, type Range } from '@tanstack/react-virtual'
+import { useNarrowAttribute } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import type { TurnRailItem } from './turn-rail-items.ts'
 import css from './TurnNavigator.module.css'
@@ -31,6 +32,8 @@ const TURN_SPACING_PX = 10
 const RAIL_INSET_PX = 6
 /** Fade band the mask reserves at a scrollable end. */
 const FADE_PX = 24
+/** Transcript width at or below which the rail band hides its frame. */
+const NARROW_RAIL_WIDTH_PX = 900
 
 function preferredScrollBehavior(): 'auto' | 'smooth' {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -77,6 +80,18 @@ const TurnMark = memo(function TurnMark({
     />
   )
 })
+
+/**
+ * Rail band: the element that states the transcript width the rail's stylesheet
+ * selects on. The marker lives here rather than in the rail, so it binds on the
+ * commit that mounts the band; `useNarrowAttribute` binds on its own effect and
+ * the band exists only once the rail has marks to show.
+ */
+function TurnRailBand({ children }: { readonly children: ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  useNarrowAttribute(ref, NARROW_RAIL_WIDTH_PX)
+  return <div ref={ref} className={css.slot}>{children}</div>
+}
 
 function TurnNavigatorRail(
   { items, activeTurn, busyTurn, onNavigate, t }: TurnNavigatorProps,
@@ -231,7 +246,7 @@ function TurnNavigatorRail(
   if (scrollTop > 1) fadeClasses.push(css.fadeTop)
   if (scrollTop < virtualizer.getTotalSize() - viewHeight - 1) fadeClasses.push(css.fadeBottom)
   return (
-    <div className={css.slot}>
+    <TurnRailBand>
       <nav
         className={css.frame}
         aria-label={t('chat.turnNavigation.label')}
@@ -280,7 +295,7 @@ function TurnNavigatorRail(
           </div>
         )}
       </nav>
-    </div>
+    </TurnRailBand>
   )
 }
 

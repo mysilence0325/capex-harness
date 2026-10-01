@@ -1,5 +1,6 @@
 /** Strict per-session header/body content inserted into the resident conversation layout. */
 
+import { useRef } from 'react'
 import clsx from 'clsx'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -9,6 +10,7 @@ import type {
 import { resolveActiveView } from '../view-selection.ts'
 import { DefaultConversationViews } from './DefaultConversationViews.tsx'
 import css from './ConversationRoot.module.css'
+import { useTitleRowMarkers } from './title-row-markers.ts'
 
 /** Full props composed from the strict session body contract. */
 export type ConversationSessionProps = ConversationSessionSlotProps
@@ -60,13 +62,15 @@ export function ConversationSessionHeader({
   renderSlot, open, selectView, t,
 }: ConversationSessionHeaderProps) {
   const tabs = useConversationViews(value => value)
+  const titleRowRef = useRef<HTMLDivElement>(null)
+  useTitleRowMarkers(titleRowRef)
   const selectedId = useStore(s => s.view)
   const active = resolveActiveView(tabs, selectedId)
   const ancestry = useSessions(s => deriveAncestry(s, sessionId), equalBreadcrumbs)
   const showTabs = !hideChrome && tabs.length > 1
   return (
     <>
-      <div className={css.titleRow}>
+      <div ref={titleRowRef} className={css.titleRow}>
         {!hideChrome && (
           <>
             <div className={css.titleCluster}>

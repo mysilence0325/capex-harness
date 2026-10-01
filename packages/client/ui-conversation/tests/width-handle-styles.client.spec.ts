@@ -32,4 +32,8 @@ describe('conversation width handle styles', () => {
   it('keeps the indicator above the composer after drag capture begins', () => {
     expect(conversationCss).toMatch(/\.widthHandle\[data-dragging\]\s*\{[^}]*z-index:\s*8/s)
   })
+
+  it('keeps the title row an inline-size container while it publishes its own width', () => {
+    expect(conversationCss).toMatch(/\.titleRow\s*\{[^}]*container-type:\s*inline-size/s)
+  })
 })

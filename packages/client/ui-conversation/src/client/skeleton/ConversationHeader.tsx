@@ -4,6 +4,15 @@ import clsx from 'clsx'
 import type { ConversationHeaderProps } from '../contract/slots.ts'
 import { conversationPhase } from '../contract/snapshot.ts'
 import css from './ConversationRoot.module.css'
+import { useTitleRowMarkers } from './title-row-markers.ts'
+
+/** The title row the header keeps before a Session exists, marked at the
+ *  widths its future occupants collapse at. */
+function SessionlessTitleRow() {
+  const ref = useRef<HTMLDivElement>(null)
+  useTitleRowMarkers(ref)
+  return <div ref={ref} className={css.titleRow} />
+}
 
 /**
  * Keeps global navigation available before a Session exists.
@@ -42,7 +51,7 @@ export function ConversationHeader({ sessionId, useSession, useConversation, ren
         {renderSlot('conversation.header.leading', {})}
       </div>
       {sessionId === undefined
-        ? <div className={css.titleRow} />
+        ? <SessionlessTitleRow />
         : renderSlot('conversation.session.header', { hideChrome: blank })}
     </header>
   )

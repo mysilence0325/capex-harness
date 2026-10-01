@@ -8,7 +8,8 @@
      the composer, so its preview never needs to cross the footer. */
   z-index: 7;
   height: 0;
-  /* Query the transcript's usable width while keeping the rail full-bleed. */
+  /* Spans the transcript's usable width while staying full-bleed; the preview
+     sizes its `cqw` against that width. */
   padding-inline: calc(var(--dsh-composer-side-clearance) + 16px);
   container-type: inline-size;
   pointer-events: none;
@@ -204,10 +205,10 @@
   50% { opacity: 0.35; }
 }
 
-@container (max-width: 900px) {
-  .frame {
-    display: none;
-  }
+/* The band hides its frame in a narrow transcript. TurnNavigator.tsx marks the
+   band's own width, because Chromium 90 has no container queries (chrome 105). */
+[data-narrow] .frame {
+  display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

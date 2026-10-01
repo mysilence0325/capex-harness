@@ -21,4 +21,10 @@ describe('deliverables layout', () => {
     expect(deliveries).toMatch(/\.presented\s*\{[^}]*gap:\s*10px/s)
   })
 
+  it('keeps the narrow delivery row attribute-driven, not a container query', () => {
+    // Chromium 90 has no container queries; Deliverables.tsx marks its container.
+    expect(read('Deliverables.module.css'))
+      .toMatch(/\[data-narrow\]\s+\.presented\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);\s*\}/)
+  })
+
 })

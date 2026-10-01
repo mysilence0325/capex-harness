@@ -20,6 +20,7 @@ import {
   MarkdownText,
   StateDot,
   Tooltip,
+  useNarrowAttribute,
   writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { JsonTreeLabels, JsonTreeProps, MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -2105,6 +2106,9 @@ export function TrajectoryTable({
   const tabHistory = useRef<Set<DetailTab>>(new Set(['overview']))
   const rootRef = useRef<HTMLDivElement>(null)
   const tablePaneRef = useRef<HTMLDivElement>(null)
+  // The pane's compact columns and labels select on this marker: Chromium 90 has
+  // no container queries (chrome 105).
+  useNarrowAttribute(tablePaneRef, 620)
   const followsTableTail = useRef(false)
   const tableScrollInitialized = useRef(false)
   const [tableScrollReady, setTableScrollReady] = useState(false)

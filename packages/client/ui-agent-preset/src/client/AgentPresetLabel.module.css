@@ -22,11 +22,10 @@
   opacity: 0.7;
 }
 
-/* First sacrifice when the title row (the enclosing inline-size container)
-   runs out of width: the preset is passive chrome, so it yields before any
-   interactive header action loses its label. */
-@container (max-width: 540px) {
-  .label {
-    display: none;
-  }
+/* First sacrifice when the title row marks itself narrow (data-narrow,
+   540px, published by ui-conversation skeleton/title-row-markers.ts): the
+   preset is passive chrome, so it yields before any interactive header action
+   loses its label. */
+[data-narrow] .label {
+  display: none;
 }

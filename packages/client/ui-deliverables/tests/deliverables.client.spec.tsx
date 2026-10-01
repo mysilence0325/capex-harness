@@ -70,6 +70,38 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/** One recorded `ResizeObserver` instance, so a test can deliver a size. */
+interface RecordedObserver {
+  deliver: (width: number) => void
+  observed: Element[]
+  disconnected: boolean
+}
+
+/**
+ * Install a recording `ResizeObserver` double.
+ * @returns every instance the double constructs, in construction order.
+ */
+function stubResizeObserver(): RecordedObserver[] {
+  const made: RecordedObserver[] = []
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: (entries: [{ contentRect: { width: number } }]) => void) {
+      const record: RecordedObserver = {
+        deliver: (width) => { callback([{ contentRect: { width } }]) },
+        observed: [],
+        disconnected: false,
+      }
+      made.push(record)
+      this.record = record
+    }
+
+    private readonly record: RecordedObserver
+
+    observe(element: Element) { this.record.observed.push(element) }
+    disconnect() { this.record.disconnected = true }
+  })
+  return made
+}
+
 class TestTurnDataStore implements ConversationLocationDataStore<ConversationTurnDataMap> {
   private readonly values = new Map<string, unknown>()
   private readonly sources = new Map<string, ConversationLocationDataSource<unknown>>()
@@ -911,6 +943,27 @@ describe('presented files', () => {
     fireEvent.click(view.getByRole('button', { name: 'Collapse delivered files' }))
     expect(view.container.querySelectorAll('[data-presented-file]')).toHaveLength(4)
     expect(view.container.querySelector('[data-changed-files]')).toBeNull()
+  })
+
+  it('marks the delivery container narrow from its own content width', () => {
+    const made = stubResizeObserver()
+    const view = render(<Deliverables {...openProps()} matched={{ changes: null, presented: [
+      { path: 'report.txt', seq: 2, index: 0 },
+      { path: 'summary.md', seq: 2, index: 1 },
+    ] }} openFile={() => {}} sessionId={SessionId('session')} t={makeTranslate(en)} />)
+    const container = view.container.querySelector('[data-presented-files-row]')!.parentElement!
+    // jsdom lays out nothing, so the first measurement is zero width: inside the cut.
+    expect(container.hasAttribute('data-narrow')).toBe(true)
+    const observer = made.find(record => record.observed.includes(container))!
+    expect(observer).toBeDefined()
+    // The measured element is the one that declares container-type, so the
+    // stylesheet's narrow rule follows the card's own width, not the viewport's.
+    observer.deliver(700)
+    expect(container.hasAttribute('data-narrow')).toBe(false)
+    observer.deliver(620)
+    expect(container.hasAttribute('data-narrow')).toBe(true)
+    view.unmount()
+    expect(observer.disconnected).toBe(true)
   })
 })
 

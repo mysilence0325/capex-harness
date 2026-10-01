@@ -152,4 +152,29 @@ describe('TurnNavigator', () => {
     expect(view.getByRole('tooltip').textContent).toBe('prompt 70')
     expect(underPointer.getAttribute('aria-describedby')).toBe(previewId)
   })
+
+  it('states the transcript width its stylesheet hides the frame on', () => {
+    const observer = installTurnNavigatorObserver()
+    const view = render(<TurnNavigator items={items} activeTurn={1} busyTurn={null} onNavigate={vi.fn()} t={t} />)
+    const band = view.getByRole('navigation').parentElement as HTMLElement
+
+    // jsdom computes no layout: the zero-width band sits inside the cut.
+    expect(band.hasAttribute('data-narrow')).toBe(true)
+    act(() => { observer.resizeBand(901) })
+    expect(band.hasAttribute('data-narrow')).toBe(false)
+    act(() => { observer.resizeBand(900) })
+    expect(band.hasAttribute('data-narrow')).toBe(true)
+  })
+
+  it('states the band width of the rail that appears with a second turn', () => {
+    installTurnNavigatorObserver()
+    const props = { activeTurn: 1, busyTurn: null, onNavigate: vi.fn(), t }
+    const view = render(<TurnNavigator {...props} items={items.slice(0, 1)} />)
+    expect(view.queryByRole('navigation')).toBeNull()
+
+    view.rerender(<TurnNavigator {...props} items={items.slice(0, 2)} />)
+
+    const band = view.getByRole('navigation').parentElement as HTMLElement
+    expect(band.hasAttribute('data-narrow')).toBe(true)
+  })
 })

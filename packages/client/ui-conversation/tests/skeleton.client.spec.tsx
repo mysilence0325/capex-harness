@@ -83,6 +83,21 @@ function fireResize(el: Element): void {
   }
 }
 
+/** Fires every recorded observer watching the element with one content-box width. */
+function fireResizeWidth(el: Element, width: number): void {
+  const size: ResizeObserverSize = { blockSize: 0, inlineSize: width }
+  for (const entry of resizeObservers) {
+    if (!entry.targets.includes(el)) continue
+    entry.callback([{
+      target: el,
+      contentRect: new DOMRectReadOnly(0, 0, width, 0),
+      borderBoxSize: [size],
+      contentBoxSize: [size],
+      devicePixelContentBoxSize: [size],
+    }], undefined as never)
+  }
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -405,6 +420,35 @@ describe('ConversationRoot resident composer', () => {
     expect(b.slotCalls).not.toContain('conversation.session.header')
     expect(b.view.queryByRole('tablist')).toBeNull()
     expect(b.view.queryByTestId('view-conversation.session.header.corner')).toBeNull()
+  })
+
+  it('marks the title row holding the header slots at both occupant widths', () => {
+    const b = mount(sessionSnapshotOf())
+    const row = b.view.container.querySelector('header [data-narrow]')
+    // The row the header slot content lands in, not the leading or body seats.
+    expect(row?.contains(b.view.container.querySelector('[data-conversation-header-corner]'))).toBe(true)
+    // jsdom measures a zero-width box, which is inside both cuts.
+    expect(row?.hasAttribute('data-tight')).toBe(true)
+
+    act(() => { fireResizeWidth(row!, 600) })
+    expect(row?.hasAttribute('data-narrow')).toBe(false)
+    expect(row?.hasAttribute('data-tight')).toBe(false)
+
+    act(() => { fireResizeWidth(row!, 500) })
+    expect(row?.hasAttribute('data-narrow')).toBe(true)
+    expect(row?.hasAttribute('data-tight')).toBe(false)
+
+    act(() => { fireResizeWidth(row!, 480) })
+    expect(row?.hasAttribute('data-narrow')).toBe(true)
+    expect(row?.hasAttribute('data-tight')).toBe(true)
+  })
+
+  it('marks the empty title row the header keeps before a Session exists', () => {
+    const b = mount(sessionSnapshotOf(), [], undefined, { sessionId: undefined })
+    const row = b.view.container.querySelector('header [data-narrow]')
+    expect(row).not.toBeNull()
+    expect(row?.hasAttribute('data-tight')).toBe(true)
+    expect(row?.className).not.toBe('')
   })
 
   it('does not redispatch composer child slots for an unrelated Session publication', () => {

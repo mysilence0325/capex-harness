@@ -21,13 +21,13 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* Second sacrifice after the preset label: past this title-row width the
-   trigger keeps only its icon. TeamAction reads the collapsed state off this
-   rule to switch from hover-open to click-only. */
-@container (max-width: 480px) {
-  .triggerLabel {
-    display: none;
-  }
+/* Second sacrifice after the preset label: at 480px the title row marks
+   itself data-tight (published by ui-conversation
+   skeleton/title-row-markers.ts) and the trigger keeps only its icon.
+   TeamAction reads the collapsed state off this rule to switch from hover-open
+   to click-only. */
+[data-tight] .triggerLabel {
+  display: none;
 }
 
 .count {

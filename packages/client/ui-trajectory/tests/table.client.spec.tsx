@@ -69,6 +69,7 @@ function TrajectoryTable(
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   Reflect.deleteProperty(HTMLElement.prototype, 'scrollTo')
 })
 
@@ -122,6 +123,36 @@ const FOLD_PROPS = {
   onToggleTurn: () => {},
   collapsedAssistants: new Set<string>(),
   onToggleAssistant: () => {},
+}
+
+/** One recorded `ResizeObserver` instance, so a test can deliver a pane width. */
+interface RecordedPaneWidth {
+  deliver: (width: number) => void
+  observed: Element[]
+}
+
+/**
+ * Install a recording `ResizeObserver` double.
+ * @returns the list every constructed observer registers itself in.
+ */
+function stubResizeObserver(): RecordedPaneWidth[] {
+  const made: RecordedPaneWidth[] = []
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: (entries: [{ contentRect: { width: number } }]) => void) {
+      const record: RecordedPaneWidth = {
+        deliver: (width) => { callback([{ contentRect: { width } }]) },
+        observed: [],
+      }
+      made.push(record)
+      this.record = record
+    }
+
+    private readonly record: RecordedPaneWidth
+
+    observe(element: Element) { this.record.observed.push(element) }
+    disconnect() {}
+  })
+  return made
 }
 
 describe('TrajectoryTable', () => {
@@ -1012,6 +1043,23 @@ describe('TrajectoryTable', () => {
 
     expect(turnLabel.textContent).toContain('Turn 1')
     expect(turnLabel.textContent).toContain('#1')
+  })
+
+  it('states the ledger pane width its narrow styles select on', () => {
+    const observers = stubResizeObserver()
+    const view = render(<TrajectoryTable turns={TURNS} {...FOLD_PROPS} />)
+    const pane = view.container.querySelector<HTMLElement>('[data-trajectory-scroll]')
+    expect(pane).not.toBeNull()
+
+    // jsdom computes no layout: the pane's zero content box is inside the cut.
+    expect(pane!.hasAttribute('data-narrow')).toBe(true)
+    const paneObserver = observers.find(observer => observer.observed.includes(pane!))
+    expect(paneObserver).toBeDefined()
+
+    paneObserver!.deliver(621)
+    expect(pane!.hasAttribute('data-narrow')).toBe(false)
+    paneObserver!.deliver(620)
+    expect(pane!.hasAttribute('data-narrow')).toBe(true)
   })
 
   it('renders a single-text JSON tool result as a JSON tree', () => {
