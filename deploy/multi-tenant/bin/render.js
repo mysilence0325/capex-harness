@@ -528,7 +528,12 @@ ${isControlPlane ? `  gateway:
 ${gatewayTlsLines}      TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
     volumes:
-      - ./tenants.json:/config/tenants.json:ro
+      # Read-write, unlike every other consumer: the administrator console edits
+      # this file (adding tenants, setting passwords). It is the control plane's
+      # own registry, and the console is the control plane's administrative
+      # surface. Rewritten in place, never renamed, so this container's own
+      # watcher keeps seeing the same inode.
+      - ./tenants.json:/config/tenants.json
       - ./state:/state
       - ./logs:/logs
 

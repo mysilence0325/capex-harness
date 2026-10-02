@@ -22,6 +22,7 @@
 #   bin/mt.sh key <id> <value>   set a tenant's model key in .env
 #   bin/mt.sh model              apply model.patch.yml + model.env to every tenant and restart them
 #   bin/mt.sh render             re-render docker-compose.yml from tenants.json
+#   bin/mt.sh admin-passwd       set the administrator console password
 #   bin/mt.sh register <id>      register a tenant runtime with the control plane
 #   bin/mt.sh unregister <id>    make the control plane forget a tenant runtime
 #   bin/mt.sh runtimes           list the runtimes the control plane knows about
@@ -258,6 +259,33 @@ cmd_register() {
     return 0
   fi
   return 1
+}
+
+# 设置管理控制台的管理员密码。密码只以 scrypt 哈希落在 state/admin.json。
+cmd_admin_passwd() {
+  local password="${1:-}" confirm
+  if [ -z "$password" ]; then
+    printf '新管理员密码: '
+    stty -echo 2>/dev/null || true
+    read -r password
+    stty echo 2>/dev/null || true
+    echo
+    printf '再输一次: '
+    stty -echo 2>/dev/null || true
+    read -r confirm
+    stty echo 2>/dev/null || true
+    echo
+    if [ "$password" != "$confirm" ]; then
+      echo "两次输入不一致" >&2
+      return 1
+    fi
+  fi
+  if [ ${#password} -lt 8 ]; then
+    echo "密码太短（至少 8 位）" >&2
+    return 1
+  fi
+  # 交给控制面写：它拥有 state/，而且哈希算法要和它校验时用的完全一致。
+  node_run bin/admin-passwd.js "$password" | sed 's/^/  /'
 }
 
 cmd_unregister() {
@@ -600,6 +628,7 @@ case "${1:-}" in
   doctor)  bash bin/doctor.sh ;;
   isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
   register)   shift; cmd_register "$@" ;;       # 向控制面注册租户运行时（地址 + 启动 token）
+  admin-passwd) shift; cmd_admin_passwd "$@" ;; # 设置管理控制台的管理员密码
   unregister) shift; cmd_unregister "$@" ;;     # 让控制面忘掉某个租户的运行时
   runtimes)   cmd_runtimes ;;                   # 列出控制面当前认识的运行时
   usage)   shift; bash bin/usage.sh "$@" ;;     # 按租户汇总模型用量（--tenant/--tail）

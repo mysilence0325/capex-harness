@@ -390,6 +390,9 @@ function register(tenant, target, token, nodeAddress) {
     token,
     node: NODE_NAME,
     local: target,
+    // Where to reach this agent for lifecycle actions. The control plane holds no
+    // Docker access, so a restart or a stop it wants done has to come back here.
+    agent: `http://${nodeAddress}:${String(PORT)}`,
   })
   const url = new URL(`${CONTROL_PLANE}/__mt/registry/register`)
   const transport = url.protocol === 'https:' ? https : http

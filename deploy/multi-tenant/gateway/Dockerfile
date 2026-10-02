@@ -6,6 +6,8 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY server.js /app/server.js
+COPY admin.js /app/admin.js
+COPY admin-page.js /app/admin-page.js
 
 # 8090: public entry. Tenant runtimes are reachable only on the compose network.
 EXPOSE 8090

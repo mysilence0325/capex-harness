@@ -827,6 +827,11 @@ function handleRegister(req, res) {
       token: token === '' ? previous.token : token,
       node: typeof body?.node === 'string' && body.node !== '' ? body.node : 'local',
       authority: tenantAuthority(tenants.get(id)),
+      // Where the console sends lifecycle actions. Omitted rather than kept when
+      // a registration carries none: a later registration by hand must not leave
+      // a stale agent address behind, or the console would try to restart a
+      // container through an agent that no longer reports this tenant.
+      ...(typeof body?.agent === 'string' && body.agent !== '' ? { agent: body.agent } : {}),
       registeredAt: new Date().toISOString(),
     })
     saveRuntimes()
@@ -876,9 +881,358 @@ function readJsonBody(req, done) {
   req.on('error', (error) => { done(error) })
 }
 
+const {
+  AdminConsole, hashPassword, verifyPassword, ID_PATTERN, USER_PATTERN,
+  COOKIE: ADMIN_COOKIE, MAX_FAILURES, LOCKOUT_MS, SESSION_MS,
+} = require('./admin.js')
+// Aliased: this file already has a loginPage, the tenant sign-in page.
+const { loginPage: adminLoginPage, consolePage: adminConsolePage, statusTag } = require('./admin-page.js')
+
+/**
+ * Administrator console state.
+ *
+ * Held here rather than inside the handler so the sign-in throttle and the
+ * session secret live as long as the process does.
+ */
+const admin = new AdminConsole({
+  registryFile: CONFIG_FILE,
+  stateDir: STATE_DIR,
+  logDir: LOG_DIR,
+  registryKey,
+})
+
+/** Read a form-encoded body. */
+function readForm(req, limit = 8 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))))
+    req.on('error', reject)
+  })
+}
+
+/**
+ * Whether a mutation may be trusted as this console's own page.
+ *
+ * The session cookie is already SameSite=Strict, which keeps a cross-site form
+ * from carrying it; this is the second lock, matching the tenant path's fence:
+ * when the browser states an Origin it must be the authority the request arrived
+ * on.
+ *
+ * @param req - the request.
+ * @returns whether the request is same-origin.
+ */
+function sameOrigin(req) {
+  const origin = req.headers.origin
+  if (origin === undefined) return true
+  try {
+    return new URL(origin).host === req.headers.host
+  } catch {
+    return false
+  }
+}
+
+/** Parse the console cookie value. */
+function adminCookie(req) {
+  return parseCookies(req.headers.cookie).get(ADMIN_COOKIE)
+}
+
+/** Set or clear the console cookie. */
+function adminCookieHeader(value, encrypted, maxAgeSeconds) {
+  const attributes = [
+    `${ADMIN_COOKIE}=${value}`,
+    `Path=${PREFIX}/admin`,
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${String(maxAgeSeconds)}`,
+  ]
+  if (encrypted) attributes.push('Secure')
+  return attributes.join('; ')
+}
+
+/**
+ * Build the tenant table the console renders.
+ *
+ * Status is probed now rather than cached: an administrator looking at this page
+ * wants to know whether the runtime answers at this moment.
+ *
+ * @returns one entry per tenant in the registry.
+ */
+async function adminState() {
+  const usage = admin.usageByTenant()
+  const rows = await Promise.all([...tenants.values()].map(async (tenant) => {
+    const entry = runtimeOf(tenant)
+    let reachable = false
+    let hasToken = false
+    if (entry !== undefined) {
+      hasToken = typeof entry.token === 'string' && entry.token !== ''
+      try {
+        const response = await tenantRequest(tenant, tenantAddress(tenant), '/')
+        reachable = response.status > 0
+      } catch {
+        reachable = false
+      }
+    }
+    const probe = entry === undefined ? undefined : { ready: reachable && hasToken, reachable, hasToken }
+    return {
+      id: tenant.id,
+      title: tenant.title ?? '',
+      users: (tenant.users ?? []).map((user) => user.name),
+      node: entry?.node ?? tenant.node ?? 'local',
+      edgePort: tenant.edgePort,
+      hosts: tenant.hosts ?? [],
+      agent: typeof entry?.agent === 'string' ? entry.agent : undefined,
+      status: statusTag(probe),
+      usage: usage.get(tenant.id) ?? { calls: 0, input: 0, output: 0, cacheRead: 0 },
+    }
+  }))
+  rows.sort((left, right) => left.id.localeCompare(right.id))
+  const origin = EDGE_ORIGIN === undefined ? '' : EDGE_ORIGIN
+  return { tenants: rows, edgePort: EDGE_PORT, origin }
+}
+
+/** The address a browser used to reach the console, for display only. */
+let EDGE_ORIGIN
+
+/**
+ * One console action.
+ *
+ * Registry edits happen here; anything that changes a container is forwarded to
+ * the node agent that registered that tenant, because this process has no Docker
+ * access at all.
+ *
+ * @param body - the parsed request body.
+ * @returns an answer the page renders.
+ */
+async function adminAction(body) {
+  const action = typeof body?.action === 'string' ? body.action : ''
+  const id = typeof body?.tenant === 'string' ? body.tenant : ''
+
+  if (action === 'add') {
+    if (!ID_PATTERN.test(id)) return { ok: false, error: '租户 id 只能用小写字母、数字和短横线，且以字母开头' }
+    const user = typeof body?.user === 'string' ? body.user : ''
+    if (!USER_PATTERN.test(user)) return { ok: false, error: '用户名只能包含字母、数字、点、下划线和短横线' }
+    const document = admin.readRegistry()
+    if ((document.tenants ?? []).some((tenant) => tenant.id === id)) return { ok: false, error: `租户 ${id} 已存在` }
+    const internalPorts = (document.tenants ?? []).map((tenant) => tenant.internalPort).filter(Number.isInteger)
+    const edgePorts = (document.tenants ?? []).map((tenant) => tenant.edgePort).filter(Number.isInteger)
+    const password = crypto.randomBytes(9).toString('base64url')
+    const tenantNode = typeof body?.node === 'string' && body.node !== '' ? body.node : 'local'
+    document.tenants = [...(document.tenants ?? []), {
+      id,
+      title: typeof body?.title === 'string' && body.title !== '' ? body.title : id,
+      node: tenantNode,
+      internalPort: internalPorts.length === 0 ? 3181 : Math.max(...internalPorts) + 1,
+      service: `dsh-${id}`,
+      container: `mt-dsh-${id}`,
+      hosts: [`${id}.dsh.local`],
+      users: [{ name: user, passwordHash: hashPassword(password) }],
+      modelKey: `sk-mt-${id}-${crypto.randomBytes(18).toString('base64url')}`,
+      limits: { memory: '2g', cpus: '1.5', pids: 512 },
+      edgePort: edgePorts.length === 0 ? 8091 : Math.max(...edgePorts) + 1,
+    }]
+    admin.writeRegistry(document)
+    admin.audit({ action: 'add', tenant: id, user, node: tenantNode, result: 'registry-written' })
+    // The container comes from the node that will run it. Any agent on that node
+    // will do: they all render from the same registry.
+    const agent = await agentForNode(tenantNode)
+    if (agent === undefined) {
+      return {
+        ok: true,
+        password,
+        message: `已写入注册表，但没有找到 ${tenantNode} 节点的代理，容器未创建。在该节点执行 bin/mt.sh up 即可开通。初始密码：${password}`,
+      }
+    }
+    const answer = await admin.callProvision(agent)
+    admin.audit({ action: 'provision', tenant: id, node: tenantNode, agent, status: answer.status })
+    if (answer.body?.ok !== true) {
+      return { ok: false, password, error: `注册表已写入，但节点开通失败：${String(answer.body?.error ?? answer.body?.tail ?? answer.status).slice(0, 300)}` }
+    }
+    return { ok: true, password, message: `租户 ${id} 已创建并开通` }
+  }
+
+  const document = admin.readRegistry()
+  const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
+  if (tenant === undefined) return { ok: false, error: `没有租户 ${id}` }
+
+  if (action === 'passwd') {
+    const user = typeof body?.user === 'string' ? body.user : ''
+    const target = (tenant.users ?? []).find((entry) => entry.name === user)
+    if (target === undefined) return { ok: false, error: `租户 ${id} 没有用户 ${user}` }
+    const password = crypto.randomBytes(9).toString('base64url')
+    target.passwordHash = hashPassword(password)
+    admin.writeRegistry(document)
+    admin.audit({ action: 'passwd', tenant: id, user, result: 'registry-written' })
+    return { ok: true, password, message: `${id}/${user} 的密码已重置` }
+  }
+
+  if (action === 'remove') {
+    const purge = body?.purge === true
+    const entry = runtimeOf(tenant)
+    if (entry !== undefined && typeof entry.agent === 'string') {
+      const answer = await admin.callAgent(entry.agent, id, 'remove', { purge })
+      admin.audit({ action: 'remove', tenant: id, agent: entry.agent, purge, status: answer.status })
+      if (answer.body?.ok !== true) return { ok: false, error: `节点拒绝删除：${String(answer.body?.error ?? answer.status)}` }
+    }
+    document.tenants = (document.tenants ?? []).filter((entry2) => entry2.id !== id)
+    admin.writeRegistry(document)
+    admin.audit({ action: 'remove', tenant: id, result: 'registry-written', purge })
+    return { ok: true, message: `已删除 ${id}${purge ? '（含数据）' : '（数据保留在磁盘上）'}` }
+  }
+
+  if (['start', 'stop', 'restart'].includes(action)) {
+    const entry = runtimeOf(tenant)
+    if (entry === undefined || typeof entry.agent !== 'string') {
+      return { ok: false, error: `租户 ${id} 不是通过节点代理注册的，无法在这里操作容器。请在它的节点上执行 bin/mt.sh ${action} ${id}` }
+    }
+    const answer = await admin.callAgent(entry.agent, id, action, undefined)
+    admin.audit({ action, tenant: id, agent: entry.agent, status: answer.status })
+    if (answer.body?.ok !== true) {
+      return { ok: false, error: `节点返回：${String(answer.body?.error ?? answer.body?.tail ?? answer.status).slice(0, 300)}` }
+    }
+    return { ok: true, message: `${id} 已${action === 'stop' ? '停止' : action === 'start' ? '启动' : '重启'}` }
+  }
+
+  return { ok: false, error: `未知操作：${action}` }
+}
+
+/**
+ * Any agent on one node.
+ * @param node - node name.
+ * @returns the agent base URL, or undefined when no tenant there registered one.
+ */
+async function agentForNode(node) {
+  for (const tenant of tenants.values()) {
+    const entry = runtimeOf(tenant)
+    if (entry === undefined || typeof entry.agent !== 'string') continue
+    if ((entry.node ?? 'local') === node) return entry.agent
+  }
+  return undefined
+}
+
+/**
+ * Serve the administrator console.
+ *
+ * @param req - the request.
+ * @param res - the response.
+ * @param url - the parsed request URL.
+ * @returns nothing; the response is ended here.
+ */
+async function handleAdmin(req, res, url) {
+  const encrypted = req.socket.encrypted === true
+  const path = url.pathname.slice(`${PREFIX}/admin`.length)
+  const remote = req.socket.remoteAddress ?? 'unknown'
+  const session = admin.verifySession(adminCookie(req))
+
+  if (path === '' || path === '/') {
+    if (session === undefined) {
+      send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+        adminLoginPage({ configured: admin.hasAdmin() }))
+      return
+    }
+    send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+      adminConsolePage({ user: session }))
+    return
+  }
+
+  if (path === '/login' && req.method === 'POST') {
+    const locked = admin.lockedFor(remote)
+    if (locked > 0) {
+      admin.audit({ action: 'login', tenant: '-', user: '-', result: 'throttled', source: remote })
+      send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+        adminLoginPage({ locked, configured: admin.hasAdmin() }))
+      return
+    }
+    const form = await readForm(req).catch(() => new URLSearchParams())
+    const stored = admin.readAdmin()
+    const ok = stored !== undefined
+      && String(form.get('user') ?? '') === stored.user
+      && verifyPassword(String(form.get('password') ?? ''), stored.passwordHash)
+    if (!ok) {
+      const bucket = admin.bucketFor(remote)
+      bucket.count += 1
+      if (bucket.count >= MAX_FAILURES) {
+        bucket.until = Date.now() + LOCKOUT_MS
+        bucket.count = 0
+      }
+      admin.audit({ action: 'login', tenant: '-', user: String(form.get('user') ?? ''), result: 'rejected', source: remote })
+      send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+        adminLoginPage({ error: '用户名或密码不正确', configured: admin.hasAdmin() }))
+      return
+    }
+    admin.bucketFor(remote).count = 0
+    admin.audit({ action: 'login', tenant: '-', user: stored.user, result: 'ok', source: remote })
+    send(res, 303, {
+      location: `${PREFIX}/admin`,
+      'set-cookie': adminCookieHeader(admin.mintSession(), encrypted, Math.floor(SESSION_MS / 1000)),
+      'cache-control': 'no-store',
+    }, '')
+    return
+  }
+
+  if (path === '/logout' && req.method === 'POST') {
+    send(res, 303, {
+      location: `${PREFIX}/admin`,
+      'set-cookie': adminCookieHeader('', encrypted, 0),
+      'cache-control': 'no-store',
+    }, '')
+    return
+  }
+
+  if (session === undefined) {
+    send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'not signed in' }))
+    return
+  }
+
+  if (path === '/api/state' && req.method === 'GET') {
+    EDGE_ORIGIN = req.headers.host === undefined ? undefined : req.headers.host.split(':')[0]
+    send(res, 200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+      JSON.stringify(await adminState()))
+    return
+  }
+
+  if (path === '/api/tenant' && req.method === 'POST') {
+    if (!sameOrigin(req)) {
+      admin.audit({ action: 'mutation', tenant: '-', user: session, result: 'cross-origin', source: remote })
+      send(res, 403, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'cross-origin request refused' }))
+      return
+    }
+    const body = await admin.readJson(req).catch((error) => ({ __error: error.message }))
+    if (body.__error !== undefined) {
+      send(res, 400, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: body.__error }))
+      return
+    }
+    const answer = await adminAction(body)
+    send(res, answer.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+      JSON.stringify(answer))
+    return
+  }
+
+  send(res, 404, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'not found' }))
+}
+
 function handleRequest(req, res) {
   const url = new URL(req.url ?? '/', 'http://gateway.invalid')
   const localPort = req.socket.localPort
+
+  // The administrator console answers before the tenant session logic: it has its
+  // own credential and must not be redirected into a tenant's sign-in page.
+  if (url.pathname === `${PREFIX}/admin` || url.pathname.startsWith(`${PREFIX}/admin/`)) {
+    handleAdmin(req, res, url).catch((error) => {
+      console.error(`mt-gateway: admin console failed: ${error.message}`)
+      if (!res.headersSent) send(res, 500, { 'content-type': 'text/plain; charset=utf-8' }, 'admin console error\n')
+    })
+    return
+  }
 
   // Operational endpoint: it enumerates tenants and usernames, so it answers
   // loopback callers only (bin/mt.sh status / smoke / accept all run locally).
