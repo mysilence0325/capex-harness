@@ -70,7 +70,7 @@ function verifyPassword(password, stored) {
  * throttle, and the console's HTML and JSON endpoints.
  */
 class AdminConsole {
-  sessionSecret = crypto.randomBytes(32)
+  sessionSecret
 
   /** Failed sign-in attempts, keyed by source address. */
   failures = new Map()
@@ -85,6 +85,20 @@ class AdminConsole {
    */
   constructor(options) {
     this.options = options
+    // Persisted rather than per-process: a standby control plane sharing this
+    // directory then accepts sessions the primary signed, which is what makes an
+    // active-passive pair possible at all. Same reasoning as the tenant session
+    // key in state/session.key.
+    this.sessionSecret = (() => {
+      const file = path.join(options.stateDir, 'admin.key')
+      if (fs.existsSync(file)) {
+        const existing = fs.readFileSync(file)
+        if (existing.length > 0) return existing
+      }
+      const created = crypto.randomBytes(32)
+      fs.writeFileSync(file, created, { mode: 0o600 })
+      return created
+    })()
   }
 
   /** @returns the stored administrator record, or undefined before first use. */

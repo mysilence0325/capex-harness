@@ -527,7 +527,35 @@ ${loggingBlock()}
       - ./tenants.json:/config/tenants.json:ro
       - ./logs:/logs
 
-${isControlPlane ? `  gateway:
+${isControlPlane ? `  backup:
+    # A scheduled backup is only worth having if nobody has to remember it. This
+    # runs the same bin/backup.sh an operator runs by hand, so there is one
+    # backup implementation rather than two that drift. It needs the Docker
+    # socket because a consistent snapshot pauses the tenant runtimes while the
+    # archive is written.
+    image: \${MT_NODE_IMAGE:-node:22-bookworm-slim}
+    container_name: ${NAME_PREFIX}backup
+    restart: unless-stopped
+    working_dir: /project
+    # No network at all: it talks to the local Docker socket and the local disk,
+    # and asking compose for a default network would consume one of the host's
+    # scarce address pools for nothing.
+    network_mode: none
+    environment:
+      MT_BACKUP_INTERVAL_SECONDS: \${MT_BACKUP_INTERVAL_SECONDS:-86400}
+      MT_BACKUP_KEEP: \${MT_BACKUP_KEEP:-7}
+      TZ: \${TZ:-Asia/Shanghai}
+${loggingBlock()}
+    volumes:
+      - .:/project
+      - ./backups:/project/backups
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+    # Double dollar is compose's escape for a single literal one, so the loop
+    # reads both settings from its own environment rather than from this file.
+    entrypoint: ["bash", "-c", "while true; do /project/bin/backup.sh --keep $$MT_BACKUP_KEEP || echo 'backup failed, will retry'; sleep $$MT_BACKUP_INTERVAL_SECONDS; done"]
+
+  gateway:
     build: ./gateway
     image: mt-gateway:local
     container_name: ${NAME_PREFIX}gateway
@@ -554,6 +582,16 @@ ${loggingBlock()}
       - ./tenants.json:/config/tenants.json
       - ./state:/state
       - ./logs:/logs
+    # A wedged control plane refuses nothing and serves nothing, which looks
+    # exactly like a network problem from outside. The health endpoint probes
+    # every registered runtime, so Docker can restart the process instead of
+    # leaving it silently dead.
+    healthcheck:
+      test: ["CMD", "node", "-e", "const p=process.env.MT_HTTP_PORT||process.env.MT_EDGE_PORT||8090;require('node:http').get('http://127.0.0.1:'+p+'/__mt/health',r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
 ` : ''}${tenants.filter(isLocalTenant).map(tenantService).join('\n')}
 networks:

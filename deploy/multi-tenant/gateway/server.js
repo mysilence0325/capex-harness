@@ -56,6 +56,14 @@ function envPort(name, fallback) {
 }
 
 const EDGE_PORT = envPort('MT_EDGE_PORT', 8090)
+/**
+ * Whether to open one listener per tenant's dedicated entry port.
+ *
+ * On by default. `MT_EDGE_LISTEN=0` serves the shared entry only, which is what
+ * a standby control plane needs: it shares a host with the instance it stands in
+ * for, so every dedicated port is already taken.
+ */
+const EDGE_LISTEN = (process.env.MT_EDGE_LISTEN ?? '1') !== '0'
 const BIND_ADDRESS = process.env.MT_BIND_IP ?? '0.0.0.0'
 const SESSION_TTL_MS = Number(process.env.MT_SESSION_TTL_HOURS ?? 12) * 3_600_000
 const SESSION_COOKIE = 'mt_session'
@@ -1503,8 +1511,13 @@ function applyRegistry(reason) {
   tenants = next
 
   const wanted = new Set([EDGE_PORT])
-  for (const tenant of tenants.values()) {
-    if (tenant.edgePort !== undefined && tenant.edgePort !== EDGE_PORT) wanted.add(tenant.edgePort)
+  // Per-tenant entry ports are optional. A deployment that only uses the shared
+  // entry turns them off, and a standby control plane on the same host must:
+  // every port here is already held by the instance it stands in for.
+  if (EDGE_LISTEN) {
+    for (const tenant of tenants.values()) {
+      if (tenant.edgePort !== undefined && tenant.edgePort !== EDGE_PORT) wanted.add(tenant.edgePort)
+    }
   }
   if (OPS_PORT !== undefined) wanted.add(OPS_PORT)
   for (const port of wanted) listen(port, port === OPS_PORT ? { plain: true, bind: '127.0.0.1' } : {})

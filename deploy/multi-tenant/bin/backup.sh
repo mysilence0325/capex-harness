@@ -64,7 +64,11 @@ MANIFEST="$MANIFEST_DIR/MANIFEST.txt"
   echo "部署目录    : $PWD"
   echo "一致性      : $([ "$LIVE" = no ] && echo '冻结快照' || echo '实时（未冻结）')"
   echo "租户        : $(echo $TENANTS | tr '\n' ' ')"
-  echo "运行时镜像  : $(docker inspect "mt-dsh-$(echo "$TENANTS" | head -1)" --format '{{.Config.Image}}' 2>/dev/null || echo '未知')"
+  # 第一行的替代写法：`echo … | head -1` 里 head 读完就关管道，echo 收到 SIGPIPE，
+# 在 pipefail 下整条 pipeline 返回 141，set -e 会因此终止脚本。
+FIRST_TENANT=""
+for t in $TENANTS; do FIRST_TENANT="$t"; break; done
+echo "运行时镜像  : $(docker inspect "mt-dsh-$FIRST_TENANT" --format '{{.Config.Image}}' 2>/dev/null || echo '未知')"
   echo "网关镜像    : $(docker inspect mt-gateway --format '{{.Config.Image}}' 2>/dev/null || echo '未知')"
   echo
   echo "各租户数据量:"
@@ -92,7 +96,8 @@ echo "  大小: $(du -h "$ARCHIVE" | cut -f1)"
 ENTRIES="$(tar -tzf "$ARCHIVE")"
 echo "  条目数: $(printf '%s\n' "$ENTRIES" | wc -l)"
 echo "  内容:"
-printf '%s\n' "$ENTRIES" | head -6 | sed 's/^/    /'
+# 同理不用 `| head -6`：sed 会读完输入，生产者不会收到 SIGPIPE。
+printf '%s\n' "$ENTRIES" | sed -n '1,6p' | sed 's/^/    /'
 echo "    ..."
 
 if [ "$KEEP" -gt 0 ]; then
