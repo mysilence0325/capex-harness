@@ -414,7 +414,25 @@ cmd_restart() {
 }
 
 cmd_key() {
-  local tenant="$1" value="$2"
+  local tenant="${1:-}" value="${2:-}"
+  if [ -z "$tenant" ]; then
+    echo "用法: bin/mt.sh key <租户> <值>" >&2
+    echo "  给某个租户设置模型 key（写进 .env 的 MT_<租户>_GATEWAY_API_KEY，然后 bin/mt.sh model 生效）" >&2
+    return 2
+  fi
+  if [ -z "$value" ]; then
+    local current
+    # `|| true`：grep 无匹配时管道在 pipefail 下返回 1，赋值失败会让脚本直接退出，
+    # 走不到下面那行提示。
+    current="$(grep "^MT_$(echo "$tenant" | tr '[:lower:]-' '[:upper:]_')_GATEWAY_API_KEY=" .env 2>/dev/null | head -1 || true)"
+    if [ -n "$current" ]; then
+      echo "  ${tenant} 当前: ${current%%=*}=<已设置，${#current} 字符>（要改：bin/mt.sh key ${tenant} <新值>）"
+    else
+      echo "  ${tenant} 还没有 key 槽位（先 bin/mt.sh add ${tenant}）" >&2
+      return 1
+    fi
+    return 0
+  fi
   local key="MT_$(echo "$tenant" | tr '[:lower:]-' '[:upper:]_')_GATEWAY_API_KEY"
   if ! grep -q "^${key}=" .env; then
     echo "没有这个租户的 key 槽位（先 bin/mt.sh add ${tenant}）" >&2
