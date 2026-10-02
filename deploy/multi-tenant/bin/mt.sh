@@ -54,6 +54,19 @@ node_run() {
     -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
     -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"
 }
+# 发 HTTP 请求。
+# 不依赖 curl：节点代理的容器里没有 curl，也装不上（无外网）；而宿主 curl 通常是动态链接的，
+# 直接挂进 Debian 容器也跑不起来。node 一定在——本脚本的注册表与渲染步骤本来就靠它。
+# 回退到容器时必须用宿主网络：运维端口只监听 loopback，默认 bridge 容器里的 127.0.0.1
+# 是容器自己，连不到控制面。
+http() {
+  if command -v node >/dev/null 2>&1; then
+    node bin/http.js "$@"
+  else
+    docker run --rm -i --network host -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bin/http.js "$@"
+  fi
+}
+
 # 需要从 stdin 读数据的场合：docker run 不挂 -i 时，容器里读到的是空输入。
 node_run_stdin() {
   docker run --rm -i \
@@ -200,9 +213,9 @@ register_tenant() {
     return 1
   fi
   body="$(printf '{"tenant":"%s","endpoint":"%s","token":"%s","node":"%s"}' "$id" "$endpoint" "$token" "$node")"
-  response="$(curl -sS --max-time 10 -X POST \
-    -H "x-mt-registry-key: ${key}" -H 'content-type: application/json' \
-    --data "$body" "$(gw_base)/__mt/registry/register" 2>&1 || true)"
+  response="$(http POST "$(gw_base)/__mt/registry/register" \
+    --header "x-mt-registry-key: ${key}" --header 'content-type: application/json' \
+    --data "$body" --max-time 10 2>&1 || true)"
   case "$response" in
     *'"ok":true'*) return 0 ;;
     *) echo "    !! ${id}: 注册失败 -> ${response}" >&2; return 1 ;;
@@ -255,8 +268,9 @@ cmd_unregister() {
     echo "读不到注册密钥 ${MT_REGISTRY_KEY_FILE:-state/registry.key}（远端节点请用 MT_REGISTRY_KEY_FILE 指过去）" >&2
     return 1
   fi
-  response="$(curl -sS --max-time 10 -X POST -H "x-mt-registry-key: ${key}" -H 'content-type: application/json' \
-    --data "{\"tenant\":\"${id}\"}" "$(gw_base)/__mt/registry/unregister" 2>&1 || true)"
+  response="$(http POST "$(gw_base)/__mt/registry/unregister" \
+    --header "x-mt-registry-key: ${key}" --header 'content-type: application/json' \
+    --data "{\"tenant\":\"${id}\"}" --max-time 10 2>&1 || true)"
   printf '%s\n' "$response" | sed 's/^/  /'
   case "$response" in
     *'"ok":true'*) return 0 ;;
@@ -267,7 +281,7 @@ cmd_unregister() {
 # 列出控制面当前认识的运行时。
 cmd_runtimes() {
   local body
-  body="$(curl -sS --max-time 10 "$(gw_base)/__mt/registry" 2>/dev/null || true)"
+  body="$(http GET "$(gw_base)/__mt/registry" --max-time 10 2>/dev/null || true)"
   if [ -z "$body" ]; then
     echo "控制面没有响应（bin/mt.sh status 看容器状态）" >&2
     return 1
@@ -296,7 +310,7 @@ process.stdin.on("end", () => {
 '
 }
 
-health() { curl -fsS "$(gw_base)/__mt/health" 2>/dev/null; }
+health() { http GET "$(gw_base)/__mt/health" --max-time 10 2>/dev/null; }
 
 # 租户出口代理的地址：mt-net 的网关 IP + 代理端口。
 # 容器到宿主网关是本地投递，不需要 ip_forward；宿主到外网由宿主自己完成。
@@ -375,7 +389,12 @@ wait_tenant_ready() {
 
 cmd_url() {
   local ip scheme port
-  ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1)"
+  # `ip` 不一定在：节点代理的容器里就没有，而且它是动态链接的、挂进 Debian 容器也跑不起来。
+  # 入口地址只是给人看的，拿不到就用回环地址，不能让整条 up 因此失败。
+  ip=""
+  if command -v ip >/dev/null 2>&1; then
+    ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1 || true)"
+  fi
   port="${MT_EDGE_PORT:-8090}"
   if [ -f state/tls/server.crt ] || [ -n "${MT_TLS_CERT:-}" ]; then scheme="https"; else scheme="http"; fi
   echo "==> 入口"
@@ -536,7 +555,11 @@ cmd_add() {
   fi
 
   local ip port
-  ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1)"
+  # 同 cmd_url：`ip` 可能不在（节点代理容器），拿不到就用回环地址，不影响开通结果。
+  ip=""
+  if command -v ip >/dev/null 2>&1; then
+    ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1 || true)"
+  fi
   port="${MT_EDGE_PORT:-8090}"
   echo
   echo "==> 租户 ${id} 开通完成"

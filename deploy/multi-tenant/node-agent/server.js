@@ -31,6 +31,8 @@ const http = require('node:http')
 const https = require('node:https')
 const fs = require('node:fs')
 const net = require('node:net')
+const path = require('node:path')
+const { spawn } = require('node:child_process')
 
 const PORT = Number(process.env.MT_AGENT_PORT ?? 3199)
 const BIND = process.env.MT_AGENT_BIND ?? '0.0.0.0'
@@ -52,6 +54,23 @@ const CONTAINER_PREFIX = process.env.MT_CONTAINER_PREFIX ?? 'mt-dsh-'
  * containers that predate the label.
  */
 const TENANT_LABEL = process.env.MT_TENANT_LABEL ?? 'mt.tenant'
+/**
+ * Directory holding the node's copy of this project, used to provision tenants.
+ *
+ * Empty disables provisioning on this node. The agent does not reimplement
+ * container creation: it runs that directory's `bin/mt.sh up`, the same entry an
+ * operator uses, so a tenant's profile patch and container come from one code
+ * path whether a human or the control plane asked for it.
+ */
+const PROJECT_DIR = process.env.MT_PROJECT_DIR ?? ''
+/**
+ * Whether this node renders from a copy of the registry it pulls from the
+ * control plane. A worker node sets this; the control plane's own host must not,
+ * or provisioning would overwrite the authoritative registry with the node copy.
+ */
+const REGISTRY_SYNC = ['1', 'true', 'yes'].includes((process.env.MT_REGISTRY_SYNC ?? '').toLowerCase())
+/** Path the script reaches this agent at; used to build the provisioned tenant's URL. */
+const SPAWN_TIMEOUT_MS = Number(process.env.MT_PROVISION_TIMEOUT ?? 600) * 1000
 /** Static mapping used when the Docker socket is absent: `alpha=http://ip:port,...` */
 const STATIC_TENANTS = process.env.MT_TENANTS ?? ''
 const SYNC_INTERVAL_MS = Number(process.env.MT_SYNC_INTERVAL ?? 15) * 1000
@@ -195,6 +214,127 @@ function tenantOf(container, name) {
 }
 
 /**
+ * Container name for one tenant, whether or not it is running.
+ *
+ * Discovery lists running containers only — a stopped runtime must not stay
+ * registered as reachable — but the lifecycle endpoints have to act on a
+ * stopped container too, so they look it up separately.
+ *
+ * @param tenant - tenant id.
+ * @returns the container name, or undefined when this node has none.
+ */
+async function containerOf(tenant) {
+  const containers = await docker('GET', '/containers/json?all=1')
+  for (const container of containers ?? []) {
+    const name = String(container.Names?.[0] ?? '').replace(/^\//u, '')
+    if (tenantOf(container, name) === tenant) return name
+  }
+  return undefined
+}
+
+// ---------------------------------------------------------------------------
+// provisioning and lifecycle
+//
+// The control plane deliberately holds no Docker access, so it cannot create the
+// container a new tenant needs. This agent can, and it does so by running the
+// node's own `bin/mt.sh up` rather than reimplementing container creation:
+// that path already renders the tenant's profile patch (its port and its
+// Host/Origin trust entry) and starts the container, and it is the same path an
+// operator uses by hand. Nothing here invents a second provisioning rule.
+// ---------------------------------------------------------------------------
+
+/** Run one fixed command in the project directory. */
+function runProject(args) {
+  return new Promise((resolve) => {
+    const child = spawn(PROJECT_DIR === '' ? 'true' : 'bash', PROJECT_DIR === '' ? [] : [path.join(PROJECT_DIR, 'bin', 'mt.sh'), ...args], {
+      cwd: PROJECT_DIR === '' ? undefined : PROJECT_DIR,
+      env: { ...process.env, MT_NODE_NAME: NODE_NAME, MT_NETWORK: NETWORK, MT_CONTAINER_NAME_PREFIX: process.env.MT_CONTAINER_NAME_PREFIX ?? 'mt-' },
+      timeout: 10 * 60 * 1000,
+    })
+    let output = ''
+    child.stdout.on('data', (chunk) => { output += chunk.toString() })
+    child.stderr.on('data', (chunk) => { output += chunk.toString() })
+    child.on('error', (error) => resolve({ ok: false, output: `${output}\n${error.message}` }))
+    child.on('close', (code) => resolve({ ok: code === 0, code, output }))
+  })
+}
+
+/**
+ * Fetch the registry from the control plane and write it here.
+ *
+ * Off by default, and that default matters: an agent running on the control
+ * plane's own host would otherwise overwrite the authoritative registry with the
+ * node-facing copy it just fetched — which is stripped of password hashes, so
+ * every login would start failing. A worker node opts in with
+ * `MT_REGISTRY_SYNC=1`; the control plane's own host never does, because the
+ * registry it renders from is already the authoritative one.
+ *
+ * @returns the control plane's answer text.
+ */
+function syncRegistry() {
+  if (!REGISTRY_SYNC) {
+    return Promise.reject(new Error('registry sync is disabled on this agent (set MT_REGISTRY_SYNC=1 on a node that renders from a copy)'))
+  }
+  const url = new URL(`${CONTROL_PLANE}/__mt/registry/tenants`)
+  const transport = url.protocol === 'https:' ? https : http
+  return new Promise((resolve, reject) => {
+    const request = transport.request({
+      host: url.hostname,
+      port: url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port),
+      method: 'GET',
+      path: url.pathname,
+      headers: { 'x-mt-registry-key': registryKey },
+      ca,
+      agent: false,
+      timeout: 15_000,
+    }, (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        if (response.statusCode !== 200) {
+          reject(new Error(`control plane refused the registry: HTTP ${String(response.statusCode)} ${text.slice(0, 160)}`))
+          return
+        }
+        const destination = process.env.MT_REGISTRY_FILE ?? path.join(PROJECT_DIR, 'tenants.json')
+        fs.writeFileSync(destination, `${text.trimEnd()}\n`, { mode: 0o600 })
+        resolve(text)
+      })
+    })
+    request.on('timeout', () => { request.destroy(new Error('timeout')) })
+    request.on('error', reject)
+    request.end()
+  })
+}
+
+/** Read one JSON body with a size ceiling. */
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (text.trim() === '') { resolve({}); return }
+      try {
+        resolve(JSON.parse(text))
+      } catch (error) {
+        reject(new Error(`body is not JSON: ${error.message}`))
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
+/**
  * Tenant runtimes on this node.
  * @returns a map of tenant id to `{ ip, port }` of its local container.
  */
@@ -334,6 +474,120 @@ function resolveNodeAddress() {
 
 const nodeAddress = resolveNodeAddress()
 
+/** Whether a request carries this agent's registry key. */
+function authorized(req) {
+  const presented = req.headers['x-mt-registry-key']
+  return typeof presented === 'string' && presented !== '' && presented === registryKey
+}
+
+/**
+ * Pull the registry from the control plane, then (optionally) provision.
+ *
+ * Provisioning runs the node's own `bin/mt.sh up`, which renders each assigned
+ * tenant's profile patch and starts its container. Discovery picks the new
+ * runtime up on the next pass and registers it, so nothing here reports it.
+ *
+ * @param provision - whether to run `up` after syncing, or only sync.
+ * @returns an HTTP status and body for the caller.
+ */
+async function handleProvision(provision) {
+  if (REGISTRY_SYNC) {
+    try {
+      await syncRegistry()
+    } catch (error) {
+      return { status: 502, body: { ok: false, error: `registry sync failed: ${error.message}` } }
+    }
+  }
+  if (!provision) return { status: 200, body: { ok: true, synced: REGISTRY_SYNC } }
+  const result = await runProject(['up'])
+  // A tenant is usable once discovery has seen it and the control plane has
+  // accepted the registration, which happens after `up` returns.
+  await sync(nodeAddress, true).catch(() => {})
+  return {
+    status: result.ok ? 200 : 500,
+    body: { ok: result.ok, exit: result.code, tail: result.output.split('\n').slice(-25).join('\n') },
+  }
+}
+
+/**
+ * Change one tenant's container state on this node.
+ *
+ * `remove` also takes the tenant's data when asked, which is the only operation
+ * here that cannot be undone.
+ *
+ * @param tenant - tenant id.
+ * @param action - start, stop, restart, or remove.
+ * @param req - the request, read for `remove`'s purge flag.
+ * @returns an HTTP status and body for the caller.
+ */
+async function handleLifecycle(tenant, action, req) {
+  if (!/^[a-z][a-z0-9-]{1,30}$/u.test(tenant)) {
+    return { status: 400, body: { ok: false, error: 'invalid tenant id' } }
+  }
+  const found = await discover()
+  const runtime = found.get(tenant)
+  // A stopped container is absent from discovery but still this node's to manage.
+  const existing = runtime?.container ?? await containerOf(tenant)
+  const container = existing ?? `${process.env.MT_CONTAINER_NAME_PREFIX ?? 'mt-'}dsh-${tenant}`
+
+  if (action === 'remove') {
+    const body = await readJsonBody(req).catch(() => ({}))
+    const purge = body?.purge === true
+    const home = process.env.MT_DATA_ROOT === undefined ? undefined : path.join(process.env.MT_DATA_ROOT, 'tenants', tenant)
+    if (home !== undefined && !home.startsWith(path.join(process.env.MT_DATA_ROOT, 'tenants') + path.sep)) {
+      return { status: 400, body: { ok: false, error: 'refusing to remove a path outside the tenant data root' } }
+    }
+    if (existing !== undefined) await runProject(['remove', tenant, ...(purge ? ['--purge'] : [])])
+    else if (purge && home !== undefined) fs.rmSync(home, { recursive: true, force: true })
+    reported.delete(tenant)
+    return { status: 200, body: { ok: true, tenant, purged: purge } }
+  }
+
+  // `start` is `up` for the whole node: compose starts whatever is stopped and
+  // leaves running tenants alone, so a stopped tenant needs no discovery entry.
+  if (action === 'start' && existing === undefined && runtime === undefined) {
+    const result = await runProject(['up'])
+    await sync(nodeAddress, true).catch(() => {})
+    return { status: result.ok ? 200 : 500, body: { ok: result.ok, tail: result.output.split('\n').slice(-15).join('\n') } }
+  }
+  if (existing === undefined) {
+    return { status: 404, body: { ok: false, error: `tenant ${tenant} has no runtime on node ${NODE_NAME}` } }
+  }
+  if (action === 'start') {
+    const result = await runProject(['up'])
+    await sync(nodeAddress, true).catch(() => {})
+    return { status: result.ok ? 200 : 500, body: { ok: result.ok, tail: result.output.split('\n').slice(-15).join('\n') } }
+  }
+  if (action === 'stop') {
+    await stopContainer(container)
+    reported.delete(tenant)
+    await sync(nodeAddress, true).catch(() => {})
+    return { status: 200, body: { ok: true, tenant, action: 'stop' } }
+  }
+  const result = await runProject(['restart', tenant])
+  await sync(nodeAddress, true).catch(() => {})
+  return { status: result.ok ? 200 : 500, body: { ok: result.ok, tenant, action, tail: result.output.split('\n').slice(-15).join('\n') } }
+}
+
+/**
+ * Stop one container through the Docker API.
+ * @param container - container name.
+ * @returns nothing; a container that is already gone is not an error.
+ */
+function stopContainer(container) {
+  return new Promise((resolve) => {
+    const request = http.request({
+      socketPath: DOCKER_SOCKET,
+      path: `/containers/${encodeURIComponent(container)}/stop?t=10`,
+      method: 'POST',
+      timeout: 20_000,
+    }, (response) => { response.resume(); response.on('end', resolve) })
+    request.on('timeout', () => { request.destroy(); resolve() })
+    request.on('error', () => resolve())
+    request.end()
+  })
+}
+
 // ---------------------------------------------------------------------------
 // proxy: forward the control plane's requests to the local container
 // ---------------------------------------------------------------------------
@@ -343,9 +597,56 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/health') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ ok: true, node: NODE_NAME, address: nodeAddress, docker: dockerAvailable, tenants: [...reported.keys()] }))
+    res.end(JSON.stringify({ ok: true, node: NODE_NAME, address: nodeAddress, docker: dockerAvailable, provision: PROJECT_DIR !== '', tenants: [...reported.keys()] }))
     return
   }
+
+  // Lifecycle: the control plane holds no Docker access, so anything that
+  // changes a container here arrives through this agent.
+  const lifecycle = /^\/tenants\/([^/]+)\/(start|stop|restart|remove)$/u.exec(url.pathname)
+  if (lifecycle !== null) {
+    if (!authorized(req)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: 'bad registry key' }))
+      return
+    }
+    const [, tenant, action] = lifecycle
+    handleLifecycle(tenant, action, req).then((outcome) => {
+      res.writeHead(outcome.status, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify(outcome.body))
+    }).catch((error) => {
+      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: error.message }))
+    })
+    return
+  }
+
+  if (url.pathname === '/provision' || url.pathname === '/registry/sync') {
+    if (!authorized(req)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: 'bad registry key' }))
+      return
+    }
+    if (PROJECT_DIR === '') {
+      res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: 'this agent has no MT_PROJECT_DIR, so it cannot provision' }))
+      return
+    }
+    if (url.pathname === '/registry/sync' && !REGISTRY_SYNC) {
+      res.writeHead(409, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: 'registry sync is disabled on this agent (MT_REGISTRY_SYNC is not set)' }))
+      return
+    }
+    handleProvision(url.pathname === '/provision').then((outcome) => {
+      res.writeHead(outcome.status, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify(outcome.body, null, 2))
+    }).catch((error) => {
+      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: error.message }))
+    })
+    return
+  }
+
   if (url.pathname === '/sync') {
     sync(nodeAddress, url.searchParams.get('force') === '1').then(() => {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })

@@ -104,6 +104,14 @@ function loadRegistry() {
 /** Current registry. Replaced as a whole on reload, never mutated in place. */
 let tenants = loadRegistry()
 
+/**
+ * Read the registry document as it is on disk.
+ * @returns the parsed tenants.json (the whole file, not the id-keyed map).
+ */
+function loadRegistryFile() {
+  return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+}
+
 fs.mkdirSync(STATE_DIR, { recursive: true })
 fs.mkdirSync(LOG_DIR, { recursive: true })
 
@@ -885,7 +893,24 @@ function handleRequest(req, res) {
     handleRegister(req, res)
     return
   }
-  if (url.pathname === `${PREFIX}/registry`) {
+  if (url.pathname === `${PREFIX}/registry/tenants`) {
+    // A node pulls the registry here before provisioning its tenants, so the
+    // control plane stays the single owner of which tenants exist and where.
+    // Password hashes are stripped: a node needs a tenant's placement and ports
+    // to build its container, never its credentials.
+    if (typeof req.headers['x-mt-registry-key'] !== 'string' || !timingSafeEqualString(req.headers['x-mt-registry-key'], registryKey)) {
+      send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
+      return
+    }
+    const document = loadRegistryFile()
+    document.tenants = (document.tenants ?? []).map((tenant) => ({
+      ...tenant,
+      users: (tenant.users ?? []).map((user) => ({ name: user.name })),
+    }))
+    send(res, 200, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify(document, null, 2))
+    return
+  }
+  if (url.pathname === `${PREFIX}/registry` && req.method === 'GET') {
     const presented = req.headers['x-mt-registry-key']
     const remote = req.socket.remoteAddress ?? ''
     const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
