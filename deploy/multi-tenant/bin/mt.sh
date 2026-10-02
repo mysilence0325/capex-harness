@@ -20,6 +20,8 @@
 #   bin/mt.sh passwd <id> <user> set a tenant password (and end that user's sessions)
 #   bin/mt.sh kick <id> [user]   end a tenant's or one user's sessions without changing the password
 #   bin/mt.sh limit <id> [--rpm n] [--daily-tokens n] [--clear]   model ceilings for one tenant
+#   bin/mt.sh registry-push      push the images to an internal registry (for offline machines)
+#   bin/mt.sh upgrade --image <ref>   rolling upgrade of the tenant runtime image
 #   bin/mt.sh remove <id>        remove a tenant from the registry
 #   bin/mt.sh key <id> <value>   set a tenant's model key in .env
 #   bin/mt.sh model              apply model.patch.yml + model.env to every tenant and restart them
@@ -645,6 +647,8 @@ case "${1:-}" in
   passwd)  shift; node_run bin/registry.js passwd "$@"; node_run bin/render.js ;;
   kick)    shift; node_run bin/registry.js kick "$@" ;;   # 让某租户（或某用户）已登录的会话失效
   limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额
+  registry-push) shift; bash bin/registry-push.sh "$@" ;;  # 把镜像推进内网仓库（离线环境用）
+  upgrade) shift; bash bin/upgrade.sh "$@" ;;              # 滚动升级租户运行时镜像
   remove)  shift; cmd_remove "$@" ;;
   key)     shift; cmd_key "$@" ;;
   *)       echo "未知命令: ${1:-}" >&2; sed -n '/^#   bin\/mt.sh/,/^#$/p' "$0" | sed 's/^#   /  /; s/^#$//' >&2; exit 2 ;;
