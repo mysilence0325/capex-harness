@@ -663,6 +663,7 @@ case "${1:-}" in
   kick)    shift; node_run bin/registry.js kick "$@" ;;   # 让某租户（或某用户）已登录的会话失效
   limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额
   registry-push) shift; bash bin/registry-push.sh "$@" ;;  # 把镜像推进内网仓库（离线环境用）
+  disk)    shift; bash bin/disk.sh "$@" ;;                 # 磁盘现状与会话/镜像回收
   upgrade) shift; bash bin/upgrade.sh "$@" ;;              # 滚动升级租户运行时镜像
   remove)  shift; cmd_remove "$@" ;;
   key)     shift; cmd_key "$@" ;;
