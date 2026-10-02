@@ -1409,12 +1409,18 @@ function handleRequest(req, res) {
   }
   if (url.pathname === `${PREFIX}/metrics`) {
     // Same exposure rule as the runtime listing: a local scraper needs no key,
-    // anything else does. Prometheus usually runs on another host, so it passes
-    // the key as a bearer-style header.
-    const presented = req.headers['x-mt-registry-key']
+    // anything else does. Prometheus cannot send arbitrary headers — it offers
+    // authorization, basic_auth and oauth2 — so the key is also accepted as a
+    // bearer token. `x-mt-registry-key` stays supported: bin/mt.sh uses it.
+    const header = req.headers['x-mt-registry-key']
+    const authorization = req.headers.authorization
+    const bearer = typeof authorization === 'string' && authorization.toLowerCase().startsWith('bearer ')
+      ? authorization.slice(7).trim()
+      : ''
+    const presented = typeof header === 'string' && header !== '' ? header : bearer
     const remote = req.socket.remoteAddress ?? ''
     const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
-    if (!loopback && (typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey))) {
+    if (!loopback && (presented === '' || !timingSafeEqualString(presented, registryKey))) {
       send(res, 401, { 'content-type': 'text/plain; charset=utf-8' }, 'bad registry key\n')
       return
     }

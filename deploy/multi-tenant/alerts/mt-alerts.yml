@@ -1,0 +1,121 @@
+# DSH 多租户控制面的告警规则。
+#
+# 指标来自控制面的 GET /__mt/metrics（Prometheus 文本格式），由同目录的
+# prometheus-scrape.yml 抓取。用法：
+#
+#   1. 把本文件放到 Prometheus 能读到的地方，例如 /etc/prometheus/mt-alerts.yml；
+#   2. 在 prometheus.yml 的 rule_files 里加一行 - /etc/prometheus/mt-alerts.yml；
+#   3. 校验：promtool check rules /etc/prometheus/mt-alerts.yml
+#   4. 热加载：curl -X POST http://<prometheus>:9090/-/reload（需要 --web.enable-lifecycle）
+#
+# 阈值都是保守值：先让它报得准，再按实际噪声收紧。每条都写了"看到之后做什么"。
+groups:
+  - name: dsh-multitenant
+    rules:
+      - alert: DshTenantNotReady
+        # ready = 控制面实测连得上该租户运行时，且它持有可用的启动 token。
+        # 为 0 意味着这个租户的用户现在打不开界面。
+        expr: mt_tenant_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: '租户 {{ $labels.tenant }} 的运行时不就绪'
+          description: '控制面连续 5 分钟探测不到该租户（或它拿不到启动 token）。在部署机上执行 bin/mt.sh status 与 bin/mt.sh logs {{ $labels.tenant }}。'
+          runbook: '管理员手册 §6 故障排查'
+
+      - alert: DshNoTenantReady
+        # 单个租户挂了是事故，全部租户同时不就绪基本是控制面或宿主的问题。
+        expr: sum(mt_tenant_ready) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: '没有任何租户可用'
+          description: '所有租户的运行时都不就绪。先看控制面本身：docker ps --filter name=mt-，再看 bin/mt.sh doctor。'
+          runbook: '管理员手册 §6 故障排查'
+
+      - alert: DshControlPlaneDown
+        # Prometheus 自己抓不到控制面。抓取失败时上面的指标会变成"无数据"而不是 0，
+        # 所以需要这一条来区分"控制面挂了"和"控制面在跑但没有租户"。
+        expr: up{job="dsh-multitenant"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: '抓不到 DSH 控制面指标'
+          description: '控制面不可达或指标端点报错。检查容器 mt-gateway 是否在跑、证书是否过期、注册密钥是否与抓取配置一致。'
+
+      - alert: DshTenantRegisteredButNoToken
+        # 注册了但没拿到启动 token：容器多半是刚重建还没起来，或者启动日志里没有 token。
+        expr: mt_tenant_registered == 1 and mt_tenant_has_token == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '租户 {{ $labels.tenant }} 已注册但没有启动 token'
+          description: '运行时起来了但没上报 token，用户会看到 503。执行 bin/mt.sh register {{ $labels.tenant }} 重新注册；若无效看容器日志。'
+
+      - alert: DshModelRequestsRejected
+        # 429 是撞到租户限额，401 是占位 key 不对。两者都说明该租户的模型调用失败了。
+        expr: increase(mt_tenant_model_rejected_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '租户 {{ $labels.tenant }} 的模型请求被拒'
+          description: '15 分钟内有被拒的模型请求（按模型限额拒绝，或占位 key 不被识别）。看 bin/mt.sh limit {{ $labels.tenant }} 与模型网关日志。'
+
+      - alert: DshModelRequestsUnattributed
+        # 有请求在识别出租户之前就被拒了：几乎总是有人用错了模型 key。
+        expr: increase(mt_model_unattributed_requests_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '有模型请求未能归属到任何租户'
+          description: '说明有客户端拿着不认识（或为空）的占位 key 在调模型网关。检查是否有租户把 key 配错，或有无外部扫描。'
+
+      - alert: DshBackupStale
+        # 时间戳为 0 表示从来没有备份成功过——也要报。
+        expr: time() - mt_backup_last_success_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'DSH 备份已超过两天没有成功'
+          description: '最近一次备份归档超过 48 小时（或从未成功）。检查 mt-backup 容器与 backups/ 目录空间，必要时手工 bin/mt.sh backup。'
+          runbook: '管理员手册 §5'
+
+      - alert: DshTenantMissing
+        # 注册表里有的租户，指标里没有——说明它没被控制面加载。
+        expr: mt_gateway_tenants < count(count by (tenant) (mt_tenant_info))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: '有租户在指标里出现但不在注册表里'
+          description: '可能是刚删除的租户还没从抓取里消失（短暂正常），持续 15 分钟则检查 tenants.json 与控制面是否重载。'
+
+  - name: dsh-multitenant-host
+    rules:
+      # 宿主层面的两条，依赖 node_exporter（本机监控栈已有）。
+      # 部署在 /home/dsh-mt，根分区很小（现网 50G），磁盘先满是这台机器最可能的故障。
+      - alert: DshDeployDiskFillingUp
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{mountpoint="/home"}[6h], 86400) < 5 * 1024 * 1024 * 1024
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: '部署所在分区预计 24 小时内剩余不足 5GB'
+          description: '按最近 6 小时的增长速度推算。/home 存放租户数据、镜像与备份。清理办法见管理员手册 §6「磁盘快满」。'
+
+      - alert: DshDeployDiskCritical
+        expr: node_filesystem_avail_bytes{mountpoint="/home"} < 2 * 1024 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: '部署所在分区剩余不足 2GB'
+          description: '磁盘写满会让租户会话与备份失败。立即清理：日志轮转产物、旧备份、无用的镜像层。'

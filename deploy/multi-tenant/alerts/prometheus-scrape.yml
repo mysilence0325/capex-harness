@@ -1,0 +1,31 @@
+# 抓取 DSH 多租户控制面指标的 Prometheus 配置片段。
+#
+# 为什么是片段而不是完整文件：这套部署不拥有你的 Prometheus。把下面的
+# scrape_configs 条目并进你自己的配置即可。校验与生效：
+#
+#   promtool check config <你的 prometheus.yml>
+#   curl -X POST http://<prometheus>:9090/-/reload     # 需要 --web.enable-lifecycle
+#
+# 指标端点的访问规则（与控制面的运行时列表一致）：
+#   - 从 loopback 抓取：不需要密钥；
+#   - 从别处抓取：带密钥。Prometheus 只能发 Authorization 头，所以用 bearer_token。
+#
+# 密钥在部署机的 state/registry.key 里（0600）。**不要提交进版本库**，用文件引用或密钥管理。
+scrape_configs:
+  - job_name: dsh-multitenant
+    # 控制面的统一入口（HTTPS，自签证书）。端口是部署时 .env 里的 MT_EDGE_PORT。
+    scheme: https
+    metrics_path: /__mt/metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    tls_config:
+      # 自签证书：要么在这里信任 CA，要么跳过校验。
+      # 生产建议把 state/tls/ca.crt 放到 Prometheus 能读到的地方，然后用 ca_file。
+      insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/dsh-multitenant.token
+    static_configs:
+      - targets: ['<控制面地址>:8090']          # 换成部署机 .env 里 MT_BIND_IP 与 MT_EDGE_PORT 对应的地址
+        labels:
+          deployment: dsh-multitenant
