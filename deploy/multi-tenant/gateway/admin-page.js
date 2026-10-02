@@ -128,12 +128,24 @@ function consolePage({ user }) {
 </div>
 
 <h2>租户</h2>
+<div class="row" style="margin-bottom: 8px">
+  <input id="filter" placeholder="搜索租户、用户或显示名" size="28" oninput="render()">
+  <span class="muted">每页</span>
+  <select id="page-size" onchange="render()" style="font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg)">
+    <option>10</option><option selected>20</option><option>50</option><option value="0">全部</option>
+  </select>
+  <span id="count" class="muted"></span>
+</div>
 <table id="tenants">
   <thead><tr>
     <th>租户</th><th>状态</th><th>入口</th><th>用户</th><th>模型用量</th><th>操作</th>
   </tr></thead>
   <tbody><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
 </table>
+<div class="row" style="margin-top: 10px; justify-content: space-between">
+  <span id="pager" class="muted"></span>
+  <span><button id="prev" onclick="step(-1)">上一页</button> <button id="next" onclick="step(1)">下一页</button></span>
+</div>
 <div id="notice"></div>
 
 <h2>新增租户</h2>
@@ -206,7 +218,42 @@ async function load() {
   const response = await fetch('api/state')
   if (response.status === 401) { location.reload(); return }
   const data = await response.json()
-  const rows = data.tenants.map((tenant) => {
+  snapshot = data
+  render()
+}
+
+// The whole list is kept and filtered here rather than re-fetched: status comes
+// from a live probe on the server side, so re-fetching on every keystroke would
+// hit every tenant runtime.
+let snapshot = { tenants: [], edgePort: 0, origin: '' }
+let page = 0
+
+const matches = (tenant, needle) => {
+  if (!needle) return true
+  const haystack = [tenant.id, tenant.title, tenant.users.join(' '), tenant.node].join(' ').toLowerCase()
+  return haystack.includes(needle)
+}
+
+const step = (delta) => { page += delta; render() }
+
+function render() {
+  const needle = ($('filter').value || '').trim().toLowerCase()
+  const size = Number($('page-size').value)
+  const all = snapshot.tenants
+  const filtered = all.filter((tenant) => matches(tenant, needle))
+  const pages = size === 0 ? 1 : Math.max(1, Math.ceil(filtered.length / size))
+  if (page > pages - 1) page = pages - 1
+  if (page < 0) page = 0
+  const shown = size === 0 ? filtered : filtered.slice(page * size, page * size + size)
+
+  $('count').textContent = needle
+    ? filtered.length + ' / ' + all.length + ' 个租户匹配'
+    : all.length + ' 个租户'
+  $('pager').textContent = pages > 1 ? '第 ' + (page + 1) + ' / ' + pages + ' 页' : ''
+  $('prev').disabled = page <= 0
+  $('next').disabled = page >= pages - 1
+
+  const rows = shown.map((tenant) => {
     const usage = tenant.usage
     const usageText = usage && usage.calls > 0
       ? usage.calls + ' 次 · ' + usage.input + '/' + usage.output + ' tokens'
@@ -217,9 +264,9 @@ async function load() {
     const limitsText = ceiling.length
       ? '<br><span class="tag warn" title="模型限额">限额 ' + ceiling.join(' · ') + '</span>'
       : ''
-    const entry = tenant.edgePort ? tenant.origin + ':' + tenant.edgePort + '/'
-      : tenant.hosts && tenant.hosts.length ? tenant.hosts[0] + ':' + data.edgePort + '/'
-      : data.origin + ':' + data.edgePort + '/'
+    const entry = tenant.edgePort ? snapshot.origin + ':' + tenant.edgePort + '/'
+      : tenant.hosts && tenant.hosts.length ? tenant.hosts[0] + ':' + snapshot.edgePort + '/'
+      : snapshot.origin + ':' + snapshot.edgePort + '/'
     const buttons = [
       '<button onclick="action(\\'' + tenant.id + '\\', \\'restart\\')">重启</button>',
       tenant.agent
@@ -241,8 +288,11 @@ async function load() {
   })
   document.querySelector('#tenants tbody').innerHTML = rows.length
     ? rows.join('')
-    : '<tr><td colspan="6" class="muted">还没有租户</td></tr>'
+    : '<tr><td colspan="6" class="muted">' + (all.length === 0 ? '还没有租户' : '没有匹配的租户') + '</td></tr>'
 }
+
+// First paint, then the live snapshot: load() renders again once it arrives.
+render()
 load()
 </script>
 </div>`)
