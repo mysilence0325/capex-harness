@@ -180,7 +180,7 @@ function consolePage({ user }) {
   <div class="row">
     <button onclick="opsRun('disk-report','磁盘报告')">磁盘报告</button>
     <button onclick="opsRun('backup','立即备份')">立即备份</button>
-    <button onclick="opsRun('backup-list','备份列表')">备份列表</button>
+    <button onclick="listBackups()">备份列表</button>
     <button class="danger" onclick="pruneImages()">回收镜像层</button>
   </div>
   <div class="row" style="margin-top: 10px; align-items: center">
@@ -354,14 +354,69 @@ async function pruneSessions(dryRun) {
   notice('会话清理' + (dryRun ? '预览' : '') + '完成')
 }
 
+/**
+ * Upgrade tenants one at a time, reporting each as it finishes.
+ *
+ * Per tenant rather than one request for the set, because the operator is waiting
+ * on a rebuild that takes a while and the useful information — which tenant is
+ * being worked on and which one failed — only exists between the steps. The
+ * script's own rolling behaviour still applies within each call; this adds the
+ * progress the console can show.
+ */
 async function upgradeTenants(all) {
   const image = $('upgrade-image').value.trim()
   if (image === '') { notice('填要升级到的镜像引用', true); return }
-  const list = all ? undefined : Array.from(selected)
-  if (list !== undefined && list.length === 0) { notice('先选中租户，或用"升级全部"', true); return }
-  const what = list === undefined ? '全部租户' : list.join('、')
-  if (!confirm('把 ' + what + ' 升级到 ' + image + '？会逐个重建容器，任一租户起不来就回滚它并停止。')) return
-  await opsRun('upgrade', '升级 ' + what, list === undefined ? { image } : { image, tenants: list.join(',') })
+  const list = all ? (snapshot.tenants || []).map((tenant) => tenant.id) : Array.from(selected)
+  if (list.length === 0) { notice(all ? '没有租户' : '先选中租户，或用"升级全部"', true); return }
+  if (!confirm('把 ' + list.join('、') + ' 升级到 ' + image + '？\n会逐个重建容器，任一租户起不来就回滚它并停止。')) return
+  $('ops-out').style.display = 'block'
+  $('ops-out').textContent = '升级到 ' + image + '\n'
+  const target = agentNode()
+  if (target === undefined) { notice('没有节点代理在跑，升级无法执行', true); return }
+  let done = 0
+  for (const id of list) {
+    $('ops-out').textContent += '\n=== ' + id + ' （' + (done + 1) + '/' + list.length + '）===\n正在重建…\n'
+    const answer = await post('api/tenant', { action: 'ops', node: target, op: 'upgrade', params: { image, tenants: id } })
+    $('ops-out').textContent += (answer.ok ? answer.output : '失败：' + (answer.error || '')) + '\n'
+    if (!answer.ok) {
+      notice(id + ' 升级失败，已停止；该租户已回滚', true)
+      $('ops-out').textContent += '\n已停止：' + id + ' 未能就绪，脚本已把它回滚。\n'
+      await load()
+      return
+    }
+    done += 1
+  }
+  notice('升级完成：' + done + ' 个租户')
+  await load()
+}
+
+/** Show the archives, each with a restore button. */
+async function listBackups() {
+  const answer = await post('api/tenant', { action: 'ops', node: agentNode(), op: 'backup-list' })
+  $('ops-out').style.display = 'block'
+  if (!answer.ok) { notice('读取备份失败：' + (answer.error || ''), true); return }
+  $('ops-out').textContent = answer.output || ''
+  // The names come back structured as well, so the restore button can only offer
+  // archives the agent itself listed — which is also what its validation accepts.
+  const archives = (answer.backups || [])
+  if (archives.length === 0) return
+  $('ops-out').textContent += '\n\n恢复某个归档（会先把现有数据移到 restore-aside-<时间戳>/）：\n'
+  window.__backups = archives
+  $('ops-out').textContent += archives.map((name, index) => '  [' + (index + 1) + '] ' + name).join('\n')
+  const which = prompt('输入要恢复的归档编号（留空取消）：')
+  if (which === null || which.trim() === '') return
+  const index = Number(which.trim()) - 1
+  if (!Number.isInteger(index) || index < 0 || index >= archives.length) { notice('编号不对', true); return }
+  await restoreBackup(archives[index])
+}
+
+async function restoreBackup(archive) {
+  // Typing the name is the confirmation: this replaces every tenant's data with
+  // the archive's contents, and a stray click should not be able to do that.
+  const typed = prompt('恢复 ' + archive + ' 会用它覆盖当前所有租户的数据（现有数据会先移到 restore-aside-<时间戳>/）。\n\n确认请输入归档名：')
+  if (typed === null) return
+  if (typed.trim() !== archive) { notice('名字不匹配，已取消', true); return }
+  await opsRun('restore', '恢复 ' + archive, { archive })
   await load()
 }
 

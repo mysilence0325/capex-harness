@@ -120,8 +120,11 @@ for t in $TARGETS; do
   fi
   before="$(tenant_image "$t")"
   echo "      当前: ${before}"
-  if ! DSH_IMAGE="$IMAGE" "${COMPOSE[@]}" up -d "dsh-${t}" >/dev/null 2>&1; then
+  # Output kept and shown on failure: "启动失败" with no reason costs a debugging
+  # round every time, and the reason is usually one line of compose's.
+  if ! DSH_IMAGE="$IMAGE" "${COMPOSE[@]}" up -d "dsh-${t}" >/tmp/upgrade-up.log 2>&1; then
     echo "      启动失败，回滚" >&2
+    tail -6 /tmp/upgrade-up.log | sed 's/^/        /' >&2
     rollback_one "$t" "$CURRENT_IMAGE"
     exit 1
   fi

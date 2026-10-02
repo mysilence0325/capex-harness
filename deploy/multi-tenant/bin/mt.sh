@@ -50,6 +50,9 @@ fi
 [ -f .env ] && set -a && . ./.env && set +a
 
 node_run() {
+  # MT_HOST_PROJECT_DIR：渲染器在容器里看到的是 /w，而宿主（以及解析挂载源的 Docker
+  # 守护进程）看到的是真实路径。节点代理要挂载项目、容器里的 compose 要创建容器，都必须
+  # 用宿主路径，而只有这个在宿主上跑的脚本知道它。
   # MT_NODE_NAME / MT_NETWORK must reach the render container: without them it
   # renders the control plane's own tenant set on a worker node, which then tries
   # to create containers that already exist elsewhere.
@@ -58,6 +61,7 @@ node_run() {
     -e "MT_NETWORK=${MT_NETWORK:-mt-net}" \
     -e "MT_NETWORK_EXTERNAL=${MT_NETWORK_EXTERNAL:-}" \
     -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
+    -e "MT_HOST_PROJECT_DIR=${ROOT}" \
     -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"
 }
 # 发 HTTP 请求。
@@ -80,6 +84,7 @@ node_run_stdin() {
     -e "MT_NETWORK=${MT_NETWORK:-mt-net}" \
     -e "MT_NETWORK_EXTERNAL=${MT_NETWORK_EXTERNAL:-}" \
     -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
+    -e "MT_HOST_PROJECT_DIR=${ROOT}" \
     -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"
 }
 

@@ -288,6 +288,15 @@ const bridgeName = () => (envValues.get('MT_BRIDGE_NAME') ?? process.env.MT_BRID
  * always carry an explicit subnet; this lets the main one as well. Left unset in
  * an existing deployment so its network is not renumbered.
  */
+/**
+ * The project's path on the host, which is not where this renderer sees it: it
+ * runs in a container with the project at /w, while the host — and the Docker
+ * daemon that resolves bind-mount sources — has it at its real path.
+ *
+ * Read lazily, like the other settings that come from .env: that map is filled
+ * further down this file, and a constant here would read it before it exists.
+ */
+const hostRoot = () => (envValues.get('MT_HOST_PROJECT_DIR') ?? process.env.MT_HOST_PROJECT_DIR ?? ROOT).trim()
 const networkSubnet = () => (envValues.get('MT_NETWORK_SUBNET') ?? process.env.MT_NETWORK_SUBNET ?? '').trim()
 /**
  * Prefix for the container names this host creates.
@@ -699,7 +708,7 @@ ${loggingBlock()}
       MT_REGISTRY_KEY_FILE: /key/registry.key
       MT_NETWORK: \${MT_NETWORK:-mt-net}
       MT_CONTAINER_NAME_PREFIX: \${MT_CONTAINER_NAME_PREFIX:-mt-}
-      MT_PROJECT_DIR: /project
+      MT_PROJECT_DIR: ${hostRoot()}
       MT_DATA_ROOT: /project
       MT_AGENT_PORT: \${MT_AGENT_PORT:-3199}
       TZ: \${TZ:-Asia/Shanghai}
@@ -707,9 +716,18 @@ ${loggingBlock()}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./state:/key:ro
-      # The operations are this project's own scripts, so the agent needs the
-      # project: it runs them where they live rather than reimplementing them.
-      - .:/project
+      # The project at its own host path, not at /project: compose resolves
+      # relative bind mounts to absolute paths and hands them to the host daemon,
+      # which knows nothing about a /project inside this container. Mounting it
+      # where the host has it is what makes docker-compose up from in here create
+      # containers that actually start.
+      - ${hostRoot()}:${hostRoot()}
+      # The scripts call docker and docker-compose, so the agent needs the same
+      # two binaries the host has. Without them disk-prune-images and upgrade
+      # fail in ways that read like a missing image rather than a missing tool —
+      # which is exactly how the first rolling upgrade through the console failed.
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /usr/local/bin/docker-compose:/usr/local/bin/docker-compose:ro
 
   gateway:
     build: ./gateway
