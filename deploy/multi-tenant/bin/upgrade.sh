@@ -86,12 +86,35 @@ if [ "$DRY_RUN" = yes ]; then
 fi
 echo
 
-health() { curl -sS --max-time 10 "http://127.0.0.1:${MT_HTTP_PORT:-8099}/__mt/health" 2>/dev/null; }
+# 问控制面一个租户是否 ready。
+#
+# 不能直接用 curl：这个脚本也会经节点代理在容器里跑，而那个容器没有 curl，也装不上
+# （无外网）——于是 health() 静默返回空，就绪检查永远不过，容器明明起来了也被判失败
+# 并回滚。bin/http.js 就是为这种情况写的，bin/mt.sh 一直在用它。
+health() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -sS --max-time 10 "http://127.0.0.1:${MT_HTTP_PORT:-8099}/__mt/health" 2>/dev/null || true
+  else
+    # bin/http.js takes the method first, as a positional argument.
+    node bin/http.js GET "http://127.0.0.1:${MT_HTTP_PORT:-8099}/__mt/health" --max-time 10 2>/dev/null || true
+  fi
+}
 
 # 等某个租户被控制面判定为 ready（ready = 网关实测连得上且持有启动 token）。
 wait_ready() {
   local id="$1" limit="${2:-90}" waited=0 body
+  local first
+  first="$(health)"
+  # 控制面都问不到时，说清楚是这一层的问题：否则看起来像租户起不来，而实际是
+  # 这个脚本问不到——在没有 curl 的容器里就发生过，查了很久。
+  if [ -z "$first" ]; then
+    echo "      问不到控制面（http://127.0.0.1:${MT_HTTP_PORT:-8099}/__mt/health 无响应），无法判断就绪" >&2
+    return 1
+  fi
+  body="$first"
   while [ "$waited" -lt "$limit" ]; do
+    # Re-read every pass: readiness changes while this waits, and a body captured
+    # once is checked over and over without ever seeing it change.
     body="$(health)"
     if printf '%s' "$body" | tr -d ' \n' | grep -q "\"id\":\"${id}\",\"node\":[^}]*\"ready\":true"; then
       return 0

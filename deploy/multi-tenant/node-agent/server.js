@@ -518,6 +518,7 @@ const OPS = {
       'prune-sessions',
       '--older-than', String(params.olderThan),
       '--archive',
+      ...(params.dryRun === true ? ['--dry-run'] : []),
       ...(params.tenant === undefined ? [] : ['--tenant', params.tenant]),
     ],
     // Days, not a free string: find's -mtime takes a number and nothing else.

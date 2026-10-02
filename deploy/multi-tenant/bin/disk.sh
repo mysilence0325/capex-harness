@@ -165,8 +165,13 @@ prune_sessions() {
     echo "==> 这是 --dry-run，没有删除任何东西。去掉它才真的执行。"
   else
     echo "==> 共处理 ${total} 个会话目录"
-    [ "$archive" = no ] && echo "    提示：下次加 --archive 会先打包到 backups/ 再删。"
+    # 显式 if 而不是 `[ ... ] && echo`：后者在条件为假时会让函数返回 1，
+    # 整个脚本就以失败退出——工作明明做完了，代理却上报 ok:false，控制台显示"失败"。
+    if [ "$archive" = no ]; then
+      echo "    提示：下次加 --archive 会先打包到 backups/ 再删。"
+    fi
   fi
+  return 0
 }
 
 case "${1:-report}" in

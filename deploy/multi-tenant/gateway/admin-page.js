@@ -348,7 +348,7 @@ async function pruneSessions(dryRun) {
   $('ops-out').style.display = 'block'
   $('ops-out').textContent = '会话清理（' + (dryRun ? '预览' : '执行') + '）…\n'
   for (const id of list) {
-    const answer = await post('api/tenant', { action: 'ops', node: agentNode(), op: 'disk-prune-sessions', params: { olderThan: Number(days), tenant: id } })
+    const answer = await post('api/tenant', { action: 'ops', node: agentNode(), op: 'disk-prune-sessions', params: { olderThan: Number(days), tenant: id, dryRun } })
     $('ops-out').textContent += '\n=== ' + id + ' ===\n' + (answer.ok ? answer.output : '失败：' + answer.error)
   }
   notice('会话清理' + (dryRun ? '预览' : '') + '完成')
