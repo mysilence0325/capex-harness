@@ -183,6 +183,12 @@ const removeTenant = async (tenant) => {
   notice(answer.message || answer.error || '完成', answer.ok !== true)
   await load()
 }
+const kickSessions = async (tenant, user) => {
+  if (!confirm('让 ' + tenant + '/' + user + ' 重新登录？已登录的浏览器会立刻失效（密码不变）。')) return
+  const answer = await post('api/tenant', { tenant, action: 'kick', user })
+  notice(answer.message || answer.error || '完成', answer.ok !== true)
+  await load()
+}
 const addTenant = async () => {
   const id = $('new-id').value.trim()
   const user = $('new-user').value.trim()
@@ -205,6 +211,12 @@ async function load() {
     const usageText = usage && usage.calls > 0
       ? usage.calls + ' 次 · ' + usage.input + '/' + usage.output + ' tokens'
       : '<span class="muted">—</span>'
+    const ceiling = []
+    if (tenant.limits && tenant.limits.rpm) ceiling.push(tenant.limits.rpm + ' 次/分')
+    if (tenant.limits && tenant.limits.dailyTokens) ceiling.push(tenant.limits.dailyTokens + ' tokens/天')
+    const limitsText = ceiling.length
+      ? '<br><span class="tag warn" title="模型限额">限额 ' + ceiling.join(' · ') + '</span>'
+      : ''
     const entry = tenant.edgePort ? tenant.origin + ':' + tenant.edgePort + '/'
       : tenant.hosts && tenant.hosts.length ? tenant.hosts[0] + ':' + data.edgePort + '/'
       : data.origin + ':' + data.edgePort + '/'
@@ -214,6 +226,7 @@ async function load() {
         ? '<button onclick="action(\\'' + tenant.id + '\\', \\'stop\\')">停止</button>'
         : '<button disabled title="该租户不是通过节点代理注册的，无法在此操作容器">停止</button>',
       '<button onclick="resetPassword(\\'' + tenant.id + '\\', \\'' + tenant.users[0] + '\\')">改密码</button>',
+      '<button onclick="kickSessions(\\'' + tenant.id + '\\', \\'' + tenant.users[0] + '\\')" title="让已登录的浏览器失效，不改密码">踢下线</button>',
       '<button class="danger" onclick="removeTenant(\\'' + tenant.id + '\\')">删除</button>',
     ].join(' ')
     const agentNote = tenant.agent ? '' : ' <span class="tag muted" title="没有节点代理，容器操作需在部署机上执行">无代理</span>'
@@ -222,7 +235,7 @@ async function load() {
       '<td>' + tenant.status + agentNote + '</td>' +
       '<td><code>' + entry + '</code></td>' +
       '<td>' + tenant.users.join(', ') + '</td>' +
-      '<td>' + usageText + '</td>' +
+      '<td>' + usageText + limitsText + '</td>' +
       '<td class="row">' + buttons + '</td>' +
       '</tr>'
   })

@@ -244,10 +244,29 @@ function parseCookies(header) {
   return out
 }
 
+/**
+ * Session epoch for one user.
+ *
+ * A signed cookie cannot be withdrawn, so revocation works by changing a number
+ * the cookie carries: bumping this invalidates every session already issued to
+ * that user while leaving everyone else alone. Reset by a password change (the
+ * old password may have leaked, and the sessions it authorized should not
+ * outlive it) and by an explicit kick.
+ *
+ * @param tenant - tenant record.
+ * @param user - user name.
+ * @returns the epoch, defaulting to 0 for a user that has never been revoked.
+ */
+function sessionEpochOf(tenant, user) {
+  const account = (tenant.users ?? []).find((entry) => entry.name === user)
+  return Number.isInteger(account?.sessionEpoch) ? account.sessionEpoch : 0
+}
+
 function signSession(tenantId, user) {
   const payload = base64url(Buffer.from(JSON.stringify({
     t: tenantId,
     u: user,
+    e: sessionEpochOf(tenants.get(tenantId), user),
     exp: Date.now() + SESSION_TTL_MS,
   }), 'utf8'))
   const signature = base64url(crypto.createHmac('sha256', sessionSecret).update(payload).digest())
@@ -272,6 +291,10 @@ function verifySession(value) {
   if (typeof decoded.exp !== 'number' || decoded.exp < Date.now()) return undefined
   const tenant = tenants.get(decoded.t)
   if (tenant === undefined) return undefined
+  // A cookie minted before a revocation carries the old epoch and is refused
+  // here, which is the whole point of putting it in the payload.
+  const epoch = Number.isInteger(decoded.e) ? decoded.e : 0
+  if (epoch !== sessionEpochOf(tenant, decoded.u)) return undefined
   return { tenant, user: decoded.u, expiresAt: decoded.exp }
 }
 
@@ -1040,6 +1063,8 @@ async function adminState() {
       agent: typeof entry?.agent === 'string' ? entry.agent : undefined,
       status: statusTag(probe),
       usage: usage.get(tenant.id) ?? { calls: 0, input: 0, output: 0, cacheRead: 0 },
+      limits: tenant.modelLimits ?? {},
+      epochs: (tenant.users ?? []).map((user) => ({ name: user.name, epoch: Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : 0 })),
     }
   }))
   rows.sort((left, right) => left.id.localeCompare(right.id))
@@ -1117,9 +1142,26 @@ async function adminAction(body) {
     if (target === undefined) return { ok: false, error: `租户 ${id} 没有用户 ${user}` }
     const password = crypto.randomBytes(9).toString('base64url')
     target.passwordHash = hashPassword(password)
+    // Same reasoning as the command line: the sessions the old password
+    // authorized are withdrawn with it.
+    target.sessionEpoch = (Number.isInteger(target.sessionEpoch) ? target.sessionEpoch : 0) + 1
     admin.writeRegistry(document)
-    admin.audit({ action: 'passwd', tenant: id, user, result: 'registry-written' })
-    return { ok: true, password, message: `${id}/${user} 的密码已重置` }
+    admin.audit({ action: 'passwd', tenant: id, user, result: 'registry-written', revoked: true })
+    return { ok: true, password, message: `${id}/${user} 的密码已重置，该用户已登录的会话同时失效` }
+  }
+
+  if (action === 'kick') {
+    // Withdraw sessions without changing the password: a lost device is the
+    // usual reason, and forcing a new password on the user is not always wanted.
+    const user = typeof body?.user === 'string' && body.user !== '' ? body.user : undefined
+    const targets = user === undefined ? (tenant.users ?? []) : (tenant.users ?? []).filter((entry) => entry.name === user)
+    if (targets.length === 0) return { ok: false, error: `租户 ${id} 没有用户 ${String(user)}` }
+    for (const entry of targets) {
+      entry.sessionEpoch = (Number.isInteger(entry.sessionEpoch) ? entry.sessionEpoch : 0) + 1
+    }
+    admin.writeRegistry(document)
+    admin.audit({ action: 'kick', tenant: id, user: user ?? '*', result: 'registry-written' })
+    return { ok: true, message: `已让 ${id} 的 ${targets.map((entry) => entry.name).join('、')} 重新登录` }
   }
 
   if (action === 'remove') {

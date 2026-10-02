@@ -9,6 +9,7 @@
  *   node bin/registry.js list
  *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--no-edge-port] [--password <pw>] [--node <name>]
  *   node bin/registry.js passwd <id> <user> [--password <pw>]
+ *   node bin/registry.js kick <id> [user]
  *   node bin/registry.js remove <id>
  *   node bin/registry.js ensure-model-keys
  *
@@ -168,9 +169,64 @@ switch (command) {
     }
     const password = flag(args, 'password') ?? crypto.randomBytes(9).toString('base64url')
     user.passwordHash = hashPassword(password)
+    // Changing a password also withdraws the sessions it authorized: the old
+    // password may have leaked, and whoever holds a cookie from it should not
+    // keep access. The gateway compares this number against the cookie's.
+    user.sessionEpoch = (Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : 0) + 1
     save()
     console.log(`updated ${tenant.id}/${user.name}`)
     console.log(`  password: ${password}`)
+    console.log(`  已吊销该用户的 ${user.sessionEpoch > 1 ? '所有' : '既有'}会话（epoch=${String(user.sessionEpoch)}）`)
+    break
+  }
+
+  case 'kick': {
+    // Withdraw sessions without touching the password: the usual case is a lost
+    // laptop, not a compromised password.
+    const tenant = requireTenant(args[0])
+    const only = args[1]
+    const targets = only === undefined ? tenant.users : tenant.users.filter((entry) => entry.name === only)
+    if (targets.length === 0) {
+      console.error(`tenant ${tenant.id} has no user ${String(only)}`)
+      process.exit(1)
+    }
+    for (const user of targets) {
+      user.sessionEpoch = (Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : 0) + 1
+    }
+    save()
+    console.log(`已吊销 ${tenant.id} 的会话: ${targets.map((entry) => `${entry.name}(epoch=${String(entry.sessionEpoch)})`).join(', ')}`)
+    break
+  }
+
+  case 'limit': {
+    // Ceilings live in the registry rather than in code: they are per-tenant
+    // policy, and the model gateway reloads this file on change.
+    const tenant = requireTenant(args[0])
+    if (args.includes('--clear')) {
+      delete tenant.modelLimits
+      save()
+      console.log(`${tenant.id}: 已取消模型限额`)
+      break
+    }
+    const rpm = flag(args, 'rpm')
+    const dailyTokens = flag(args, 'daily-tokens')
+    if (rpm === undefined && dailyTokens === undefined) {
+      const current = tenant.modelLimits ?? {}
+      console.log(`${tenant.id}: 每分钟请求 ${current.rpm ?? '不限'}，每天 token ${current.dailyTokens ?? '不限'}`)
+      break
+    }
+    const limits = { ...(tenant.modelLimits ?? {}) }
+    if (rpm !== undefined) limits.rpm = Number(rpm)
+    if (dailyTokens !== undefined) limits.dailyTokens = Number(dailyTokens)
+    for (const [name, value] of Object.entries(limits)) {
+      if (!Number.isInteger(value) || value <= 0) {
+        console.error(`${name} 必须是正整数，或加 --clear 取消限额`)
+        process.exit(1)
+      }
+    }
+    tenant.modelLimits = limits
+    save()
+    console.log(`${tenant.id}: 每分钟请求 ${limits.rpm ?? '不限'}，每天 token ${limits.dailyTokens ?? '不限'}`)
     break
   }
 

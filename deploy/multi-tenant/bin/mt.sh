@@ -17,7 +17,9 @@
 #   bin/mt.sh publish-image      build the runtime image from an uploaded local-source overlay
 #   bin/mt.sh list               list tenants from the registry
 #   bin/mt.sh add <id> [...]     add a tenant (see bin/registry.js)
-#   bin/mt.sh passwd <id> <user> set a tenant password
+#   bin/mt.sh passwd <id> <user> set a tenant password (and end that user's sessions)
+#   bin/mt.sh kick <id> [user]   end a tenant's or one user's sessions without changing the password
+#   bin/mt.sh limit <id> [--rpm n] [--daily-tokens n] [--clear]   model ceilings for one tenant
 #   bin/mt.sh remove <id>        remove a tenant from the registry
 #   bin/mt.sh key <id> <value>   set a tenant's model key in .env
 #   bin/mt.sh model              apply model.patch.yml + model.env to every tenant and restart them
@@ -641,6 +643,8 @@ case "${1:-}" in
   list)    node_run bin/registry.js list ;;
   add)     shift; cmd_add "$@" ;;
   passwd)  shift; node_run bin/registry.js passwd "$@"; node_run bin/render.js ;;
+  kick)    shift; node_run bin/registry.js kick "$@" ;;   # 让某租户（或某用户）已登录的会话失效
+  limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额
   remove)  shift; cmd_remove "$@" ;;
   key)     shift; cmd_key "$@" ;;
   *)       echo "未知命令: ${1:-}" >&2; sed -n '/^#   bin\/mt.sh/,/^#$/p' "$0" | sed 's/^#   /  /; s/^#$//' >&2; exit 2 ;;
