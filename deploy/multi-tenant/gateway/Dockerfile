@@ -10,6 +10,7 @@ COPY admin.js /app/admin.js
 COPY admin-page.js /app/admin-page.js
 COPY throttle.js /app/throttle.js
 COPY rotate.js /app/rotate.js
+COPY metrics.js /app/metrics.js
 
 # 8090: public entry. Tenant runtimes are reachable only on the compose network.
 EXPOSE 8090

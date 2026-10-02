@@ -24,6 +24,18 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { Throttle } = require('./throttle.js')
 const { appendRotated } = require('./rotate.js')
+const { render: renderMetrics } = require('./metrics.js')
+
+/** When this process started, for the uptime gauge. */
+const PROCESS_STARTED_AT = Date.now()
+/**
+ * Deployment root as this container sees it.
+ *
+ * The gateway mounts only its own configuration and state, so the backups
+ * directory it reports on is the one the console and bin/mt.sh use; the mount is
+ * what makes that path exist here at all.
+ */
+const DEPLOY_ROOT = process.env.MT_DEPLOY_ROOT ?? '/project'
 const {
   AdminConsole, hashPassword, verifyPassword, ID_PATTERN, USER_PATTERN,
   COOKIE: ADMIN_COOKIE, MAX_FAILURES, LOCKOUT_MS, SESSION_MS,
@@ -1334,6 +1346,50 @@ function handleRequest(req, res) {
       return
     }
     handleRegister(req, res)
+    return
+  }
+  if (url.pathname === `${PREFIX}/metrics`) {
+    // Same exposure rule as the runtime listing: a local scraper needs no key,
+    // anything else does. Prometheus usually runs on another host, so it passes
+    // the key as a bearer-style header.
+    const presented = req.headers['x-mt-registry-key']
+    const remote = req.socket.remoteAddress ?? ''
+    const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
+    if (!loopback && (typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey))) {
+      send(res, 401, { 'content-type': 'text/plain; charset=utf-8' }, 'bad registry key\n')
+      return
+    }
+    Promise.all([...tenants.values()].map(async (tenant) => {
+      const entry = runtimeOf(tenant)
+      if (entry === undefined) return { id: tenant.id, registered: false, ready: false, hasToken: false, node: tenant.node ?? 'local', limits: tenant.modelLimits ?? {} }
+      const hasToken = typeof entry.token === 'string' && entry.token !== ''
+      let reachable = false
+      try {
+        const response = await tenantRequest(tenant, tenantAddress(tenant), '/')
+        reachable = response.status > 0
+      } catch {
+        reachable = false
+      }
+      return {
+        id: tenant.id,
+        registered: true,
+        ready: reachable && hasToken,
+        hasToken,
+        node: entry.node ?? 'local',
+        limits: tenant.modelLimits ?? {},
+      }
+    })).then((rows) => {
+      const text = renderMetrics({
+        tenants: rows,
+        logDir: LOG_DIR,
+        root: DEPLOY_ROOT,
+        startedAt: PROCESS_STARTED_AT,
+        edgePort: EDGE_PORT,
+      })
+      send(res, 200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' }, text)
+    }).catch((error) => {
+      send(res, 500, { 'content-type': 'text/plain; charset=utf-8' }, `metrics failed: ${error.message}\n`)
+    })
     return
   }
   if (url.pathname === `${PREFIX}/registry/tenants`) {

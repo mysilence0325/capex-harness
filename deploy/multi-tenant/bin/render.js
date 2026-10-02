@@ -570,6 +570,8 @@ ${loggingBlock()}
       MT_EDGE_PORT: \${MT_EDGE_PORT:-8090}
       MT_BIND_IP: \${MT_BIND_IP:-0.0.0.0}
       MT_SESSION_TTL_HOURS: \${MT_SESSION_TTL_HOURS:-12}
+      MT_LOG_DIR: /logs
+      MT_DEPLOY_ROOT: /project
 ${selfLogEnv()}
 ${gatewayTlsLines}      TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
@@ -582,6 +584,9 @@ ${loggingBlock()}
       - ./tenants.json:/config/tenants.json
       - ./state:/state
       - ./logs:/logs
+      # Read-only, and only for the metrics endpoint's newest-backup timestamp:
+      # an alert on backups stopping needs the control plane to see them.
+      - ./backups:/project/backups:ro
     # A wedged control plane refuses nothing and serves nothing, which looks
     # exactly like a network problem from outside. The health endpoint probes
     # every registered runtime, so Docker can restart the process instead of
