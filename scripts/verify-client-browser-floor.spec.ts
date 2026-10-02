@@ -1,10 +1,14 @@
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import { CLIENT_FLOOR_APIS } from './client-browser-floor.ts'
 import {
+  collectApiViolations,
   collectArtifactViolations,
   collectBrowserArtifacts,
+  collectDeniedApis,
   collectGrammarViolations,
   collectPayloads,
+  FLOOR_DENIED_APIS,
   PAYLOAD_MIN_CHARACTERS,
 } from './verify-client-browser-floor.ts'
 
@@ -14,6 +18,10 @@ function parse(text: string): ts.SourceFile {
 
 function constructs(text: string): string[] {
   return collectGrammarViolations(parse(text)).map(violation => violation.construct)
+}
+
+function apiConstructs(text: string): string[] {
+  return collectApiViolations(parse(text)).map(violation => violation.construct)
 }
 
 describe('client browser floor grammar', () => {
@@ -39,6 +47,76 @@ describe('client browser floor grammar', () => {
     const [violation] = collectGrammarViolations(parse('const a = 1\nclass B { static {} }\n'))
     expect(violation?.construct).toBe('class static block')
     expect(violation?.position).toBe('const a = 1\nclass B { static {} }\n'.indexOf('static'))
+  })
+})
+
+describe('client browser floor API calls', () => {
+  it('reports a call to an API the floor lacks', () => {
+    const violations = collectArtifactViolations('lib/client.js', 'const grouped = Object.groupBy(items, pick)\n')
+    expect(violations).toHaveLength(1)
+    expect(violations[0]?.construct).toBe('call to Object.groupBy')
+    expect(violations[0]?.line).toBe(1)
+    expect(violations[0]?.inPayload).toBe(false)
+  })
+
+  it('reports an instance call the artifact does not type', () => {
+    expect(apiConstructs('input.showPicker()\nview.setFromBase64(encoded)\n')).toEqual([
+      'call to HTMLInputElement.prototype.showPicker',
+      'call to Uint8Array.prototype.setFromBase64',
+    ])
+  })
+
+  it('needs a call site, not a name', () => {
+    expect(apiConstructs([
+      '// Object.groupBy(items, pick)',
+      'const named = "Object.groupBy"',
+      'const held = Object.groupBy',
+      'const picker = input.showPicker',
+      'const text = "input.showPicker()"',
+      'registry.groupBy(items, pick)',
+      'accept(Object.groupBy)',
+    ].join('\n'))).toEqual([])
+  })
+
+  it('accepts the APIs the shell installs', () => {
+    expect(apiConstructs([
+      'Object.hasOwn(target, "key")',
+      'const copy = structuredClone(value)',
+      'const sorted = values.toSorted()',
+      'const { promise } = Promise.withResolvers()',
+      'signal.throwIfAborted()',
+    ].join('\n'))).toEqual([])
+  })
+
+  it('reports a payload that calls an API the floor lacks', () => {
+    const payload = 'const grouped = Object.groupBy(items, pick)'.padEnd(PAYLOAD_MIN_CHARACTERS, ' ')
+    const violations = collectArtifactViolations('lib/client.pdf.js', `const source = ${JSON.stringify(payload)};`)
+    expect(violations).toHaveLength(1)
+    expect(violations[0]?.construct).toBe('call to Object.groupBy')
+    expect(violations[0]?.inPayload).toBe(true)
+  })
+})
+
+describe('client browser floor deny list', () => {
+  it('reports every curated entry the installer leaves open', () => {
+    expect(collectDeniedApis()).toEqual([...FLOOR_DENIED_APIS])
+    expect(FLOOR_DENIED_APIS.length).toBeGreaterThan(0)
+  })
+
+  it('refuses a deny entry the installer covers', () => {
+    // An installed name is skipped as a call site, so this entry could never
+    // fire; the drift has to fail loudly instead of hiding the API.
+    expect(() => collectDeniedApis(['Object.hasOwn'], CLIENT_FLOOR_APIS)).toThrow(/Object\.hasOwn/u)
+  })
+
+  it('refuses two entries that resolve to one receiver-agnostic call site', () => {
+    // A String call and an Array call are one call site to a rule that cannot
+    // see the receiver, so the installed member covers both.
+    expect(() => collectDeniedApis(['String.prototype.at'], CLIENT_FLOOR_APIS)).toThrow(/Array\.prototype\.at/u)
+  })
+
+  it('refuses a deny list with nothing left to report', () => {
+    expect(() => collectDeniedApis([], [])).toThrow(/nothing to report/u)
   })
 })
 
