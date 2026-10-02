@@ -25,6 +25,7 @@ const path = require('node:path')
 const { Throttle } = require('./throttle.js')
 const { appendRotated } = require('./rotate.js')
 const { render: renderMetrics } = require('./metrics.js')
+const { update: updateRegistry } = require('./tenant-lock.js')
 
 /** When this process started, for the uptime gauge. */
 const PROCESS_STARTED_AT = Date.now()
@@ -1105,26 +1106,40 @@ async function adminAction(body) {
     if (!ID_PATTERN.test(id)) return { ok: false, error: '租户 id 只能用小写字母、数字和短横线，且以字母开头' }
     const user = typeof body?.user === 'string' ? body.user : ''
     if (!USER_PATTERN.test(user)) return { ok: false, error: '用户名只能包含字母、数字、点、下划线和短横线' }
-    const document = admin.readRegistry()
-    if ((document.tenants ?? []).some((tenant) => tenant.id === id)) return { ok: false, error: `租户 ${id} 已存在` }
-    const internalPorts = (document.tenants ?? []).map((tenant) => tenant.internalPort).filter(Number.isInteger)
-    const edgePorts = (document.tenants ?? []).map((tenant) => tenant.edgePort).filter(Number.isInteger)
     const password = crypto.randomBytes(9).toString('base64url')
     const tenantNode = typeof body?.node === 'string' && body.node !== '' ? body.node : 'local'
-    document.tenants = [...(document.tenants ?? []), {
-      id,
-      title: typeof body?.title === 'string' && body.title !== '' ? body.title : id,
-      node: tenantNode,
-      internalPort: internalPorts.length === 0 ? 3181 : Math.max(...internalPorts) + 1,
-      service: `dsh-${id}`,
-      container: `mt-dsh-${id}`,
-      hosts: [`${id}.dsh.local`],
-      users: [{ name: user, passwordHash: hashPassword(password) }],
-      modelKey: `sk-mt-${id}-${crypto.randomBytes(18).toString('base64url')}`,
-      limits: { memory: '2g', cpus: '1.5', pids: 512 },
-      edgePort: edgePorts.length === 0 ? 8091 : Math.max(...edgePorts) + 1,
-    }]
-    admin.writeRegistry(document)
+    const title = typeof body?.title === 'string' && body.title !== '' ? body.title : id
+    // Under the lock, and re-reading inside it: the console and bin/registry.js
+    // both edit this file, and a tenant added while an operator changes a
+    // password must not lose either change.
+    let duplicate = false
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        if ((document.tenants ?? []).some((tenant) => tenant.id === id)) {
+          duplicate = true
+          return
+        }
+        const internalPorts = (document.tenants ?? []).map((tenant) => tenant.internalPort).filter(Number.isInteger)
+        const edgePorts = (document.tenants ?? []).map((tenant) => tenant.edgePort).filter(Number.isInteger)
+        document.tenants = [...(document.tenants ?? []), {
+          id,
+          title,
+          node: tenantNode,
+          internalPort: internalPorts.length === 0 ? 3181 : Math.max(...internalPorts) + 1,
+          service: `dsh-${id}`,
+          container: `mt-dsh-${id}`,
+          hosts: [`${id}.dsh.local`],
+          users: [{ name: user, passwordHash: hashPassword(password) }],
+          modelKey: `sk-mt-${id}-${crypto.randomBytes(18).toString('base64url')}`,
+          limits: { memory: '2g', cpus: '1.5', pids: 512 },
+          edgePort: edgePorts.length === 0 ? 8091 : Math.max(...edgePorts) + 1,
+        }]
+      })
+    } catch (error) {
+      admin.audit({ action: 'add', tenant: id, user, result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
+    }
+    if (duplicate) return { ok: false, error: `租户 ${id} 已存在` }
     admin.audit({ action: 'add', tenant: id, user, node: tenantNode, result: 'registry-written' })
     // The container comes from the node that will run it. Any agent on that node
     // will do: they all render from the same registry.
@@ -1144,20 +1159,31 @@ async function adminAction(body) {
     return { ok: true, password, message: `租户 ${id} 已创建并开通` }
   }
 
-  const document = admin.readRegistry()
-  const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
-  if (tenant === undefined) return { ok: false, error: `没有租户 ${id}` }
-
+  // Everything below changes the registry under the lock, re-reading inside it:
+  // bin/registry.js edits the same file, and neither writer may lose the other's
+  // change. The tenant is looked up again in the locked copy for the same reason.
   if (action === 'passwd') {
     const user = typeof body?.user === 'string' ? body.user : ''
-    const target = (tenant.users ?? []).find((entry) => entry.name === user)
-    if (target === undefined) return { ok: false, error: `租户 ${id} 没有用户 ${user}` }
     const password = crypto.randomBytes(9).toString('base64url')
-    target.passwordHash = hashPassword(password)
-    // Same reasoning as the command line: the sessions the old password
-    // authorized are withdrawn with it.
-    target.sessionEpoch = (Number.isInteger(target.sessionEpoch) ? target.sessionEpoch : 0) + 1
-    admin.writeRegistry(document)
+    let missing
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
+        const target = (tenant?.users ?? []).find((entry) => entry.name === user)
+        if (target === undefined) {
+          missing = tenant === undefined ? `没有租户 ${id}` : `租户 ${id} 没有用户 ${user}`
+          return
+        }
+        target.passwordHash = hashPassword(password)
+        // Same reasoning as the command line: the sessions the old password
+        // authorized are withdrawn with it.
+        target.sessionEpoch = (Number.isInteger(target.sessionEpoch) ? target.sessionEpoch : 0) + 1
+      })
+    } catch (error) {
+      admin.audit({ action: 'passwd', tenant: id, user, result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
+    }
+    if (missing !== undefined) return { ok: false, error: missing }
     admin.audit({ action: 'passwd', tenant: id, user, result: 'registry-written', revoked: true })
     return { ok: true, password, message: `${id}/${user} 的密码已重置，该用户已登录的会话同时失效` }
   }
@@ -1166,29 +1192,62 @@ async function adminAction(body) {
     // Withdraw sessions without changing the password: a lost device is the
     // usual reason, and forcing a new password on the user is not always wanted.
     const user = typeof body?.user === 'string' && body.user !== '' ? body.user : undefined
-    const targets = user === undefined ? (tenant.users ?? []) : (tenant.users ?? []).filter((entry) => entry.name === user)
-    if (targets.length === 0) return { ok: false, error: `租户 ${id} 没有用户 ${String(user)}` }
-    for (const entry of targets) {
-      entry.sessionEpoch = (Number.isInteger(entry.sessionEpoch) ? entry.sessionEpoch : 0) + 1
+    let kicked = []
+    let missing
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
+        if (tenant === undefined) {
+          missing = `没有租户 ${id}`
+          return
+        }
+        const targets = user === undefined ? (tenant.users ?? []) : (tenant.users ?? []).filter((entry) => entry.name === user)
+        if (targets.length === 0) {
+          missing = `租户 ${id} 没有用户 ${String(user)}`
+          return
+        }
+        for (const entry of targets) {
+          entry.sessionEpoch = (Number.isInteger(entry.sessionEpoch) ? entry.sessionEpoch : 0) + 1
+        }
+        kicked = targets.map((entry) => entry.name)
+      })
+    } catch (error) {
+      admin.audit({ action: 'kick', tenant: id, user: user ?? '*', result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
     }
-    admin.writeRegistry(document)
+    if (missing !== undefined) return { ok: false, error: missing }
     admin.audit({ action: 'kick', tenant: id, user: user ?? '*', result: 'registry-written' })
-    return { ok: true, message: `已让 ${id} 的 ${targets.map((entry) => entry.name).join('、')} 重新登录` }
+    return { ok: true, message: `已让 ${id} 的 ${kicked.join('、')} 重新登录` }
   }
 
   if (action === 'remove') {
     const purge = body?.purge === true
-    const entry = runtimeOf(tenant)
+    const entry = runtimeOf(tenants.get(id))
     if (entry !== undefined && typeof entry.agent === 'string') {
       const answer = await admin.callAgent(entry.agent, id, 'remove', { purge })
       admin.audit({ action: 'remove', tenant: id, agent: entry.agent, purge, status: answer.status })
       if (answer.body?.ok !== true) return { ok: false, error: `节点拒绝删除：${String(answer.body?.error ?? answer.status)}` }
     }
-    document.tenants = (document.tenants ?? []).filter((entry2) => entry2.id !== id)
-    admin.writeRegistry(document)
+    let missing
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        if (!(document.tenants ?? []).some((tenant) => tenant.id === id)) {
+          missing = `没有租户 ${id}`
+          return
+        }
+        document.tenants = (document.tenants ?? []).filter((tenant) => tenant.id !== id)
+      })
+    } catch (error) {
+      admin.audit({ action: 'remove', tenant: id, result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
+    }
+    if (missing !== undefined) return { ok: false, error: missing }
     admin.audit({ action: 'remove', tenant: id, result: 'registry-written', purge })
     return { ok: true, message: `已删除 ${id}${purge ? '（含数据）' : '（数据保留在磁盘上）'}` }
   }
+
+  const tenant = tenants.get(id)
+  if (tenant === undefined) return { ok: false, error: `没有租户 ${id}` }
 
   if (['start', 'stop', 'restart'].includes(action)) {
     const entry = runtimeOf(tenant)

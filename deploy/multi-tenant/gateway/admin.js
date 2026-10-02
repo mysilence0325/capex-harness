@@ -245,21 +245,6 @@ class AdminConsole {
     return totals
   }
 
-  /** Read the registry document the console edits. */
-  readRegistry() {
-    return JSON.parse(fs.readFileSync(this.options.registryFile, 'utf8'))
-  }
-
-  /**
-   * Write the registry back, in place.
-   *
-   * In place rather than by rename: the file is bind-mounted into this container,
-   * and the watcher that reloads it watches that inode.
-   */
-  writeRegistry(document) {
-    fs.writeFileSync(this.options.registryFile, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 })
-  }
-
   /**
    * Ask one tenant's node agent to change that container's state.
    * @param agent - the agent's base URL, as it registered itself.

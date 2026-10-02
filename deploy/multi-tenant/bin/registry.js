@@ -22,9 +22,17 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+// The lock lives beside the control plane because its image ships only that
+// directory; this CLI edits the same file the console does.
+const { acquire } = require('../gateway/tenant-lock.js')
 
 const ROOT = path.resolve(__dirname, '..')
 const FILE = path.join(ROOT, 'tenants.json')
+
+// Held for the whole command: every case here reads the registry at startup and
+// writes it at the end, so the window that must be exclusive spans the process.
+// The release also runs on exit, so a failed command cannot leave it behind.
+acquire(FILE)
 
 const registry = fs.existsSync(FILE)
   ? JSON.parse(fs.readFileSync(FILE, 'utf8'))
