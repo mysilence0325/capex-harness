@@ -111,6 +111,26 @@ class AdminConsole {
   }
 
   /**
+   * Replace the administrator credential.
+   *
+   * Same file and format as `bin/admin-passwd.js` writes, so the console and the
+   * command line stay interchangeable: whichever set the password last is the one
+   * that works, and neither needs to know about the other.
+   *
+   * @param user - administrator name.
+   * @param passwordHash - the `scrypt$<salt>$<digest>` value to store.
+   */
+  writeAdmin(user, passwordHash) {
+    const file = ADMIN_FILE(this.options.stateDir)
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({ user, passwordHash, updatedAt: new Date().toISOString() }, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+  }
+
+  /**
    * Withdraw every administrator session by replacing the signing key.
    *
    * Unlike a tenant password change there is no epoch to bump: the login carries

@@ -1246,6 +1246,43 @@ async function adminAction(body) {
     return { ok: true, message: `已删除 ${id}${purge ? '（含数据）' : '（数据保留在磁盘上）'}` }
   }
 
+  // The administrator changing their own password. Separate from the tenant
+  // actions above because it targets the console credential, not a tenant, and
+  // because it must re-issue this session: rotating the signing key withdraws
+  // every session including the one making the request, so without a fresh cookie
+  // the person changing their password would sign themselves out.
+  if (action === 'own-passwd') {
+    const current = typeof body?.currentPassword === 'string' ? body.currentPassword : ''
+    const next = typeof body?.newPassword === 'string' ? body.newPassword : ''
+    const record = admin.readAdmin()
+    if (record === undefined) return { ok: false, error: '还没有设置管理员密码，先执行 bin/mt.sh admin-passwd' }
+    // The current password is required: a stolen console session must not be
+    // enough to take the account over.
+    if (!verifyPassword(current, record.passwordHash)) {
+      admin.audit({ action: 'own-passwd', tenant: '-', result: 'rejected-current-password' })
+      return { ok: false, error: '当前密码不对' }
+    }
+    if (next.length < 12) {
+      return { ok: false, error: '新密码至少 12 位（这个账号能停掉所有租户，值得长一点）' }
+    }
+    if (next === current) return { ok: false, error: '新密码和当前密码一样' }
+    try {
+      admin.writeAdmin(record.user, hashPassword(next))
+      admin.rotateSessionKey()
+    } catch (error) {
+      admin.audit({ action: 'own-passwd', tenant: '-', result: 'failed', error: error.message })
+      return { ok: false, error: `写入失败：${error.message}` }
+    }
+    admin.audit({ action: 'own-passwd', tenant: '-', user: record.user, result: 'registry-written', revoked: true })
+    // Handed back to the HTTP layer, which sets it on the response. Other
+    // sessions keep the old key's cookies and stop verifying.
+    return {
+      ok: true,
+      session: admin.mintSession(),
+      message: '密码已修改。其它已登录的管理员会话已失效，当前会话保持登录。',
+    }
+  }
+
   const tenant = tenants.get(id)
   if (tenant === undefined) return { ok: false, error: `没有租户 ${id}` }
 
@@ -1372,8 +1409,15 @@ async function handleAdmin(req, res, url) {
       return
     }
     const answer = await adminAction(body)
-    send(res, answer.ok ? 200 : 400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-      JSON.stringify(answer))
+    const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+    // A password change rotates the signing key, so every cookie minted with the
+    // old one stops verifying — including this request's. The action hands back a
+    // freshly minted session for exactly that reason: everyone else is signed out,
+    // the administrator who made the change is not.
+    if (typeof answer.session === 'string') {
+      headers['set-cookie'] = adminCookieHeader(answer.session, encrypted, Math.floor(SESSION_MS / 1000))
+    }
+    send(res, answer.ok ? 200 : 400, headers, JSON.stringify(answer))
     return
   }
 

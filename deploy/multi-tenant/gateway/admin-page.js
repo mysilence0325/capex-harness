@@ -148,6 +148,20 @@ function consolePage({ user }) {
 </div>
 <div id="notice"></div>
 
+<h2>我的账号</h2>
+<div class="card">
+  <div class="row">
+    <input id="cur-pass" type="password" placeholder="当前密码" size="20" autocomplete="current-password">
+    <input id="new-pass" type="password" placeholder="新密码（至少 12 位）" size="24" autocomplete="new-password">
+    <input id="new-pass2" type="password" placeholder="再输一次新密码" size="24" autocomplete="new-password">
+    <button class="primary" onclick="changeOwnPassword()">修改密码</button>
+  </div>
+  <p class="muted" style="margin: 10px 0 0">
+    改完其它已登录的管理员会话立即失效，<b>当前这个会话保持登录</b>。
+    忘了密码就只能到部署机上执行 <code>bin/mt.sh admin-passwd</code>。
+  </p>
+</div>
+
 <h2>新增租户</h2>
 <div class="card">
   <div class="row">
@@ -173,6 +187,29 @@ const post = async (path, body) => {
   })
   return response.json()
 }
+// Changing our own password signs out every other administrator session, and the
+// server hands back a fresh cookie for this one. The new password is entered twice
+// on purpose: a typo here locks the only administrator out until somebody reaches
+// the host, and the console cannot be the thing that does that.
+async function changeOwnPassword() {
+  const current = $('cur-pass').value
+  const next = $('new-pass').value
+  const again = $('new-pass2').value
+  if (current === '' || next === '') { notice('三个框都要填', true); return }
+  if (next !== again) { notice('两次输入的新密码不一致', true); return }
+  if (next.length < 12) { notice('新密码至少 12 位', true); return }
+  notice('正在修改…')
+  const answer = await post('api/tenant', { action: 'own-passwd', currentPassword: current, newPassword: next })
+  if (answer.ok) {
+    $('cur-pass').value = ''
+    $('new-pass').value = ''
+    $('new-pass2').value = ''
+    notice(answer.message || '密码已修改')
+  } else {
+    notice(answer.error || '修改失败', true)
+  }
+}
+
 const action = async (tenant, verb, extra) => {
   notice('正在执行 ' + verb + ' …')
   const answer = await post('api/tenant', Object.assign({ tenant, action: verb }, extra || {}))
