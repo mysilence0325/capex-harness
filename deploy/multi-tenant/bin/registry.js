@@ -26,6 +26,8 @@ const crypto = require('node:crypto')
 // directory; this CLI edits the same file the console does.
 const { acquire } = require('../gateway/tenant-lock.js')
 
+/** Container-name prefix for this deployment; see MT_CONTAINER_NAME_PREFIX. */
+const NAME_PREFIX = (process.env.MT_CONTAINER_NAME_PREFIX ?? 'mt-').trim()
 const ROOT = path.resolve(__dirname, '..')
 const FILE = path.join(ROOT, 'tenants.json')
 
@@ -135,8 +137,11 @@ switch (command) {
       node,
       internalPort: Number(flag(args, 'internal-port') ?? nextPort('internalPort', 3181)),
       // Compose service name (proxy target) and container name (log lookup).
+      // The prefix is a deployment setting: a second deployment on the same host
+      // must not collide with the first one's container names, and the agent and
+      // bin/mt.sh both look the container up by the name recorded here.
       service: `dsh-${id}`,
-      container: `mt-dsh-${id}`,
+      container: `${NAME_PREFIX}dsh-${id}`,
       hosts: [`${id}.dsh.local`],
       users: [{ name: user, passwordHash: hashPassword(password) }],
       // Placeholder the tenant presents to the model gateway; the real upstream

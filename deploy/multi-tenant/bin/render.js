@@ -277,7 +277,18 @@ const NETWORK_EXTERNAL = (process.env.MT_NETWORK_EXTERNAL ?? '') !== ''
  * firewall rules that reference it out of effect without any error. Pinning it
  * is what makes those rules survive a rebuild.
  */
-const BRIDGE_NAME = process.env.MT_BRIDGE_NAME ?? 'mtdocker0'
+const bridgeName = () => (envValues.get('MT_BRIDGE_NAME') ?? process.env.MT_BRIDGE_NAME ?? 'mtdocker0').trim()
+/**
+ * Explicit subnet for the main network, when the operator sets one.
+ *
+ * Docker otherwise takes it from its default address pools, and on a machine
+ * where other stacks have used them up the network cannot be created at all —
+ * which is what a fresh install hits on a shared host, and what a from-scratch
+ * rehearsal of the rebuild runbook actually hit. The isolated tenant networks
+ * always carry an explicit subnet; this lets the main one as well. Left unset in
+ * an existing deployment so its network is not renumbered.
+ */
+const networkSubnet = () => (envValues.get('MT_NETWORK_SUBNET') ?? process.env.MT_NETWORK_SUBNET ?? '').trim()
 /**
  * Prefix for the container names this host creates.
  *
@@ -682,7 +693,12 @@ ${NETWORK_EXTERNAL ? '    external: true' : `    driver: bridge
       # whenever the network is recreated. The firewall rules that keep tenants
       # off the host's ports are keyed by that interface name, so after a rebuild
       # they would silently stop applying. A pinned name keeps them valid.
-      com.docker.network.bridge.name: ${BRIDGE_NAME}`}
+      com.docker.network.bridge.name: ${bridgeName()}${networkSubnet() === '' ? '' : `
+    # Explicit subnet: on a machine whose default Docker address pools are used
+    # up by other stacks, a network without one cannot be created at all.
+    ipam:
+      config:
+        - subnet: ${networkSubnet()}`}`}
 ${[...TENANT_NETWORKS.values()].map((network) => `  ${network.name}:
     name: ${network.name}
     driver: bridge

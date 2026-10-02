@@ -107,7 +107,13 @@ cmd_up() {
   # 网络建立后才能探测到网关地址；首次运行或网段变化时补上租户出口代理。
   ensure_egress_proxy
   # 收紧租户容器对宿主端口的访问；失败只提示，不让 up 半途而废（doctor 会报出来）。
-  bash bin/isolate.sh apply || echo "    !! 租户隔离规则未应用，执行 bin/isolate.sh status 查看"
+  # MT_SKIP_ISOLATE=1 时不碰宿主防火墙：共享机器上的第二套部署（测试、演练）不该
+  # 覆盖别人的规则——isolate 是"先删本部署的旧规则再加新的"，跑一次就会把另一套的删掉。
+  if [ "${MT_SKIP_ISOLATE:-}" = "1" ]; then
+    echo "    MT_SKIP_ISOLATE=1：未改动宿主防火墙规则（需要时手工执行 bin/isolate.sh apply）"
+  else
+    bash bin/isolate.sh apply || echo "    !! 租户隔离规则未应用，执行 bin/isolate.sh status 查看"
+  fi
   if [ "$this_node" = local ]; then
     # 控制面：注册本机租户（网关只认注册表里的地址，容器重建后必须重报）。
     register_all_tenants
@@ -148,7 +154,7 @@ registry_key() {
 tenant_container() {
   local id="$1" name
   name="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.container ?? ("mt-dsh-"+t.id)))' "$id" 2>/dev/null | tr -d '\r')"
-  if [ -n "$name" ]; then echo "$name"; else echo "mt-dsh-$id"; fi
+  if [ -n "$name" ]; then echo "$name"; else echo "${MT_CONTAINER_NAME_PREFIX:-mt-}dsh-$id"; fi
 }
 
 # 从容器日志里取 DSH 打印的启动 token。
@@ -183,8 +189,15 @@ register_tenant() {
   local container key port body response
   container="$(tenant_container "$id")"
   if [ -z "$endpoint" ]; then
-    local ip
-    ip="$(docker inspect "$container" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\r' || true)"
+    local ip attempt=0
+    # 容器刚创建时 Docker 还没把地址写进 inspect，直接读会读到空。等一会儿再放弃，
+    # 比直接报"没有网络地址"有用——磁盘慢的机器上重建时确实会撞上。
+    while [ "$attempt" -lt 20 ]; do
+      ip="$(docker inspect "$container" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\r' || true)"
+      [ -n "$ip" ] && break
+      sleep 1
+      attempt=$((attempt + 1))
+    done
     if [ -z "$ip" ]; then
       echo "    !! ${id}: 容器 ${container} 没有网络地址（还没启动？）" >&2
       return 1
@@ -431,7 +444,9 @@ cmd_url() {
   if [ -f state/tls/server.crt ] || [ -n "${MT_TLS_CERT:-}" ]; then scheme="https"; else scheme="http"; fi
   echo "==> 入口"
   if [ -f entry-urls.txt ]; then
-    sed -e "s|\${IP}|${ip:-127.0.0.1}|g" -e "s|\${MT_EDGE_PORT:-${port}}|${port}|g" -e "s|http://|${scheme}://|g" entry-urls.txt
+    # 模板里写的是 ${MT_EDGE_PORT:-8090} 这种形式，默认值可能与本部署实际端口不同，
+    # 所以替换要匹配任意默认值，否则打印出来的地址会原样带着未展开的变量。
+    sed -e "s|\${IP}|${ip:-127.0.0.1}|g" -e "s|\${MT_EDGE_PORT:-[0-9]*}|${port}|g" -e "s|http://|${scheme}://|g" entry-urls.txt
   else
     echo "    ${scheme}://${ip:-127.0.0.1}:${port}/"
   fi
@@ -519,7 +534,7 @@ cmd_remove() {
 
   local container
   container="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.container ?? ("mt-dsh-"+t.id)))' "$id" 2>/dev/null | tr -d '\r')"
-  [ -n "$container" ] || container="mt-dsh-$id"
+  [ -n "$container" ] || container="${MT_CONTAINER_NAME_PREFIX:-mt-}dsh-$id"
 
   node_run bin/registry.js remove "$id" || return 1
   node_run bin/render.js >/dev/null
