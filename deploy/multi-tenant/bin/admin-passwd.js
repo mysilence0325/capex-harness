@@ -40,4 +40,15 @@ const file = path.join(stateDir, 'admin.json')
 fs.writeFileSync(file, `${JSON.stringify({ user, passwordHash: `scrypt$${salt}$${digest}`, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 })
 
 console.log(`管理员密码已设置（用户 ${user}），写入 ${path.relative(root, file)}`)
+
+// 改密码同时吊销已登录的管理员会话：签名密钥一换，旧 cookie 就验不过。
+// 与租户侧同理——密码被换掉通常正是因为怀疑泄露，留着旧会话等于没换。
+if (args.includes('--keep-sessions')) {
+  console.log('--keep-sessions：已登录的管理员会话仍然有效')
+} else {
+  const keyFile = path.join(stateDir, 'admin.key')
+  fs.writeFileSync(keyFile, crypto.randomBytes(32), { mode: 0o600 })
+  console.log(`已让所有管理员重新登录（轮换了 ${path.relative(root, keyFile)}）`)
+}
+
 console.log('控制台入口：https://<控制面地址>:8090/__mt/admin')

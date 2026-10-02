@@ -515,6 +515,34 @@ function tenantService(tenant) {
   if (limits.memory) limitLines.push(`    mem_limit: ${String(limits.memory)}`)
   if (limits.cpus) limitLines.push(`    cpus: ${String(limits.cpus)}`)
   limitLines.push(`    pids_limit: ${String(limits.pids ?? 512)}`)
+  // 块设备吞吐上限（可选，**实测在本机不生效**，默认关闭）。
+  //
+  // 为什么不用相对权重：权重是 CFQ 的公平性设置，本机跑 deadline 调度器，配了等于没配。
+  //
+  // 为什么限速也不留在默认里：实测过，限制在每一层都正确落下了——Docker 记录了配置、
+  // 容器 cgroup 里就是 `253:2 52428800`、设备号也对——但容器里写 200MB 仍然是 908MB/s
+  // （不限速时 800MB/s）。原因是 cgroup v1 的块设备限速只在**回写**时生效，而回写发生在
+  // flusher/kworker 的 cgroup 里，不是容器自己的。也就是说：配了、看得见、不管用。
+  // 一个"看起来生效、实则无效"的限制比没有限制更糟，所以保持默认关闭，并把结论写在这里，
+  // 免得以后有人打开它还以为租户被限住了。
+  //
+  // 值是 Docker 的 `<设备>:<速率>`（长格式 path+rate 由下面生成），因为要限制哪块盘随机器而异。
+  const diskWrite = String(limits.diskWriteBps ?? (envValues.get('MT_TENANT_DISK_WRITE_BPS') ?? process.env.MT_TENANT_DISK_WRITE_BPS ?? '')).trim()
+  const diskRead = String(limits.diskReadBps ?? (envValues.get('MT_TENANT_DISK_READ_BPS') ?? process.env.MT_TENANT_DISK_READ_BPS ?? '')).trim()
+  // compose 的 schema 要长格式（path + rate）；短字符串 "[设备:速率]" 是旧格式，会被拒。
+  const asEntry = (spec) => {
+    const at = spec.lastIndexOf(':')
+    return at <= 0
+      ? undefined
+      : { path: spec.slice(0, at).trim(), rate: spec.slice(at + 1).trim() }
+  }
+  const writeEntry = diskWrite === '' ? undefined : asEntry(diskWrite)
+  const readEntry = diskRead === '' ? undefined : asEntry(diskRead)
+  if (writeEntry !== undefined || readEntry !== undefined) limitLines.push('    blkio_config:')
+  for (const [key, entry] of [['device_write_bps', writeEntry], ['device_read_bps', readEntry]]) {
+    if (entry === undefined) continue
+    limitLines.push(`      ${key}:\n        - path: ${entry.path}\n          rate: ${entry.rate}`)
+  }
 
   return `  ${tenant.service ?? `dsh-${tenant.id}`}:
     image: \${DSH_IMAGE:-dsh-web:0.2.0-rc.2}

@@ -26,7 +26,8 @@
 #   bin/mt.sh key <id> <value>   set a tenant's model key in .env
 #   bin/mt.sh model              apply model.patch.yml + model.env to every tenant and restart them
 #   bin/mt.sh render             re-render docker-compose.yml from tenants.json
-#   bin/mt.sh admin-passwd       set the administrator console password
+#   bin/mt.sh admin-passwd       set the administrator console password (revokes sessions)
+#   bin/mt.sh admin-kick         revoke every admin session, keep the password
 #   bin/mt.sh register <id>      register a tenant runtime with the control plane
 #   bin/mt.sh unregister <id>    make the control plane forget a tenant runtime
 #   bin/mt.sh runtimes           list the runtimes the control plane knows about
@@ -647,7 +648,8 @@ case "${1:-}" in
   doctor)  bash bin/doctor.sh ;;
   isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
   register)   shift; cmd_register "$@" ;;       # 向控制面注册租户运行时（地址 + 启动 token）
-  admin-passwd) shift; cmd_admin_passwd "$@" ;; # 设置管理控制台的管理员密码
+  admin-passwd) shift; cmd_admin_passwd "$@" ;; # 设置管理控制台的管理员密码（同时吊销已登录会话）
+  admin-kick) shift; node_run bin/admin-kick.js ;;    # 只吊销所有管理员会话，不改密码
   unregister) shift; cmd_unregister "$@" ;;     # 让控制面忘掉某个租户的运行时
   runtimes)   cmd_runtimes ;;                   # 列出控制面当前认识的运行时
   usage)   shift; bash bin/usage.sh "$@" ;;     # 按租户汇总模型用量（--tenant/--tail）

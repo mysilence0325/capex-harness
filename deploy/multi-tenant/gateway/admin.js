@@ -70,8 +70,6 @@ function verifyPassword(password, stored) {
  * throttle, and the console's HTML and JSON endpoints.
  */
 class AdminConsole {
-  sessionSecret
-
   /** Failed sign-in attempts, keyed by source address. */
   failures = new Map()
 
@@ -85,20 +83,52 @@ class AdminConsole {
    */
   constructor(options) {
     this.options = options
-    // Persisted rather than per-process: a standby control plane sharing this
-    // directory then accepts sessions the primary signed, which is what makes an
-    // active-passive pair possible at all. Same reasoning as the tenant session
-    // key in state/session.key.
-    this.sessionSecret = (() => {
-      const file = path.join(options.stateDir, 'admin.key')
-      if (fs.existsSync(file)) {
-        const existing = fs.readFileSync(file)
-        if (existing.length > 0) return existing
-      }
-      const created = crypto.randomBytes(32)
-      fs.writeFileSync(file, created, { mode: 0o600 })
-      return created
-    })()
+  }
+
+  /**
+   * The key administrator sessions are signed with.
+   *
+   * Read from disk on every use rather than cached at construction: rotating the
+   * file is how sessions are withdrawn, and a cached copy would keep honouring the
+   * old key until the process restarted — which is the one thing revocation must
+   * not require. It is 32 bytes on every mint and verify, against a console that
+   * sees a handful of requests per minute.
+   *
+   * Persisted rather than per-process: a standby control plane sharing this
+   * directory then accepts sessions the primary signed, which is what makes an
+   * active-passive pair possible at all. Same reasoning as the tenant session key
+   * in state/session.key.
+   */
+  get sessionSecret() {
+    const file = path.join(this.options.stateDir, 'admin.key')
+    if (fs.existsSync(file)) {
+      const existing = fs.readFileSync(file)
+      if (existing.length > 0) return existing
+    }
+    const created = crypto.randomBytes(32)
+    fs.writeFileSync(file, created, { mode: 0o600 })
+    return created
+  }
+
+  /**
+   * Withdraw every administrator session by replacing the signing key.
+   *
+   * Unlike a tenant password change there is no epoch to bump: the login carries
+   * only an expiry and a signature, so the key is the whole of the authority.
+   * Changing it signs out every browser, including this process's own — the
+   * gateway serves the next request with the new key and the old cookies stop
+   * verifying.
+   *
+   * @returns the previous key's length, for reporting.
+   */
+  rotateSessionKey() {
+    const file = path.join(this.options.stateDir, 'admin.key')
+    const previous = fs.existsSync(file) ? fs.readFileSync(file) : Buffer.alloc(0)
+    const created = crypto.randomBytes(32)
+    // Written in place, never renamed: the control plane's bind mount holds this
+    // inode, and a standby shares the file.
+    fs.writeFileSync(file, created, { mode: 0o600 })
+    return previous.length
   }
 
   /** @returns the stored administrator record, or undefined before first use. */
