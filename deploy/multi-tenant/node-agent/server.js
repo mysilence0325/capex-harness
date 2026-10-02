@@ -355,11 +355,19 @@ async function discover() {
     const name = String(container.Names?.[0] ?? '').replace(/^\//u, '')
     const id = tenantOf(container, name)
     if (id === undefined) continue
-    // Only containers on the configured network: falling back to whichever
-    // network a container happens to have would make this agent claim runtimes
-    // that belong to another node.
-    const ip = container.NetworkSettings?.Networks?.[NETWORK]?.IPAddress
-    if (typeof ip !== 'string' || ip === '') continue
+    // Any network this deployment owns: an isolated tenant has one of its own
+    // (`mt-net-<tenant>`), so looking at a single configured name would drop it
+    // from discovery and take it off the control plane.
+    const networks = container.NetworkSettings?.Networks ?? {}
+    let address
+    for (const [networkName, network] of Object.entries(networks)) {
+      if (networkName !== NETWORK && !networkName.startsWith(`${NETWORK}-`)) continue
+      if (typeof network?.IPAddress === 'string' && network.IPAddress !== '') {
+        address = network.IPAddress
+        break
+      }
+    }
+    if (address === undefined) continue
     // The port comes from the runtime's own printed URL; the image's EXPOSE is
     // only a default and every tenant here overrides it.
     const { port } = await currentRuntime(name)
@@ -367,7 +375,7 @@ async function discover() {
       console.log(`mt-node-agent: ${name} has not printed its URL yet; skipping this pass`)
       continue
     }
-    found.set(id, { ip, port, container: name })
+    found.set(id, { ip: address, port, container: name })
   }
   return found
 }

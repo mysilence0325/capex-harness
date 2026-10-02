@@ -113,7 +113,11 @@ fi
 echo "== 6. 租户 DSH cookie 不可跨运行时复用 =="
 DSH_COOKIE="$(awk '/dsh-auth/ { print $6"="$7 }' "$JAR" | tail -1)"
 if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
-  OUT="$(docker run --rm --network mt-net \
+  # 探针要放进本租户自己的网络里：租户被单独隔离时（MT_TENANT_NETWORKS），
+  # 从 mt-net 出发根本到不了它，测出来会是"探针自己不通"而不是隔离。
+  PROBE_NET="mt-net-${TENANT}"
+  docker network inspect "$PROBE_NET" >/dev/null 2>&1 || PROBE_NET="mt-net"
+  OUT="$(docker run --rm --network "$PROBE_NET" \
     -e "COOKIE=$DSH_COOKIE" -e "OWN=dsh-${TENANT}:${TENANT_PORT}:dsh-${TENANT}.internal" \
     -e "OTHER=dsh-${PEER}:${PEER_PORT}:dsh-${PEER}.internal" \
     "$IMAGE" node -e '
@@ -128,12 +132,21 @@ if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
           { host, port, path: "/", method: "GET", headers: { host: authority, cookie: process.env.COOKIE } },
           (response) => { response.resume(); resolve(response.statusCode) },
         )
-        request.on("error", (error) => resolve(`err:${error.message}`))
+        request.on("error", () => resolve("unreachable"))
         request.end()
       })
       Promise.all([ask(process.env.OWN), ask(process.env.OTHER)]).then(([a, b]) => console.log(`${a} ${b}`))
     ' 2>/dev/null)"
-  check "同一 cookie：本租户 200 / 他租户 401" "$OUT" "200 401"
+  OWN_RESULT="${OUT%% *}"
+  OTHER_RESULT="${OUT##* }"
+  check "同一 cookie：本租户返回 200" "$OWN_RESULT" "200"
+  # 两种结果都算通过，且第二种更强：对端在别的网桥上时连不到（网络层隔离），
+  # 在同一个网桥上时连得上但 cookie 一定被 401 拒。
+  case "$OTHER_RESULT" in
+    401) ok "  他租户拒绝该 cookie（401）" ;;
+    unreachable) ok "  他租户在网络层就不可达（比 401 更强）" ;;
+    *) bad "  他租户的响应既不是 401 也不是不可达：${OTHER_RESULT}" ;;
+  esac
 else
   echo "  (缺少 cookie 或对端租户，跳过)"
 fi

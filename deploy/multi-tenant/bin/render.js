@@ -16,6 +16,7 @@
 'use strict'
 
 const fs = require('node:fs')
+const crypto = require('node:crypto')
 const path = require('node:path')
 
 const ROOT = path.resolve(__dirname, '..')
@@ -354,6 +355,8 @@ const TLS_READY = fs.existsSync(TLS_CERT_FILE) && fs.existsSync(TLS_KEY_FILE)
  * `mt-model-gateway` is where tenant model calls actually go.
  */
 const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1,mock-model,mt-model-gateway'
+/** Port the egress proxy listens on. Read lazily: `.env` is parsed further down. */
+const egressPort = () => Number(envValues.get('MT_EGRESS_PORT') ?? '3128')
 
 /** Where tenants send model requests: the gateway that holds the real credential. */
 const MODEL_GATEWAY_URL = 'http://mt-model-gateway:8080'
@@ -434,6 +437,67 @@ ${indent}    max-file: "${files}"
 const selfLogEnv = () => `      MT_LOG_MAX_SIZE: \${MT_LOG_MAX_SIZE:-10m}
       MT_LOG_MAX_FILE: \${MT_LOG_MAX_FILE:-3}`
 
+/**
+ * Tenants that get a bridge of their own instead of sharing the main network.
+ *
+ * Tenants on one bridge can reach each other's ports: it is layer-2 forwarding,
+ * which this host does not pass through iptables, and changing that sysctl would
+ * affect every bridge on the machine. A tenant listed here is placed on its own
+ * network, where it cannot reach — or even resolve — a tenant on another one.
+ *
+ * `MT_TENANT_NETWORKS` takes a comma-separated list of tenant ids or `all`, so a
+ * single tenant can be moved first and the rest later with the same code.
+ */
+const ISOLATED_TENANTS = (() => {
+  const raw = (envValues.get('MT_TENANT_NETWORKS') ?? process.env.MT_TENANT_NETWORKS ?? '').trim()
+  if (raw === '') return new Set()
+  if (raw === 'all') return new Set(tenants.map((tenant) => tenant.id))
+  return new Set(raw.split(',').map((entry) => entry.trim()).filter(Boolean))
+})()
+/**
+ * The private network one isolated tenant lives on.
+ *
+ * The subnet comes from the tenant id's hash rather than its position, so adding
+ * or removing a tenant does not renumber the others — renumbering would force
+ * those containers to be recreated. A collision between two ids moves to the next
+ * free third octet, which is deterministic because the ids are walked in order.
+ */
+function tenantNetwork(tenant, taken) {
+  const digest = crypto.createHash('sha256').update(tenant.id).digest()
+  let octet = digest[0]
+  while (taken.has(octet)) octet = (octet + 1) % 256
+  taken.add(octet)
+  return {
+    name: `${NETWORK_NAME}-${tenant.id}`,
+    subnet: `10.98.${String(octet)}.0/24`,
+    // Interface names are capped at fifteen characters.
+    bridge: `mtbr${digest.subarray(1, 5).toString('hex')}`,
+    gateway: `10.98.${String(octet)}.1`,
+  }
+}
+
+const TENANT_NETWORKS = new Map()
+{
+  const taken = new Set()
+  for (const tenant of [...tenants].sort((left, right) => left.id.localeCompare(right.id))) {
+    if (ISOLATED_TENANTS.has(tenant.id)) TENANT_NETWORKS.set(tenant.id, tenantNetwork(tenant, taken))
+  }
+}
+
+/** Network one tenant's container joins. */
+const networkOf = (tenant) => TENANT_NETWORKS.get(tenant.id)?.name ?? NETWORK_NAME
+
+/**
+ * Egress proxy address as this tenant reaches it.
+ *
+ * An isolated tenant's bridge has its own gateway address, so one deployment-wide
+ * value would point at a network the tenant is not on.
+ */
+const egressFor = (tenant) => {
+  const network = TENANT_NETWORKS.get(tenant.id)
+  return network === undefined ? envValues.get('MT_EGRESS_PROXY') : `http://${network.gateway}:${String(egressPort())}`
+}
+
 function tenantService(tenant) {
   const limits = tenant.limits ?? {}
   const limitLines = []
@@ -445,7 +509,7 @@ function tenantService(tenant) {
     image: \${DSH_IMAGE:-dsh-web:0.2.0-rc.2}
     container_name: ${NAME_PREFIX}dsh-${tenant.id}
     restart: unless-stopped
-    networks: [${NETWORK_NAME}]
+    networks: [${networkOf(tenant)}]
     # A node agent discovers tenant runtimes by this label, not by container
     # name: an orchestrator renames containers (a Swarm task is
     # <stack>_<service>.<slot>.<id>) while a label survives.
@@ -464,7 +528,7 @@ ${tenant.modelKey === undefined
   ? '      # !! 没有 modelKey：执行 bin/mt.sh up（会先补发占位 key），否则模型调用不可用\n'
   : `      # 占位 key：模型网关按它识别租户并换成真凭据，真 key 不进容器\n      DEEPSEEK_API_KEY: ${tenant.modelKey}\n`}      # 模型请求发往网关而不是公网；本机 ip_forward=0，容器本来也出不去
       DEEPSEEK_BASE_URL: ${MODEL_GATEWAY_URL}/anthropic
-${credentialLine('GATEWAY_API_KEY', envKeyFor(tenant, 'GATEWAY_API_KEY'))}${literalEnvLine('HTTPS_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('HTTP_PROXY', envValues.get('MT_EGRESS_PROXY'))}${literalEnvLine('NO_PROXY', envValues.get('MT_NO_PROXY') ?? DEFAULT_NO_PROXY)}${limitLines.join('\n')}
+${credentialLine('GATEWAY_API_KEY', envKeyFor(tenant, 'GATEWAY_API_KEY'))}${literalEnvLine('HTTPS_PROXY', egressFor(tenant))}${literalEnvLine('HTTP_PROXY', egressFor(tenant))}${literalEnvLine('NO_PROXY', envValues.get('MT_NO_PROXY') ?? DEFAULT_NO_PROXY)}${limitLines.join('\n')}
 ${loggingBlock()}
     volumes:
       - ./tenants/${tenant.id}/home:/dsh-home
@@ -518,9 +582,10 @@ ${loggingBlock()}
     image: mt-model-gateway:local
     container_name: ${NAME_PREFIX}model-gateway
     restart: unless-stopped
-    # On the tenant network, so it needs no host port of its own; it reaches the
-    # internet through the egress proxy like everything else here.
-    networks: [${NETWORK_NAME}]
+    # On every tenant network, so it needs no host port of its own and stays
+    # reachable from an isolated tenant; it reaches the internet through the
+    # egress proxy like everything else here.
+    networks: [${[NETWORK_NAME, ...new Set([...TENANT_NETWORKS.values()].map((network) => network.name))].join(', ')}]
     environment:
       MT_PORT: "8080"
       MT_UPSTREAM_BASE: \${MT_UPSTREAM_BASE:-https://api.deepseek.com}
@@ -618,6 +683,18 @@ ${NETWORK_EXTERNAL ? '    external: true' : `    driver: bridge
       # off the host's ports are keyed by that interface name, so after a rebuild
       # they would silently stop applying. A pinned name keeps them valid.
       com.docker.network.bridge.name: ${BRIDGE_NAME}`}
+${[...TENANT_NETWORKS.values()].map((network) => `  ${network.name}:
+    name: ${network.name}
+    driver: bridge
+    # Explicit subnet: this host's default Docker address pools are exhausted by
+    # other stacks, so a network without one cannot be created at all.
+    ipam:
+      config:
+        - subnet: ${network.subnet}
+    driver_opts:
+      # Same reasoning as the main bridge: the host-port rules are keyed by this
+      # interface name and must survive a rebuild.
+      com.docker.network.bridge.name: ${network.bridge}`).join('\n')}
 `
 
 fs.writeFileSync(path.join(ROOT, 'docker-compose.yml'), compose)

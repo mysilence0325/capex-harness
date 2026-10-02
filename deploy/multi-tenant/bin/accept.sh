@@ -89,6 +89,14 @@ echo "== 0. 准备：让 model.env 生效并启动验收用假模型 =="
 # 否则 MOCK_MODEL_KEY 不会出现在容器环境里，模型调用会以 MISSING_CREDENTIAL 失败。
 "${COMPOSE[@]}" up -d >/dev/null 2>&1
 DOCKER_BUILDKIT=0 "${COMPOSE[@]}" -f docker-compose.yml -f docker-compose.mock.yml up -d --build mock-model >/dev/null 2>&1
+# 假模型默认只接在 mt-net 上；租户有自己的网桥时（MT_TENANT_NETWORKS）它在另一个
+# 网络里，必须把假模型也接过去，否则租户根本连不到它，测出来的是"假故障"。
+if docker network inspect "mt-net-${TENANT}" >/dev/null 2>&1; then
+  # 别名必须显式给：接一个新网络不会把原网络上的服务名 `mock-model` 带过去，
+  # 租户会按 `mock-model` 去解析，只接容器的话它在新网络上叫 mt-mock-model。
+  docker network connect --alias mock-model "mt-net-${TENANT}" mt-mock-model >/dev/null 2>&1 || true
+  echo "  假模型已接入租户网络 mt-net-${TENANT}（别名 mock-model）"
+fi
 for _ in $(seq 1 30); do
   if docker run --rm --network mt-net "$NODE_IMAGE" node -e '
       fetch("http://mock-model:8080/v1/models").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))
