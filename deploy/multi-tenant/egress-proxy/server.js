@@ -21,6 +21,7 @@
 const http = require('node:http')
 const https = require('node:https')
 const net = require('node:net')
+const fs = require('node:fs')
 const dns = require('node:dns').promises
 
 const PORT = Number(process.env.MT_EGRESS_PORT ?? 3128)
@@ -30,6 +31,43 @@ const ALLOW = (process.env.MT_EGRESS_ALLOW ?? '')
   .split(',')
   .map((entry) => entry.trim().toLowerCase())
   .filter((entry) => entry !== '')
+
+/**
+ * Where the allowlist is kept when it is meant to be editable at runtime.
+ *
+ * The console changes this setting, and a console that had to recreate this
+ * container to apply it would need Docker access it does not have — so the value
+ * lives in a file and is re-read when it changes, the same way the model gateway
+ * follows the tenant registry. Absent, the environment variable above is the
+ * source and nothing is re-read.
+ */
+const ALLOW_FILE = process.env.MT_EGRESS_ALLOW_FILE ?? ''
+let allow = ALLOW
+let allowStamp = 0
+
+/** Re-read the allowlist when the file behind it changed. */
+function refreshAllow() {
+  if (ALLOW_FILE === '') return
+  let stat
+  try {
+    stat = fs.statSync(ALLOW_FILE)
+  } catch {
+    // No file yet: the environment value stands, which is what an operator who
+    // never touched the setting expects.
+    return
+  }
+  if (stat.mtimeMs === allowStamp) return
+  allowStamp = stat.mtimeMs
+  try {
+    allow = fs.readFileSync(ALLOW_FILE, 'utf8')
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry !== '')
+    console.log(`mt-egress-proxy: allowlist reloaded (${String(allow.length)} entries)`)
+  } catch (error) {
+    console.error(`mt-egress-proxy: cannot read ${ALLOW_FILE}: ${error.message}`)
+  }
+}
 
 /**
  * Whether one address belongs to private, loopback, link-local, or reserved space.
@@ -66,7 +104,8 @@ function isInternalAddress(address) {
  */
 async function judge(host) {
   const bare = host.replace(/^\[/u, '').replace(/\]$/u, '')
-  if (ALLOW.length > 0 && !ALLOW.some((entry) => bare.toLowerCase() === entry || bare.toLowerCase().endsWith(`.${entry}`))) {
+  refreshAllow()
+  if (allow.length > 0 && !allow.some((entry) => bare.toLowerCase() === entry || bare.toLowerCase().endsWith(`.${entry}`))) {
     return { ok: false, reason: 'not-in-allowlist' }
   }
   let addresses

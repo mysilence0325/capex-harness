@@ -606,10 +606,16 @@ services:
     # on the bridge would have no egress itself. The listen port is deliberately
     # absent from the host firewall, which is what keeps it container-only.
     network_mode: host
+    # The allowlist is edited from the console, which cannot recreate this
+    # container, so the proxy re-reads this file when it changes rather than
+    # taking the value from its environment.
+    volumes:
+      - ./state:/state
     environment:
       MT_EGRESS_PORT: \${MT_EGRESS_PORT:-3128}
       MT_EGRESS_BIND: \${MT_EGRESS_BIND:-0.0.0.0}
       MT_EGRESS_ALLOW: \${MT_EGRESS_ALLOW:-}
+      MT_EGRESS_ALLOW_FILE: /state/egress-allow.txt
 ${loggingBlock()}
   model-gateway:
     # Context is the project root so the image can share the control plane's

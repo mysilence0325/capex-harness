@@ -169,6 +169,44 @@ function consolePage({ user }) {
 </div>
 <div id="notice"></div>
 
+<h2>节点</h2>
+<table id="nodes">
+  <thead><tr><th>节点</th><th>租户</th><th>就绪</th><th>节点代理</th></tr></thead>
+  <tbody><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+</table>
+
+<h2>运维</h2>
+<div class="card">
+  <div class="row">
+    <button onclick="opsRun('disk-report','磁盘报告')">磁盘报告</button>
+    <button onclick="opsRun('backup','立即备份')">立即备份</button>
+    <button onclick="opsRun('backup-list','备份列表')">备份列表</button>
+    <button class="danger" onclick="pruneImages()">回收镜像层</button>
+  </div>
+  <div class="row" style="margin-top: 10px; align-items: center">
+    <span class="muted">会话清理</span>
+    <input id="prune-days" placeholder="多少天前" size="10" value="90">
+    <button onclick="pruneSessions(true)">预览会删什么</button>
+    <button class="danger" onclick="pruneSessions(false)">归档并清理</button>
+  </div>
+  <div class="row" style="margin-top: 10px; align-items: center">
+    <span class="muted">升级镜像</span>
+    <input id="upgrade-image" placeholder="新镜像引用（如 dsh-web:local-20261002T1323）" size="36">
+    <button onclick="upgradeTenants(false)">升级选中</button>
+    <button onclick="upgradeTenants(true)">升级全部</button>
+  </div>
+  <div class="row" style="margin-top: 10px; align-items: center">
+    <span class="muted">出口白名单</span>
+    <input id="egress-allow" placeholder="逗号分隔的域名后缀；留空 = 允许任意公网" size="40">
+    <button class="primary" onclick="saveEgressAllow()">保存</button>
+    <button onclick="loadConfig()">读取当前配置</button>
+  </div>
+  <p class="muted" style="margin: 10px 0 0">
+    宿主操作经节点代理执行（固定的操作白名单，不接受任意命令）。升级与清理是重操作，会逐个租户进行。
+  </p>
+</div>
+<pre id="ops-out" style="display: none; max-height: 340px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: #0b1020; color: #d6e2ff; padding: 12px; border-radius: 8px"></pre>
+
 <h2>我的账号</h2>
 <div class="card">
   <div class="row">
@@ -262,6 +300,86 @@ async function clearLimit() {
   const answer = await post('api/tenant', body)
   if (answer.ok) { notice(answer.message || '已取消限额'); await load() }
   else notice(answer.error || '取消失败', true)
+}
+
+/**
+ * Run one host operation through a node's agent and show what it said.
+ *
+ * The node is picked rather than asked for: with one deployment there is one
+ * answer, and when there are several the interesting one is whichever has an
+ * agent answering. Ask the agent, not the browser, which node that is.
+ */
+async function opsRun(op, label, params, node) {
+  const target = node || agentNode()
+  if (target === undefined) { notice('没有节点代理在跑，宿主操作无法执行', true); return }
+  $('ops-out').style.display = 'block'
+  $('ops-out').textContent = '正在执行 ' + label + ' …'
+  const answer = await post('api/tenant', { action: 'ops', node: target, op, params: params || {} })
+  if (answer.ok) {
+    $('ops-out').textContent = answer.output || '（没有输出）'
+    notice(label + ' 完成')
+  } else {
+    $('ops-out').textContent = (answer.error || '失败') + (answer.output ? '\n\n' + answer.output : '')
+    notice(label + ' 失败：' + (answer.error || ''), true)
+  }
+}
+
+/** The node whose agent is answering, or undefined when none is. */
+function agentNode() {
+  const up = (snapshot.nodes || []).find((entry) => entry.agent === 'up')
+  if (up !== undefined) return up.node
+  return (snapshot.nodes || []).length > 0 ? undefined : 'local'
+}
+
+async function pruneImages() {
+  if (!confirm('回收没有被任何镜像引用的层？这台机器上还有别的栈，但悬空层不属于任何镜像或容器，删除不会影响正在运行的东西。')) return
+  await opsRun('disk-prune-images', '回收镜像层')
+}
+
+async function pruneSessions(dryRun) {
+  const days = $('prune-days').value.trim()
+  if (!/^\d+$/.test(days)) { notice('填一个整数天（注意：N 表示超过 N×24 小时，0 表示超过一天）', true); return }
+  if (!dryRun && !confirm('归档并删除超过 ' + days + ' 天的会话？会先打包到 backups/，打包失败则跳过该租户。')) return
+  const tenants = selected.size > 0 ? Array.from(selected) : undefined
+  if (tenants === undefined && !confirm('没有选中租户，将对全部租户执行。继续？')) return
+  // The agent's op takes one tenant at a time when given one; run per tenant so a
+  // partial failure names the tenant it failed on.
+  const list = tenants || (snapshot.tenants || []).map((tenant) => tenant.id)
+  $('ops-out').style.display = 'block'
+  $('ops-out').textContent = '会话清理（' + (dryRun ? '预览' : '执行') + '）…\n'
+  for (const id of list) {
+    const answer = await post('api/tenant', { action: 'ops', node: agentNode(), op: 'disk-prune-sessions', params: { olderThan: Number(days), tenant: id } })
+    $('ops-out').textContent += '\n=== ' + id + ' ===\n' + (answer.ok ? answer.output : '失败：' + answer.error)
+  }
+  notice('会话清理' + (dryRun ? '预览' : '') + '完成')
+}
+
+async function upgradeTenants(all) {
+  const image = $('upgrade-image').value.trim()
+  if (image === '') { notice('填要升级到的镜像引用', true); return }
+  const list = all ? undefined : Array.from(selected)
+  if (list !== undefined && list.length === 0) { notice('先选中租户，或用"升级全部"', true); return }
+  const what = list === undefined ? '全部租户' : list.join('、')
+  if (!confirm('把 ' + what + ' 升级到 ' + image + '？会逐个重建容器，任一租户起不来就回滚它并停止。')) return
+  await opsRun('upgrade', '升级 ' + what, list === undefined ? { image } : { image, tenants: list.join(',') })
+  await load()
+}
+
+async function loadConfig() {
+  const answer = await post('api/tenant', { action: 'ops', node: agentNode(), op: 'config-get' })
+  if (!answer.ok) { notice('读取配置失败：' + (answer.error || ''), true); return }
+  $('ops-out').style.display = 'block'
+  $('ops-out').textContent = answer.output || ''
+  try {
+    const values = JSON.parse(answer.output)
+    if (typeof values.MT_EGRESS_ALLOW === 'string') $('egress-allow').value = values.MT_EGRESS_ALLOW
+  } catch { /* the panel already shows the raw text */ }
+}
+
+async function saveEgressAllow() {
+  const value = $('egress-allow').value.trim()
+  if (!confirm(value === '' ? '清空白名单后，租户可以访问任意公网地址（私网仍然拒绝）。继续？' : '把出口白名单设为：' + value + '？出口代理会自动读取，无需重启。')) return
+  await opsRun('config-set-egress-allow', '保存出口白名单', { value })
 }
 
 const post = async (path, body) => {
@@ -384,6 +502,19 @@ function render() {
   $('batch-count').textContent = '已选 ' + selected.size + ' 个租户'
   const allVisible = filtered.length > 0 && filtered.every((tenant) => selected.has(tenant.id))
   $('select-all').checked = allVisible
+
+  // Node rows carry the one fact the tenant table cannot: whether that node's
+  // agent answers, which is what every maintenance button depends on.
+  const nodeRows = (snapshot.nodes || []).map((entry) => {
+    const tag = entry.agent === 'up' ? '<span class="tag ok">在线</span>'
+      : entry.agent === 'down' ? '<span class="tag bad">无响应</span>'
+        : '<span class="tag muted">未配置</span>'
+    return '<tr><td><b>' + entry.node + '</b></td><td>' + entry.tenants + '</td><td>'
+      + entry.ready + ' / ' + entry.tenants + '</td><td>' + tag + '</td></tr>'
+  })
+  document.querySelector('#nodes tbody').innerHTML = nodeRows.length
+    ? nodeRows.join('')
+    : '<tr><td colspan="4" class="muted">没有节点</td></tr>'
 
   const rows = shown.map((tenant) => {
     const usage = tenant.usage

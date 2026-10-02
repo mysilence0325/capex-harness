@@ -565,6 +565,72 @@ const OPS = {
   },
 }
 
+/**
+ * Settings the console may read, and the only one it may write.
+ *
+ * An explicit list rather than "the .env": that file holds the model API key, and
+ * a console endpoint that returns it would hand every administrator a credential
+ * the deployment is built to keep inside one container. Anything not named here is
+ * invisible to the console by construction.
+ */
+const CONFIG_READABLE = [
+  'MT_EGRESS_ALLOW',
+  'MT_UPSTREAM_BASE',
+  'MT_BACKUP_KEEP',
+  'MT_BACKUP_INTERVAL_SECONDS',
+  'MT_LOG_MAX_SIZE',
+  'MT_LOG_MAX_FILE',
+  'MT_TENANT_NETWORKS',
+  'MT_EDGE_PORT',
+  'MT_HTTP_PORT',
+  'MT_EGRESS_PORT',
+]
+
+/** Read those settings from the node's .env. */
+function readConfig() {
+  const file = path.join(PROJECT_DIR, '.env')
+  const values = {}
+  if (!fs.existsSync(file)) return values
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const at = line.indexOf('=')
+    if (at <= 0) continue
+    const key = line.slice(0, at).trim()
+    if (!CONFIG_READABLE.includes(key)) continue
+    values[key] = line.slice(at + 1).trim()
+  }
+  return values
+}
+
+/**
+ * Set the egress allowlist and reload the proxy.
+ *
+ * Comma-separated host suffixes, which is what the proxy compares against; empty
+ * means "any public destination". The value reaches `.env`, then the proxy is
+ * recreated from it — the two steps are fixed here rather than taken as input.
+ */
+function setEgressAllow(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9.,:_-]{0,500}$/u.test(value)) {
+    return { status: 400, body: { ok: false, error: '出口白名单只能包含字母、数字、点、逗号、冒号、下划线和短横线' } }
+  }
+  // A file the proxy re-reads, not an environment variable: the proxy would need
+  // recreating for an environment change, and neither this agent nor the console
+  // can do that. Written in place so a watcher holds the same inode.
+  const file = path.join(PROJECT_DIR, 'state', 'egress-allow.txt')
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(file, value, { mode: 0o600 })
+  const count = value.split(',').map((entry) => entry.trim()).filter((entry) => entry !== '').length
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      value,
+      output: count === 0
+        ? '出口白名单已清空：租户可以访问任意公网地址（私网仍然拒绝）。'
+        : `出口白名单已设为 ${String(count)} 条：${value}。出口代理会在下次请求时自动读取，无需重启。`,
+    },
+  }
+}
+
 /** Tenant ids are constrained at creation; this repeats the rule before use. */
 function isTenantId(value) {
   return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,30}$/u.test(value)
@@ -793,6 +859,36 @@ const server = http.createServer((req, res) => {
     readJsonBody(req).catch(() => ({})).then((body) => {
       const name = typeof body?.op === 'string' ? body.op : ''
       const params = typeof body?.params === 'object' && body.params !== null ? body.params : {}
+      // Two settings operations answer in-process rather than through a script:
+      // they are a read of a fixed key list and a write of one validated value.
+      // Recreating the proxy stays inside the operation rather than being a step
+      // the caller could aim somewhere else.
+      if (name === 'backup-list') {
+        // A read of the backup directory, not a script: naming the archives and
+        // their sizes is all this needs, and the names are exactly what the
+        // restore operation validates against.
+        const dir = path.join(PROJECT_DIR, 'backups')
+        let entries = []
+        try {
+          entries = fs.readdirSync(dir)
+            .filter((entry) => /^dsh-mt-[0-9]{8}T[0-9]{6}Z\.tar\.gz$/u.test(entry))
+            .map((entry) => {
+              const stat = fs.statSync(path.join(dir, entry))
+              return { entry, bytes: stat.size, at: stat.mtime.toISOString() }
+            })
+            .sort((left, right) => right.at.localeCompare(left.at))
+        } catch (error) {
+          return { status: 200, body: { ok: true, output: `读不到备份目录：${error.message}` } }
+        }
+        const text = entries.length === 0
+          ? '还没有备份归档。'
+          : entries.map((row) => `${row.entry}  ${(row.bytes / 1048576).toFixed(1)} MB  ${row.at}`).join('\n')
+        return { status: 200, body: { ok: true, output: text, backups: entries.map((row) => row.entry) } }
+      }
+      if (name === 'config-get') {
+        return { status: 200, body: { ok: true, output: JSON.stringify(readConfig(), null, 2) } }
+      }
+      if (name === 'config-set-egress-allow') return Promise.resolve(setEgressAllow(params.value))
       return runOp(name, params)
     }).then((outcome) => {
       res.writeHead(outcome.status, { 'content-type': 'application/json; charset=utf-8' })
