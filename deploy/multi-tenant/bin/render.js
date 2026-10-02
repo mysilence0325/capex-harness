@@ -668,6 +668,43 @@ ${loggingBlock()}
     # reads both settings from its own environment rather than from this file.
     entrypoint: ["bash", "-c", "while true; do /project/bin/backup.sh --keep $$MT_BACKUP_KEEP || echo 'backup failed, will retry'; sleep $$MT_BACKUP_INTERVAL_SECONDS; done"]
 
+  node-agent:
+    # The console's lifecycle and maintenance operations have nowhere to run: the
+    # control plane is a container with no Docker access and no project directory.
+    # This is the host-side actor they go through, and it is a service rather than
+    # something an operator remembers to start, because "the buttons are disabled
+    # because nobody started the agent" is not a state anyone should have to debug.
+    #
+    # It accepts a fixed list of named operations (see node-agent/server.js) — it
+    # is deliberately not a command endpoint, since the console is reachable by
+    # whoever holds an administrator session.
+    build: ./node-agent
+    image: mt-node-agent:local
+    container_name: ${NAME_PREFIX}node-agent
+    restart: unless-stopped
+    # Host networking: it must reach the control plane and be reachable by it, and
+    # this host cannot route bridge-published ports.
+    network_mode: host
+    environment:
+      MT_NODE_NAME: \${MT_NODE_NAME:-local}
+      MT_NODE_ADDRESS: \${MT_NODE_ADDRESS:-}
+      MT_CONTROL_PLANE: \${MT_CONTROL_PLANE:-}
+      MT_CONTROL_PLANE_CA: \${MT_CONTROL_PLANE_CA:-}
+      MT_REGISTRY_KEY_FILE: /key/registry.key
+      MT_NETWORK: \${MT_NETWORK:-mt-net}
+      MT_CONTAINER_NAME_PREFIX: \${MT_CONTAINER_NAME_PREFIX:-mt-}
+      MT_PROJECT_DIR: /project
+      MT_DATA_ROOT: /project
+      MT_AGENT_PORT: \${MT_AGENT_PORT:-3199}
+      TZ: \${TZ:-Asia/Shanghai}
+${loggingBlock()}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./state:/key:ro
+      # The operations are this project's own scripts, so the agent needs the
+      # project: it runs them where they live rather than reimplementing them.
+      - .:/project
+
   gateway:
     build: ./gateway
     image: mt-gateway:local
@@ -685,6 +722,9 @@ ${loggingBlock()}
       MT_SESSION_TTL_HOURS: \${MT_SESSION_TTL_HOURS:-12}
       MT_LOG_DIR: /logs
       MT_DEPLOY_ROOT: /project
+      # This node's agent, for the console's maintenance operations. Empty means
+      # those operations report that no agent is running rather than failing oddly.
+      MT_NODE_AGENT_URL: \${MT_NODE_AGENT_URL:-}
 ${selfLogEnv()}
 ${gatewayTlsLines}      TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}

@@ -46,6 +46,11 @@ const { loginPage: adminLoginPage, consolePage: adminConsolePage, statusTag } = 
 
 const CONFIG_FILE = process.env.MT_TENANTS_FILE ?? '/config/tenants.json'
 const STATE_DIR = process.env.MT_STATE_DIR ?? '/state'
+/**
+ * This node's agent, when there is one. Set for the control host, whose tenants
+ * register locally and therefore carry no agent URL of their own.
+ */
+const NODE_AGENT_URL = (process.env.MT_NODE_AGENT_URL ?? '').trim()
 const LOG_DIR = process.env.MT_LOG_DIR ?? '/logs'
 /**
  * Read a port from the environment, refusing anything that is not one.
@@ -1074,6 +1079,9 @@ async function adminState() {
       edgePort: tenant.edgePort,
       hosts: tenant.hosts ?? [],
       agent: typeof entry?.agent === 'string' ? entry.agent : undefined,
+      // A real boolean alongside the rendered label: counting readiness by matching
+      // the label's text is how the node overview came to report zero ready.
+      ready: probe?.ready === true,
       status: statusTag(probe),
       usage: usage.get(tenant.id) ?? { calls: 0, input: 0, output: 0, cacheRead: 0 },
       limits: tenant.modelLimits ?? {},
@@ -1082,7 +1090,28 @@ async function adminState() {
   }))
   rows.sort((left, right) => left.id.localeCompare(right.id))
   const origin = EDGE_ORIGIN === undefined ? '' : EDGE_ORIGIN
-  return { tenants: rows, edgePort: EDGE_PORT, origin }
+
+  // One row per node, because that is the unit an operator thinks in once there is
+  // more than one machine: how many tenants live there, how many are actually
+  // serving, and whether its agent — which is what lifecycle and maintenance
+  // operations go through — answers. The agent check is a live request with a
+  // short timeout rather than a cached guess, since noticing that it stopped is
+  // the entire point.
+  const nodeNames = [...new Set(rows.map((row) => row.node))].sort()
+  const nodes = await Promise.all(nodeNames.map(async (node) => {
+    const mine = rows.filter((row) => row.node === node)
+    let agentUrl
+    for (const row of mine) if (typeof row.agent === 'string') { agentUrl = row.agent; break }
+    if (agentUrl === undefined && node === (process.env.MT_NODE_NAME ?? 'local') && NODE_AGENT_URL !== '') agentUrl = NODE_AGENT_URL
+    let agent = 'none'
+    if (agentUrl !== undefined) {
+      const health = await admin.callHealth(agentUrl)
+      agent = health.ok === true ? 'up' : 'down'
+    }
+    return { node, tenants: mine.length, ready: mine.filter((row) => row.ready === true).length, agent, agentUrl }
+  }))
+
+  return { tenants: rows, nodes, edgePort: EDGE_PORT, origin }
 }
 
 /** The address a browser used to reach the console, for display only. */
@@ -1358,6 +1387,28 @@ async function adminAction(body) {
     }
   }
 
+  // Host operations for the console's maintenance sections. The control plane has
+  // no Docker access and no project directory: it asks the node's agent, which
+  // runs one of a fixed set of scripts. The operation name is passed through
+  // unchecked on purpose — the agent owns the allowlist, and duplicating it here
+  // would only create a second place to forget to update.
+  if (action === 'ops') {
+    const node = typeof body?.node === 'string' && body.node !== '' ? body.node : 'local'
+    const op = typeof body?.op === 'string' ? body.op : ''
+    if (op === '') return { ok: false, error: '没有指定操作' }
+    const agent = await agentForNode(node)
+    if (agent === undefined) {
+      return { ok: false, error: `${node} 节点上没有在跑的代理，无法执行宿主操作。在该节点启动节点代理后重试。` }
+    }
+    const answer = await admin.callOps(agent, op, body?.params ?? {})
+    admin.audit({ action: `ops:${op}`, tenant: '-', node, agent, status: answer.status })
+    const result = answer.body ?? {}
+    if (result.ok !== true) {
+      return { ok: false, error: result.error ?? `节点返回 ${String(answer.status)}`, output: result.output }
+    }
+    return { ok: true, output: result.output ?? '', op, node }
+  }
+
   const tenant = tenants.get(id)
   if (tenant === undefined) return { ok: false, error: `没有租户 ${id}` }
 
@@ -1387,6 +1438,12 @@ async function agentForNode(node) {
     const entry = runtimeOf(tenant)
     if (entry === undefined || typeof entry.agent !== 'string') continue
     if ((entry.node ?? 'local') === node) return entry.agent
+  }
+  // The control host's own tenants are registered locally, without an agent, so
+  // discovery finds nothing for it. Its agent — which is what runs the console's
+  // maintenance operations — is configured instead.
+  if (node === (process.env.MT_NODE_NAME ?? 'local') && typeof NODE_AGENT_URL === 'string' && NODE_AGENT_URL !== '') {
+    return NODE_AGENT_URL
   }
   return undefined
 }

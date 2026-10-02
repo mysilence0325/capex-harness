@@ -80,9 +80,12 @@ const registryKey = fs.existsSync(KEY_FILE) ? fs.readFileSync(KEY_FILE, 'utf8').
 const ca = CA_FILE !== '' && fs.existsSync(CA_FILE) ? fs.readFileSync(CA_FILE) : undefined
 const dockerAvailable = fs.existsSync(DOCKER_SOCKET)
 
+// Without a control plane this agent still serves its operations endpoint, which
+// is what the control host needs: its own tenants register directly, so having the
+// agent register them again would route their traffic through a second hop for no
+// benefit. It discovers and registers only when told where to report.
 if (CONTROL_PLANE === '') {
-  console.error('mt-node-agent: MT_CONTROL_PLANE is required (e.g. https://control.example:8090)')
-  process.exit(1)
+  console.log('mt-node-agent: no MT_CONTROL_PLANE; serving operations only (no discovery or registration)')
 }
 if (registryKey === '') {
   console.error(`mt-node-agent: no registry key at ${KEY_FILE}; copy it from the control plane`)
@@ -485,6 +488,153 @@ function resolveNodeAddress() {
 
 const nodeAddress = resolveNodeAddress()
 
+/**
+ * Operations the control plane may ask this node to run.
+ *
+ * A fixed table rather than a command endpoint, and that is the whole point: the
+ * control plane is reachable by anyone who can sign in to the console, so an
+ * endpoint that ran what it was told would turn a stolen administrator session
+ * into code execution on every node. Each entry names one script and one argv,
+ * and its parameters are validated here before anything is spawned. Nothing is
+ * passed through a shell.
+ *
+ * `timeoutMs` is per operation because they are not alike: listing backups is
+ * instant, a rolling upgrade recreates every tenant container in turn.
+ */
+const OPS = {
+  'disk-report': {
+    script: 'bin/disk.sh',
+    argv: () => ['report'],
+    timeoutMs: 60_000,
+  },
+  'disk-prune-images': {
+    script: 'bin/disk.sh',
+    argv: () => ['prune-images', '--yes'],
+    timeoutMs: 300_000,
+  },
+  'disk-prune-sessions': {
+    script: 'bin/disk.sh',
+    argv: (params) => [
+      'prune-sessions',
+      '--older-than', String(params.olderThan),
+      '--archive',
+      ...(params.tenant === undefined ? [] : ['--tenant', params.tenant]),
+    ],
+    // Days, not a free string: find's -mtime takes a number and nothing else.
+    validate: (params) => {
+      if (!Number.isInteger(params.olderThan) || params.olderThan < 0 || params.olderThan > 3650) {
+        return 'olderThan 必须是 0..3650 的整数天'
+      }
+      if (params.tenant !== undefined && !isTenantId(params.tenant)) return 'tenant 不是合法的租户 id'
+      return undefined
+    },
+    timeoutMs: 600_000,
+  },
+  backup: {
+    script: 'bin/backup.sh',
+    argv: () => [],
+    timeoutMs: 900_000,
+  },
+  restore: {
+    script: 'bin/restore.sh',
+    argv: (params) => [path.join(PROJECT_DIR, 'backups', params.archive)],
+    // Only an archive already in this node's backup directory, by exact name: a
+    // path built from operator input is how a restore becomes "unpack anything
+    // as root".
+    validate: (params) => (typeof params.archive === 'string' && /^dsh-mt-[0-9]{8}T[0-9]{6}Z\.tar\.gz$/u.test(params.archive)
+      ? undefined
+      : 'archive 必须是本节点 backups/ 里的归档文件名'),
+    timeoutMs: 900_000,
+  },
+  upgrade: {
+    script: 'bin/upgrade.sh',
+    argv: (params) => [
+      '--image', params.image,
+      ...(params.tenants === undefined ? [] : ['--tenants', params.tenants]),
+    ],
+    validate: (params) => {
+      if (typeof params.image !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,200}$/u.test(params.image)) {
+        return 'image 不是合法的镜像引用'
+      }
+      if (params.tenants !== undefined && !/^([a-z0-9][a-z0-9-]{0,30})(,[a-z0-9][a-z0-9-]{0,30})*$/u.test(params.tenants)) {
+        return 'tenants 必须是逗号分隔的租户 id'
+      }
+      return undefined
+    },
+    timeoutMs: 1_800_000,
+  },
+}
+
+/** Tenant ids are constrained at creation; this repeats the rule before use. */
+function isTenantId(value) {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,30}$/u.test(value)
+}
+
+/**
+ * Run one allowlisted operation.
+ *
+ * @param name - an OPS key.
+ * @param params - the operation's parameters, validated before spawning.
+ * @returns the exit status and the combined output, truncated for transport.
+ */
+function runOp(name, params) {
+  return new Promise((resolve) => {
+    const op = OPS[name]
+    if (op === undefined) {
+      resolve({ status: 400, body: { ok: false, error: `未知操作 ${name}` } })
+      return
+    }
+    if (PROJECT_DIR === '') {
+      resolve({ status: 503, body: { ok: false, error: 'this agent has no MT_PROJECT_DIR, so it cannot run operations' } })
+      return
+    }
+    const rejected = op.validate?.(params)
+    if (rejected !== undefined) {
+      resolve({ status: 400, body: { ok: false, error: rejected } })
+      return
+    }
+    let argv
+    try {
+      argv = op.argv(params)
+    } catch (error) {
+      resolve({ status: 400, body: { ok: false, error: `参数无效：${error.message}` } })
+      return
+    }
+
+    // No shell: argv is passed straight to the script, so a parameter can never
+    // become a second command however it is written.
+    const child = spawn('bash', [path.join(PROJECT_DIR, op.script), ...argv], {
+      cwd: PROJECT_DIR,
+      env: { ...process.env, MT_NODE_NAME: NODE_NAME },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let output = ''
+    const collect = (chunk) => {
+      // Bounded: an upgrade prints a lot, and the control plane has to carry it.
+      if (output.length < 200_000) output += chunk.toString()
+    }
+    child.stdout.on('data', collect)
+    child.stderr.on('data', collect)
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      output += `\n[${name} 超时，已终止]`
+    }, op.timeoutMs)
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      resolve({ status: 500, body: { ok: false, error: error.message } })
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const ok = code === 0
+      console.log(`mt-node-agent: op ${name} ${ok ? 'ok' : `exit ${String(code)}`}`)
+      resolve({
+        status: ok ? 200 : 500,
+        body: { ok, code, op: name, output: output.length > 200_000 ? `${output.slice(0, 200_000)}\n[输出已截断]` : output },
+      })
+    })
+  })
+}
+
 /** Whether a request carries this agent's registry key. */
 function authorized(req) {
   const presented = req.headers['x-mt-registry-key']
@@ -623,6 +773,28 @@ const server = http.createServer((req, res) => {
     }
     const [, tenant, action] = lifecycle
     handleLifecycle(tenant, action, req).then((outcome) => {
+      res.writeHead(outcome.status, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify(outcome.body))
+    }).catch((error) => {
+      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: error.message }))
+    })
+    return
+  }
+
+  // Allowlisted host operations, for the console's maintenance sections. The
+  // operation name selects a fixed script and argv; nothing here is interpreted.
+  if (url.pathname === '/ops') {
+    if (!authorized(req)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: 'bad registry key' }))
+      return
+    }
+    readJsonBody(req).catch(() => ({})).then((body) => {
+      const name = typeof body?.op === 'string' ? body.op : ''
+      const params = typeof body?.params === 'object' && body.params !== null ? body.params : {}
+      return runOp(name, params)
+    }).then((outcome) => {
       res.writeHead(outcome.status, { 'content-type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify(outcome.body))
     }).catch((error) => {

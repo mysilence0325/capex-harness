@@ -296,6 +296,97 @@ class AdminConsole {
   }
 
   /**
+   * Ask an agent whether it is alive.
+   *
+   * Short timeout on purpose: this answers "is the node's agent answering right
+   * now", and a hung agent must read as down rather than hold the console's state
+   * request open.
+   *
+   * @param agent - the agent's base URL.
+   * @returns the parsed health body, or `{ ok: false }` when it did not answer.
+   */
+  callHealth(agent) {
+    let url
+    try {
+      url = new URL(`${agent}/health`)
+    } catch {
+      return Promise.resolve({ ok: false })
+    }
+    return new Promise((resolve) => {
+      const request = http.request({
+        host: url.hostname,
+        port: url.port === '' ? 80 : Number(url.port),
+        method: 'GET',
+        path: url.pathname,
+        agent: false,
+        timeout: 4000,
+      }, (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+          } catch {
+            resolve({ ok: response.statusCode === 200 })
+          }
+        })
+      })
+      request.on('timeout', () => { request.destroy(new Error('timeout')) })
+      request.on('error', () => resolve({ ok: false }))
+      request.end()
+    })
+  }
+
+  /**
+   * Ask a node agent to run one of its allowlisted host operations.
+   *
+   * The operation name and its parameters travel as JSON; the agent decides what
+   * they mean and refuses anything not in its table. The timeout is long because
+   * a rolling upgrade legitimately takes minutes, and it is the agent's own
+   * per-operation timeout that ends a runaway.
+   *
+   * @param agent - the agent's base URL.
+   * @param op - the operation name.
+   * @param params - its parameters.
+   * @returns the agent's status and parsed answer.
+   */
+  callOps(agent, op, params) {
+    const payload = JSON.stringify({ op, params })
+    const url = new URL(`${agent}/ops`)
+    return new Promise((resolve) => {
+      const request = http.request({
+        host: url.hostname,
+        port: url.port === '' ? 80 : Number(url.port),
+        method: 'POST',
+        path: url.pathname,
+        headers: {
+          'x-mt-registry-key': this.options.registryKey,
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
+        agent: false,
+        timeout: 31 * 60 * 1000,
+      }, (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          let parsed
+          try {
+            parsed = JSON.parse(text)
+          } catch {
+            parsed = { ok: false, error: text.slice(0, 400) }
+          }
+          resolve({ status: response.statusCode ?? 0, body: parsed })
+        })
+      })
+      request.on('timeout', () => { request.destroy(new Error('agent did not answer in time')) })
+      request.on('error', (error) => resolve({ status: 502, body: { ok: false, error: `agent unreachable: ${error.message}` } }))
+      request.end(payload)
+    })
+  }
+
+  /**
    * Ask one tenant's node agent to change that container's state.
    * @param agent - the agent's base URL, as it registered itself.
    * @param tenant - tenant id.
