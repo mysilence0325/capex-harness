@@ -136,11 +136,32 @@ function consolePage({ user }) {
   </select>
   <span id="count" class="muted"></span>
 </div>
+<div id="batch" class="card" style="display: none; margin-bottom: 10px">
+  <div class="row" style="justify-content: space-between; align-items: center">
+    <b id="batch-count">已选 0 个租户</b>
+    <span>
+      <button onclick="selectAll(true)">全选</button>
+      <button onclick="selectAll(false)">清空选择</button>
+    </span>
+  </div>
+  <div class="row" style="margin-top: 10px; align-items: center">
+    <span class="muted">模型限额</span>
+    <input id="batch-rpm" placeholder="每分钟请求（留空不改）" size="20">
+    <input id="batch-daily" placeholder="每天 token（留空不改）" size="20">
+    <button class="primary" onclick="applyLimit(false)">应用到选中</button>
+    <button onclick="applyLimit(true)">应用到全部租户</button>
+    <button onclick="clearLimit()">取消限额</button>
+  </div>
+  <p class="muted" style="margin: 10px 0 0">
+    留空 = 不改这一项；填 0 = 取消这一项。限额写入注册表，模型网关自动重载，无需重启。
+  </p>
+</div>
 <table id="tenants">
   <thead><tr>
+    <th style="width: 28px"><input type="checkbox" id="select-all" onclick="selectAll(this.checked)" title="全选"></th>
     <th>租户</th><th>状态</th><th>入口</th><th>用户</th><th>模型用量</th><th>操作</th>
   </tr></thead>
-  <tbody><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+  <tbody><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
 </table>
 <div class="row" style="margin-top: 10px; justify-content: space-between">
   <span id="pager" class="muted"></span>
@@ -179,6 +200,70 @@ const notice = (text, bad) => {
   $('notice').className = 'msg ' + (bad ? 'bad' : 'ok')
   $('notice').textContent = text
 }
+// Selection lives outside the render so filtering, paging and the refresh do not
+// drop what the operator ticked. It holds ids rather than rows: a tenant that
+// scrolled out of view stays selected, and one deleted elsewhere is dropped on
+// the next render because nothing redraws it.
+const selected = new Set()
+
+function toggleSelect(id, on) {
+  if (on) selected.add(id)
+  else selected.delete(id)
+  render()
+}
+
+// "All" means every row the filter currently shows, so it composes with the
+// search box: filter to a group, select all, act on that group — which is the
+// usual case, since ceilings are normally set for everyone at once.
+function selectAll(on) {
+  const needle = ($('filter').value || '').trim().toLowerCase()
+  for (const tenant of snapshot.tenants) {
+    if (!matches(tenant, needle)) continue
+    if (on) selected.add(tenant.id)
+    else selected.delete(tenant.id)
+  }
+  render()
+}
+
+/**
+ * Apply model ceilings to the selection, or to every tenant.
+ *
+ * Blank fields mean "leave this one alone" and 0 means "drop this ceiling", which
+ * is what the server expects; the two differ by absent versus explicit.
+ */
+async function applyLimit(all) {
+  if (!all && selected.size === 0) { notice('先选中至少一个租户，或用"应用到全部租户"', true); return }
+  const rpm = $('batch-rpm').value.trim()
+  const daily = $('batch-daily').value.trim()
+  if (rpm === '' && daily === '') { notice('每分钟请求和每天 token 至少填一个（填 0 表示取消该项）', true); return }
+  const body = { action: 'limit' }
+  if (all) body.all = true
+  else body.tenants = Array.from(selected)
+  if (rpm !== '') body.rpm = Number(rpm)
+  if (daily !== '') body.dailyTokens = Number(daily)
+  notice('正在应用…')
+  const answer = await post('api/tenant', body)
+  if (answer.ok) {
+    $('batch-rpm').value = ''
+    $('batch-daily').value = ''
+    notice(answer.message || '已应用')
+    await load()
+  } else {
+    notice(answer.error || '应用失败', true)
+  }
+}
+
+async function clearLimit() {
+  if (!confirm('取消选中租户的模型限额？他们之后不再受每分钟/每天限制。')) return
+  const body = { action: 'limit', rpm: 0, dailyTokens: 0 }
+  if (selected.size > 0) body.tenants = Array.from(selected)
+  else body.all = true
+  notice('正在取消…')
+  const answer = await post('api/tenant', body)
+  if (answer.ok) { notice(answer.message || '已取消限额'); await load() }
+  else notice(answer.error || '取消失败', true)
+}
+
 const post = async (path, body) => {
   const response = await fetch(path, {
     method: 'POST',
@@ -290,6 +375,16 @@ function render() {
   $('prev').disabled = page <= 0
   $('next').disabled = page >= pages - 1
 
+  // The batch bar only exists when something is ticked, and it reports the count
+  // from the set rather than from the visible rows: a selection survives paging,
+  // so "已选 5 个" must not shrink when the operator turns the page.
+  const live = new Set(snapshot.tenants.map((tenant) => tenant.id))
+  for (const id of Array.from(selected)) if (!live.has(id)) selected.delete(id)
+  $('batch').style.display = selected.size > 0 ? 'block' : 'none'
+  $('batch-count').textContent = '已选 ' + selected.size + ' 个租户'
+  const allVisible = filtered.length > 0 && filtered.every((tenant) => selected.has(tenant.id))
+  $('select-all').checked = allVisible
+
   const rows = shown.map((tenant) => {
     const usage = tenant.usage
     const usageText = usage && usage.calls > 0
@@ -315,6 +410,7 @@ function render() {
     ].join(' ')
     const agentNote = tenant.agent ? '' : ' <span class="tag muted" title="没有节点代理，容器操作需在部署机上执行">无代理</span>'
     return '<tr>' +
+      '<td><input type="checkbox"' + (selected.has(tenant.id) ? ' checked' : '') + ' onclick="toggleSelect(''' + tenant.id + ''', this.checked)"></td>' +
       '<td><b>' + tenant.id + '</b><br><span class="muted">' + (tenant.title || '') + '</span></td>' +
       '<td>' + tenant.status + agentNote + '</td>' +
       '<td><code>' + entry + '</code></td>' +
@@ -325,7 +421,7 @@ function render() {
   })
   document.querySelector('#tenants tbody').innerHTML = rows.length
     ? rows.join('')
-    : '<tr><td colspan="6" class="muted">' + (all.length === 0 ? '还没有租户' : '没有匹配的租户') + '</td></tr>'
+    : '<tr><td colspan="7" class="muted">' + (all.length === 0 ? '还没有租户' : '没有匹配的租户') + '</td></tr>'
 }
 
 // First paint, then the live snapshot: load() renders again once it arrives.

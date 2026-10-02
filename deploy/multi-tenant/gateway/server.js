@@ -1283,6 +1283,81 @@ async function adminAction(body) {
     }
   }
 
+  // Model ceilings, for one tenant, a selection, or everyone.
+  //
+  // Batch is the normal case here: an operator sets the same ceiling for the whole
+  // deployment and only later singles somebody out. So the action takes a list,
+  // and treats an absent field as "leave it alone" while an explicit null means
+  // "remove this ceiling" — which is what lets one request both raise the daily
+  // token ceiling for everyone and drop the per-minute one.
+  if (action === 'limit') {
+    const ids = []
+    if (body?.all === true) {
+      ids.push(...tenants.keys())
+    } else if (Array.isArray(body?.tenants)) {
+      for (const entry of body.tenants) if (typeof entry === 'string' && entry !== '') ids.push(entry)
+    } else if (typeof body?.tenant === 'string' && body.tenant !== '') {
+      ids.push(body.tenant)
+    }
+    if (ids.length === 0) return { ok: false, error: '没有指定租户' }
+
+    const readCeiling = (value, label) => {
+      if (value === undefined) return { state: 'keep' }
+      if (value === null || value === '' || value === 0) return { state: 'clear' }
+      const number = Number(value)
+      if (!Number.isInteger(number) || number <= 0) return { state: 'invalid', label }
+      return { state: 'set', value: number }
+    }
+    const rpm = readCeiling(body?.rpm, '每分钟请求')
+    const dailyTokens = readCeiling(body?.dailyTokens, '每天 token')
+    if (rpm.state === 'invalid') return { ok: false, error: `${rpm.label}必须是正整数（留空表示取消该项限额）` }
+    if (dailyTokens.state === 'invalid') return { ok: false, error: `${dailyTokens.label}必须是正整数（留空表示取消该项限额）` }
+    if (rpm.state === 'keep' && dailyTokens.state === 'keep') return { ok: false, error: '没有要改的限额' }
+
+    const applied = []
+    const skipped = []
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        for (const id of ids) {
+          const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
+          if (tenant === undefined) {
+            skipped.push(id)
+            continue
+          }
+          const next = { ...(tenant.modelLimits ?? {}) }
+          if (rpm.state === 'clear') delete next.rpm
+          else if (rpm.state === 'set') next.rpm = rpm.value
+          if (dailyTokens.state === 'clear') delete next.dailyTokens
+          else if (dailyTokens.state === 'set') next.dailyTokens = dailyTokens.value
+          if (Object.keys(next).length === 0) delete tenant.modelLimits
+          else tenant.modelLimits = next
+          applied.push(id)
+        }
+      })
+    } catch (error) {
+      admin.audit({ action: 'limit', tenant: ids.join(','), result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
+    }
+    admin.audit({
+      action: 'limit',
+      tenant: applied.join(',') || '-',
+      rpm: rpm.state === 'keep' ? undefined : (rpm.value ?? 'clear'),
+      dailyTokens: dailyTokens.state === 'keep' ? undefined : (dailyTokens.value ?? 'clear'),
+      result: 'registry-written',
+      skipped: skipped.length > 0 ? skipped.join(',') : undefined,
+    })
+    const what = [
+      rpm.state === 'keep' ? undefined : `每分钟 ${rpm.state === 'clear' ? '不限' : String(rpm.value)}`,
+      dailyTokens.state === 'keep' ? undefined : `每天 ${dailyTokens.state === 'clear' ? '不限' : String(dailyTokens.value)} token`,
+    ].filter((entry) => entry !== undefined).join('，')
+    return {
+      ok: true,
+      applied,
+      skipped,
+      message: `已为 ${String(applied.length)} 个租户设置${what}${skipped.length > 0 ? `（${String(skipped.length)} 个不存在，已跳过）` : ''}`,
+    }
+  }
+
   const tenant = tenants.get(id)
   if (tenant === undefined) return { ok: false, error: `没有租户 ${id}` }
 
