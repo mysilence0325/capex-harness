@@ -198,7 +198,12 @@ if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTER
 fi
 
 head_ "租户对宿主的访问"
-BRIDGE="br-$(docker network inspect mt-net --format '{{.Id}}' 2>/dev/null | cut -c1-12)"
+# 与 bin/isolate.sh 用同一套解析：优先渲染时固定的网桥名，否则退回 br-<网络id>。
+# 两边必须一致，否则 doctor 会在规则完全正常时报"网桥不对"。
+BRIDGE="$(docker network inspect mt-net --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null | tr -d '\r')"
+if [ -z "$BRIDGE" ] || [ "$BRIDGE" = "<no value>" ]; then
+  BRIDGE="br-$(docker network inspect mt-net --format '{{.Id}}' 2>/dev/null | cut -c1-12)"
+fi
 DIRECT_RULES="$(firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep -c 'mt-tenant-isolation' || true)"
 if [ "${DIRECT_RULES:-0}" -ge 2 ]; then
   if firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep 'mt-tenant-isolation' | grep -q -- "-i ${BRIDGE} "; then

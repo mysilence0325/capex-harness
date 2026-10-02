@@ -30,6 +30,15 @@ NETWORK="${MT_NETWORK:-mt-net}"
 EGRESS_PORT="${MT_EGRESS_PORT:-3128}"
 
 bridge() {
+  # 优先用渲染时固定的网桥名：Docker 默认的 br-<网络id> 会随网络重建而改变，
+  # 规则就会在没有报错的情况下失效。bin/render.js 通过
+  # com.docker.network.bridge.name 固定了它（见 MT_BRIDGE_NAME）。
+  local pinned
+  pinned="$(docker network inspect "$NETWORK" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null | tr -d '\r')"
+  if [ -n "$pinned" ] && [ "$pinned" != "<no value>" ]; then
+    echo "$pinned"
+    return 0
+  fi
   local id
   id="$(docker network inspect "$NETWORK" --format '{{.Id}}' 2>/dev/null | tr -d '\r')"
   if [ -n "$id" ]; then

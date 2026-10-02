@@ -269,6 +269,15 @@ const NETWORK_NAME = process.env.MT_NETWORK ?? 'mt-net'
  */
 const NETWORK_EXTERNAL = (process.env.MT_NETWORK_EXTERNAL ?? '') !== ''
 /**
+ * Interface name for this network's bridge.
+ *
+ * Kernel interface names are limited to fifteen characters, and the default
+ * `br-<id>` is regenerated whenever the network is recreated — taking the
+ * firewall rules that reference it out of effect without any error. Pinning it
+ * is what makes those rules survive a rebuild.
+ */
+const BRIDGE_NAME = process.env.MT_BRIDGE_NAME ?? 'mtdocker0'
+/**
  * Prefix for the container names this host creates.
  *
  * Container names are local to a host (the control plane addresses tenants by
@@ -602,7 +611,13 @@ ${loggingBlock()}
 networks:
   ${NETWORK_NAME}:
     name: ${NETWORK_NAME}
-${NETWORK_EXTERNAL ? '    external: true' : '    driver: bridge'}
+${NETWORK_EXTERNAL ? '    external: true' : `    driver: bridge
+    driver_opts:
+      # Docker would otherwise name the bridge br-<network id>, which changes
+      # whenever the network is recreated. The firewall rules that keep tenants
+      # off the host's ports are keyed by that interface name, so after a rebuild
+      # they would silently stop applying. A pinned name keeps them valid.
+      com.docker.network.bridge.name: ${BRIDGE_NAME}`}
 `
 
 fs.writeFileSync(path.join(ROOT, 'docker-compose.yml'), compose)
