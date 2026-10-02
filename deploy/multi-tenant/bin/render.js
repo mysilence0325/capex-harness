@@ -414,6 +414,17 @@ ${indent}    max-file: "${files}"
 `
 }
 
+/**
+ * Ceilings for the logs the services write themselves.
+ *
+ * Docker's log options do not reach a file a service writes through a bind mount,
+ * so the access, administration and model-usage logs are rotated by the processes
+ * that write them, on the same policy and from the same .env values as the
+ * container logs.
+ */
+const selfLogEnv = () => `      MT_LOG_MAX_SIZE: \${MT_LOG_MAX_SIZE:-10m}
+      MT_LOG_MAX_FILE: \${MT_LOG_MAX_FILE:-3}`
+
 function tenantService(tenant) {
   const limits = tenant.limits ?? {}
   const limitLines = []
@@ -489,7 +500,12 @@ services:
       MT_EGRESS_ALLOW: \${MT_EGRESS_ALLOW:-}
 ${loggingBlock()}
   model-gateway:
-    build: ./model-gateway
+    # Context is the project root so the image can share the control plane's
+    # log-rotation module instead of carrying a second copy that could drift; the
+    # root .dockerignore keeps tenant data and credentials out of the payload.
+    build:
+      context: .
+      dockerfile: model-gateway/Dockerfile
     image: mt-model-gateway:local
     container_name: ${NAME_PREFIX}model-gateway
     restart: unless-stopped
@@ -504,6 +520,7 @@ ${loggingBlock()}
       MT_EGRESS_PROXY: \${MT_EGRESS_PROXY:-}
       MT_REGISTRY: /config/tenants.json
       MT_LOG_DIR: /logs
+${selfLogEnv()}
       TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
     volumes:
@@ -525,6 +542,7 @@ ${isControlPlane ? `  gateway:
       MT_EDGE_PORT: \${MT_EDGE_PORT:-8090}
       MT_BIND_IP: \${MT_BIND_IP:-0.0.0.0}
       MT_SESSION_TTL_HOURS: \${MT_SESSION_TTL_HOURS:-12}
+${selfLogEnv()}
 ${gatewayTlsLines}      TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
     volumes:

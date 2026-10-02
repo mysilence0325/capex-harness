@@ -22,6 +22,14 @@ const net = require('node:net')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
+const { Throttle } = require('./throttle.js')
+const { appendRotated } = require('./rotate.js')
+const {
+  AdminConsole, hashPassword, verifyPassword, ID_PATTERN, USER_PATTERN,
+  COOKIE: ADMIN_COOKIE, MAX_FAILURES, LOCKOUT_MS, SESSION_MS,
+} = require('./admin.js')
+// Aliased: this file already has a loginPage, the tenant sign-in page.
+const { loginPage: adminLoginPage, consolePage: adminConsolePage, statusTag } = require('./admin-page.js')
 
 const CONFIG_FILE = process.env.MT_TENANTS_FILE ?? '/config/tenants.json'
 const STATE_DIR = process.env.MT_STATE_DIR ?? '/state'
@@ -282,8 +290,14 @@ function tenantByAddress(hostHeader, localPort) {
   return undefined
 }
 
+/**
+ * Append one audit line.
+ *
+ * Rotated by size: this log carries per-tenant attribution, so it cannot go to
+ * the container log, and Docker's own log options therefore do not bound it.
+ */
 function audit(entry) {
-  fs.appendFile(path.join(LOG_DIR, 'access.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n', () => {})
+  appendRotated(path.join(LOG_DIR, 'access.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...entry }))
 }
 
 /**
@@ -677,21 +691,53 @@ function resolveLogin(user, explicit, hinted) {
   return { tenant: matches[0], account: owner(matches[0]) }
 }
 
+/**
+ * Sign-in budgets for the tenant page.
+ *
+ * The account budget is the tight one: five wrong passwords for one username
+ * anywhere starts a five minute refusal. The source budget is deliberately
+ * looser, because a whole office can share one address and one mistyped password
+ * should not lock out everyone behind it.
+ */
+const loginByUser = new Throttle({ name: 'login-account', maxFailures: 5, lockoutMs: 5 * 60 * 1000 })
+const loginBySource = new Throttle({ name: 'login-source', maxFailures: 20, lockoutMs: 10 * 60 * 1000 })
+
 function handleLogin(req, res) {
   readBody(req).then((body) => {
     const params = new URLSearchParams(body)
     const user = params.get('user') ?? ''
     const password = params.get('password') ?? ''
+    const source = req.socket.remoteAddress ?? 'unknown'
+    // Two budgets, because they stop different attacks: per account stops
+    // guessing one password from anywhere, per source stops spraying many
+    // accounts from one place. The source budget is the looser of the two so that
+    // one careless user behind a shared address does not lock out their
+    // colleagues.
+    const locked = Math.max(loginByUser.retryAfter(user.toLowerCase()), loginBySource.retryAfter(source))
+    if (locked > 0) {
+      audit({ tenant: '-', user, status: 429, note: 'login-throttled', source })
+      send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'retry-after': String(locked) },
+        loginPage({ error: `尝试次数过多，请 ${String(locked)} 秒后再试` }))
+      return
+    }
     const resolved = resolveLogin(
       user,
       params.get('tenant') ?? undefined,
       tenantByAddress(req.headers.host, req.socket.localPort),
     )
     if (resolved.error !== undefined || !checkPassword(resolved.account, password)) {
-      audit({ tenant: resolved.tenant?.id ?? '-', user, status: 401, note: 'login-failed' })
+      const userLock = loginByUser.fail(user.toLowerCase())
+      const sourceLock = loginBySource.fail(source)
+      audit({
+        tenant: resolved.tenant?.id ?? '-', user, status: 401, note: 'login-failed', source,
+        ...(userLock > 0 ? { lockedAccountSeconds: userLock } : {}),
+        ...(sourceLock > 0 ? { lockedSourceSeconds: sourceLock } : {}),
+      })
       send(res, 401, { 'content-type': 'text/html; charset=utf-8' }, loginPage({ error: '用户名或密码不正确' }))
       return
     }
+    loginByUser.succeed(user.toLowerCase())
+    loginBySource.succeed(source)
     audit({ tenant: resolved.tenant.id, user, status: 200, note: 'login-ok' })
     send(res, 303, {
       location: '/',
@@ -880,13 +926,6 @@ function readJsonBody(req, done) {
   })
   req.on('error', (error) => { done(error) })
 }
-
-const {
-  AdminConsole, hashPassword, verifyPassword, ID_PATTERN, USER_PATTERN,
-  COOKIE: ADMIN_COOKIE, MAX_FAILURES, LOCKOUT_MS, SESSION_MS,
-} = require('./admin.js')
-// Aliased: this file already has a loginPage, the tenant sign-in page.
-const { loginPage: adminLoginPage, consolePage: adminConsolePage, statusTag } = require('./admin-page.js')
 
 /**
  * Administrator console state.

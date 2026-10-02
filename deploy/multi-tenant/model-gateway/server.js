@@ -72,13 +72,17 @@ const usageFile = path.join(LOG_DIR, 'model-usage.jsonl')
 /**
  * Record one request and the token usage it reported.
  *
+ * Rotated by size on the same policy as the control plane's own logs: this file
+ * is read for per-tenant accounting and would otherwise grow without bound.
+ * Readers must include the shifted generations (see gateway/rotate.js).
+ *
  * @param entry - fields to append as one JSON line.
  */
 function record(entry) {
   const line = JSON.stringify({ ts: new Date().toISOString(), ...entry })
   console.log(line)
   try {
-    fs.appendFileSync(usageFile, `${line}\n`)
+    appendRotated(usageFile, line)
   } catch (error) {
     console.error(`mt-model-gateway: cannot append usage: ${error.message}`)
   }

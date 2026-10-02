@@ -21,16 +21,26 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ ! -f logs/model-usage.jsonl ]; then
+if [ ! -f logs/model-usage.jsonl ] && [ ! -f logs/model-usage.jsonl.1 ]; then
   echo "还没有用量记录（logs/model-usage.jsonl 不存在）：租户尚未发起过模型请求。"
   exit 0
 fi
 
-docker run --rm -v "$PWD:/w" -w /w -e MT_TENANT="$TENANT" -e MT_TAIL="$TAIL" node:22-bookworm-slim node -e '
+docker run --rm -v "$PWD:/w" -w /w -e MT_TENANT="$TENANT" -e MT_TAIL="$TAIL" -e MT_LOG_MAX_FILE="${MT_LOG_MAX_FILE:-3}" node:22-bookworm-slim node -e '
 const fs = require("node:fs")
 const filter = process.env.MT_TENANT || ""
 const tail = Number(process.env.MT_TAIL || 0)
-const rows = fs.readFileSync("/w/logs/model-usage.jsonl", "utf8").trim().split("\n").filter(Boolean)
+// 日志按大小轮转，只读当前文件会丢掉轮转前的记录，统计看起来像"归零"。
+const maxFiles = Number(process.env.MT_LOG_MAX_FILE || 3)
+const sources = []
+for (let index = maxFiles; index >= 1; index -= 1) {
+  const shifted = `/w/logs/model-usage.jsonl.${index}`
+  if (fs.existsSync(shifted)) sources.push(shifted)
+}
+if (fs.existsSync("/w/logs/model-usage.jsonl")) sources.push("/w/logs/model-usage.jsonl")
+const rows = sources
+  .flatMap((file) => fs.readFileSync(file, "utf8").trim().split("\n"))
+  .filter(Boolean)
   .map((line) => { try { return JSON.parse(line) } catch { return undefined } })
   .filter((row) => row !== undefined && (filter === "" || row.tenant === filter))
 

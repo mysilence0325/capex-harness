@@ -1,0 +1,19 @@
+# Build contexts that need more than one directory (the model gateway shares the
+# gateway's log-rotation module) use the project root as their context, so this
+# keeps the payload to source only. Tenant data, credentials and archives must
+# never enter a build.
+tenants/
+state/
+backups/
+logs/
+*.tar.gz
+image-overlay/
+.env
+model.env
+local.env
+tenants.json
+docker-compose.yml
+entry-urls.txt
+restore-aside-*/
+.git/
+build-local.log

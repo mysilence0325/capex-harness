@@ -8,11 +8,13 @@ WORKDIR /app
 COPY server.js /app/server.js
 COPY admin.js /app/admin.js
 COPY admin-page.js /app/admin-page.js
+COPY throttle.js /app/throttle.js
+COPY rotate.js /app/rotate.js
 
 # 8090: public entry. Tenant runtimes are reachable only on the compose network.
 EXPOSE 8090
 
-# Runs as root because it reads the Docker socket to resolve each tenant's
-# current launch token. The gateway is the trusted control plane; tenants are
-# the untrusted side of that boundary.
+# Runs as root only to write its own state (session key, runtime table) and the
+# logs it rotates. It deliberately holds no Docker access: tenant runtimes are
+# located through registrations a node posts, not by inspecting containers.
 CMD ["node", "/app/server.js"]

@@ -21,7 +21,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const http = require('node:http')
-
+const { appendRotated, rotatedFiles } = require('./rotate.js')
 /** Where the administrator's own credential lives, separate from any tenant. */
 const ADMIN_FILE = (stateDir) => path.join(stateDir, 'admin.json')
 const AUDIT_FILE = (logDir) => path.join(logDir, 'admin.jsonl')
@@ -115,14 +115,9 @@ class AdminConsole {
     return this.readAdmin() !== undefined
   }
 
-  /** Append one administrator action. */
+  /** Append one administrator action, rotating by size like the access log. */
   audit(entry) {
-    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry })
-    try {
-      fs.appendFileSync(AUDIT_FILE(this.options.logDir), `${line}\n`, { mode: 0o600 })
-    } catch (error) {
-      console.error(`mt-gateway: cannot write the admin audit log: ${error.message}`)
-    }
+    appendRotated(AUDIT_FILE(this.options.logDir), JSON.stringify({ ts: new Date().toISOString(), ...entry }))
   }
 
   /**
@@ -198,34 +193,40 @@ class AdminConsole {
 
   /**
    * Per-tenant model usage, from the model gateway's log.
+   *
+   * Reads the rotated generations too: after a rotation the current file holds
+   * only the newest entries, and totals computed from it alone would appear to
+   * reset.
+   *
    * @returns a map of tenant id to call count and token totals.
    */
   usageByTenant() {
     const file = USAGE_FILE(this.options.logDir)
     const totals = new Map()
-    if (!fs.existsSync(file)) return totals
-    let text
-    try {
-      text = fs.readFileSync(file, 'utf8')
-    } catch (error) {
-      console.error(`mt-gateway: cannot read ${file}: ${error.message}`)
-      return totals
-    }
-    for (const line of text.split('\n')) {
-      if (line.trim() === '') continue
-      let row
+    for (const source of rotatedFiles(file)) {
+      let text
       try {
-        row = JSON.parse(line)
-      } catch {
+        text = fs.readFileSync(source, 'utf8')
+      } catch (error) {
+        console.error(`mt-gateway: cannot read ${source}: ${error.message}`)
         continue
       }
-      if (typeof row?.tenant !== 'string' || row.tenant === '') continue
-      const current = totals.get(row.tenant) ?? { calls: 0, input: 0, output: 0, cacheRead: 0 }
-      current.calls += 1
-      current.input += Number(row.inputTokens ?? 0)
-      current.output += Number(row.outputTokens ?? 0)
-      current.cacheRead += Number(row.cacheReadTokens ?? 0)
-      totals.set(row.tenant, current)
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        let row
+        try {
+          row = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (typeof row?.tenant !== 'string' || row.tenant === '') continue
+        const current = totals.get(row.tenant) ?? { calls: 0, input: 0, output: 0, cacheRead: 0 }
+        current.calls += 1
+        current.input += Number(row.inputTokens ?? 0)
+        current.output += Number(row.outputTokens ?? 0)
+        current.cacheRead += Number(row.cacheReadTokens ?? 0)
+        totals.set(row.tenant, current)
+      }
     }
     return totals
   }
