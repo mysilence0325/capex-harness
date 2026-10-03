@@ -1534,6 +1534,57 @@ async function adminAction(body, actor) {
   // runs one of a fixed set of scripts. The operation name is passed through
   // unchecked on purpose — the agent owns the allowlist, and duplicating it here
   // would only create a second place to forget to update.
+  // 管理员自助的两步验证。都只作用于【自己】（actor），不提供"给别人绑定"——
+  // 那会变成用一个会话去改另一个账号的安全设置，而这两件事的风险不一样。
+  if (action === 'mfa-setup') {
+    const secret = mfa.generateSecret()
+    admin.setMfaPending(actor, secret)
+    audit('mfa-setup', { user: actor, note: '待确认' })
+    // 不生成二维码：离线环境里没有二维码库，手抄密钥是通行做法，
+    // otpauth 链接则给支持粘贴的验证器用。
+    return { ok: true, secret, uri: mfa.otpauthUri(secret, actor) }
+  }
+  if (action === 'mfa-confirm') {
+    const secret = admin.mfaSecret(actor)
+    if (typeof secret !== 'string' || secret === '') return { ok: false, error: '还没有待确认的密钥，先点「开始绑定」' }
+    if (!mfa.verifyTotp(secret, String(body?.code ?? ''))) return { ok: false, error: '验证码不正确（确认设备时间准确）' }
+    const codes = mfa.generateRecoveryCodes(10)
+    if (!admin.confirmMfa(actor, codes.map((one) => mfa.hashRecoveryCode(one)))) {
+      return { ok: false, error: '确认失败' }
+    }
+    audit('mfa-enabled', { user: actor })
+    // 只在这里返回明文恢复码；存下来的只有哈希。
+    return { ok: true, recovery: codes }
+  }
+  if (action === 'mfa-recovery') {
+    if (!admin.mfaActive(actor)) return { ok: false, error: '还没有开启两步验证' }
+    if (!mfa.verifyTotp(admin.mfaSecret(actor), String(body?.code ?? ''))) {
+      return { ok: false, error: '验证码不正确' }
+    }
+    const codes = mfa.generateRecoveryCodes(10)
+    admin.confirmMfa(actor, codes.map((one) => mfa.hashRecoveryCode(one)))
+    audit('mfa-recovery-regenerated', { user: actor })
+    return { ok: true, recovery: codes }
+  }
+  if (action === 'mfa-disable') {
+    if (!admin.mfaActive(actor)) return { ok: false, error: '还没有开启两步验证' }
+    const code = String(body?.code ?? '')
+    const byCode = mfa.verifyTotp(admin.mfaSecret(actor), code)
+    const byRecovery = !byCode && code !== '' && admin.consumeRecovery(actor, mfa.hashRecoveryCode(code))
+    if (!byCode && !byRecovery) return { ok: false, error: '验证码不正确（或已用过的恢复码）' }
+    admin.clearMfa(actor)
+    audit('mfa-disabled', { user: actor })
+    return { ok: true }
+  }
+  if (action === 'mfa-status') {
+    return {
+      ok: true,
+      active: admin.mfaActive(actor),
+      pending: Boolean(admin.adminByName(actor)?.mfa?.secret) && !admin.mfaActive(actor),
+      recoveryLeft: admin.mfaRecovery(actor).length,
+    }
+  }
+
   if (action === 'ops') {
     const node = typeof body?.node === 'string' && body.node !== '' ? body.node : 'local'
     const op = typeof body?.op === 'string' ? body.op : ''

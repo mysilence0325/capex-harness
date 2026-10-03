@@ -227,6 +227,31 @@ else
   skip "配额的实际拦写（需要先在 fstab 里开 prjquota 并重启）"
 fi
 
+# ---------------------------------------------------------------- 控制台的限额操作
+head_ "控制台的配额与限速操作"
+# 经控制台设，再读回来。只看"接口返回 ok"不算 —— 那可能什么都没落下。
+if [ "$QUICK" = yes ]; then
+  skip "控制台设限速并读回（--quick 跳过）"
+else
+  AJAR="$(mktemp)"
+  curl -sS -o /dev/null -c "$AJAR" --data-urlencode "user=${ADMIN_USER:-admin}" --data-urlencode "password=$ADMIN_PW"     http://127.0.0.1:8099/__mt/admin/login 2>/dev/null
+  adminop() {
+    curl -sS -b "$AJAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+      -d "$1" http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null
+  }
+  LIMT="$(printf '%s' "$TENANTS" | awk '{print $1}')"
+  adminop "{\"action\":\"ops\",\"node\":\"local\",\"op\":\"bandwidth-set\",\"params\":{\"tenant\":\"$LIMT\",\"rate\":\"9mbit\",\"direction\":\"both\"}}" >/dev/null
+  SHOWN="$(adminop '{"action":"ops","node":"local","op":"limits-report","params":{}}')"
+  printf '%s' "$SHOWN" | grep -q '下行已限速' && pass "经控制台设限速后读回显示下行已限速" || fail "经控制台设限速后读回没有限速"
+  # 意图也要记下来 —— 代理容器里没有 python3，这里曾经悄悄丢过
+  INTENT="$(python3 -c "import json;d=json.load(open('state/bandwidth.json'));print((d.get('$LIMT') or {}).get('direction',''))" 2>/dev/null)"
+  assert_eq "both" "$INTENT" "限速意图连方向一起记下（重建后靠它恢复）"
+  adminop "{\"action\":\"ops\",\"node\":\"local\",\"op\":\"bandwidth-clear\",\"params\":{\"tenant\":\"$LIMT\"}}" >/dev/null
+  printf '%s' "$(adminop '{"action":"ops","node":"local","op":"limits-report","params":{}}')" | grep -q "$LIMT    未限速" \
+    && pass "取消后读回未限速" || fail "取消后读回仍显示限速"
+  rm -f "$AJAR"
+fi
+
 # ---------------------------------------------------------------- 租户磁盘用量
 head_ "租户磁盘用量"
 MKEY2="$(grep -o '"metrics": *"[^"]*"' state/keys.json 2>/dev/null | sed 's/.*: *"//; s/"$//')"

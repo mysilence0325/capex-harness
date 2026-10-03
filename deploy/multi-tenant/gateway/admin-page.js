@@ -264,6 +264,38 @@ function consolePage({ user, role }) {
   </table>
 </div>
 
+<h2>两步验证</h2>
+<div class="card">
+  <p class="muted" style="margin: 0 0 10px">
+    开启后，登录这个控制台需要再输一次验证器里的六位码。恢复码只在开启时显示一次，
+    每个只能用一次 —— 请当场存到安全的地方。
+  </p>
+  <div id="mfa-state" class="muted" style="margin-bottom: 10px">读取中…</div>
+  <div id="mfa-setup-row" class="row" style="align-items: center; gap: 8px; flex-wrap: wrap">
+    <button onclick="mfaSetup()">开始绑定</button>
+  </div>
+  <div id="mfa-secret-row" class="row" style="display: none; flex-direction: column; gap: 6px; margin-top: 10px">
+    <div class="muted">把下面这串密钥加进验证器（或粘贴链接），然后用它当前的六位码确认：</div>
+    <code id="mfa-secret" style="word-break: break-all"></code>
+    <code id="mfa-uri" class="muted" style="word-break: break-all"></code>
+    <div class="row" style="gap: 8px; align-items: center">
+      <input id="mfa-code" placeholder="六位验证码" size="10" inputmode="numeric" autocomplete="one-time-code">
+      <button class="primary" onclick="mfaConfirm()">确认并开启</button>
+      <span class="muted">没确认之前不算开启，密钥随时可以重来。</span>
+    </div>
+  </div>
+  <div id="mfa-recovery-row" style="display: none; margin-top: 10px">
+    <div class="muted">恢复码（<b>只显示这一次</b>，每个只能用一次）：</div>
+    <pre id="mfa-recovery" style="margin: 6px 0 0"></pre>
+  </div>
+  <div id="mfa-active-row" class="row" style="display: none; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px">
+    <input id="mfa-code2" placeholder="六位验证码" size="10" inputmode="numeric" autocomplete="one-time-code">
+    <button onclick="mfaRegenerate()">重新生成恢复码</button>
+    <button onclick="mfaDisable()">关闭两步验证</button>
+    <span class="muted">这两件事都要先输当前验证码（或用掉一个恢复码）。</span>
+  </div>
+</div>
+
 <h2>我的账号</h2>
 <div class="card">
   <div class="row">
@@ -582,6 +614,70 @@ async function quotaClear() {
   const tenant = limitsTenant()
   if (tenant === undefined) return
   await limitsOp('取消 ' + tenant + ' 的配额', 'quota-clear', { tenant })
+}
+
+/** 显示当前的两步验证状态，并只露出该用的那几行。 */
+async function mfaStatus() {
+  const answer = await post('api/tenant', { action: 'mfa-status' })
+  const state = document.querySelector('#mfa-state')
+  if (!answer.ok) { state.textContent = '读不到状态：' + (answer.error || ''); return }
+  if (answer.active) {
+    state.textContent = '已开启。恢复码还剩 ' + answer.recoveryLeft + ' 个。'
+  } else if (answer.pending) {
+    state.textContent = '有一个还没确认的密钥 —— 输入验证码确认，或重新开始绑定。'
+  } else {
+    state.textContent = '未开启。'
+  }
+  document.querySelector('#mfa-setup-row').style.display = answer.active ? 'none' : 'flex'
+  document.querySelector('#mfa-active-row').style.display = answer.active ? 'flex' : 'none'
+  if (answer.active) {
+    document.querySelector('#mfa-secret-row').style.display = 'none'
+  }
+}
+
+/** 生成待确认的密钥。没有确认之前它不算数，所以随手重来是安全的。 */
+async function mfaSetup() {
+  const answer = await post('api/tenant', { action: 'mfa-setup' })
+  if (!answer.ok) { showOps('两步验证', answer); return }
+  document.querySelector('#mfa-secret').textContent = answer.secret
+  document.querySelector('#mfa-uri').textContent = answer.uri
+  document.querySelector('#mfa-secret-row').style.display = 'flex'
+  document.querySelector('#mfa-recovery-row').style.display = 'none'
+  showOps('两步验证', { ok: true, output: '已生成密钥。用验证器读出当前六位码后确认。' })
+}
+
+/** 用当前验证码确认。成功时返回的恢复码只在这里出现一次。 */
+async function mfaConfirm() {
+  const code = document.querySelector('#mfa-code').value.trim()
+  const answer = await post('api/tenant', { action: 'mfa-confirm', code })
+  if (!answer.ok) { showOps('两步验证', answer); return }
+  if (Array.isArray(answer.recovery)) {
+    document.querySelector('#mfa-recovery').textContent = answer.recovery.join('\n')
+    document.querySelector('#mfa-recovery-row').style.display = 'block'
+  }
+  showOps('两步验证', { ok: true, output: '已开启。恢复码只显示这一次，请立刻保存。' })
+  mfaStatus()
+}
+
+/** 换一批恢复码。旧的立刻作废 —— 这正是"恢复码用完了"的出路。 */
+async function mfaRegenerate() {
+  const code = document.querySelector('#mfa-code2').value.trim()
+  if (!confirm('旧的恢复码会立刻作废，确定重新生成 10 个？')) return
+  const answer = await post('api/tenant', { action: 'mfa-recovery', code })
+  if (!answer.ok) { showOps('两步验证', answer); return }
+  document.querySelector('#mfa-recovery').textContent = answer.recovery.join('\n')
+  document.querySelector('#mfa-recovery-row').style.display = 'block'
+  showOps('两步验证', { ok: true, output: '已生成新的恢复码，旧的已作废。' })
+  mfaStatus()
+}
+
+/** 关闭两步验证。需要当前验证码，或一个还没用过的恢复码。 */
+async function mfaDisable() {
+  const code = document.querySelector('#mfa-code2').value.trim()
+  if (!confirm('关闭后登录只需要密码，确定？')) return
+  const answer = await post('api/tenant', { action: 'mfa-disable', code })
+  showOps('两步验证', answer.ok ? { ok: true, output: '已关闭。' } : answer)
+  mfaStatus()
 }
 
 async function loadHistory() {
