@@ -486,6 +486,91 @@ function loginPage({ error } = {}) {
  * @param detail - optional second line; may contain markup.
  * @returns the page HTML.
  */
+/**
+ * The page a tenant's own user changes their password on.
+ *
+ * Rendered by the gateway rather than inside the tenant's DSH: the runtime is the
+ * tenant's own software, while the password is the deployment's. The gateway already
+ * holds a session naming both the tenant and the user, so this page needs no tenant
+ * picker and cannot be aimed at somebody else's account.
+ *
+ * @param options - the tenant, the signed-in user, and any refusal to display.
+ * @returns the HTML page.
+ */
+function accountPage({ tenant, user, error }) {
+  const notice = error === undefined ? '' : `<p style="color:#b00020"><b>${error}</b></p>`
+  return htmlPage('修改密码', `
+    <h1>修改密码</h1>
+    <p class="sub">${tenant.id} / ${user}</p>
+    ${notice}
+    <form method="post" action="${PREFIX}/account">
+      <p><input name="current" type="password" placeholder="当前密码" autocomplete="current-password" required></p>
+      <p><input name="next" type="password" placeholder="新密码（至少 12 位）" autocomplete="new-password" required></p>
+      <p><input name="again" type="password" placeholder="再输一次新密码" autocomplete="new-password" required></p>
+      <p><button type="submit">修改</button></p>
+    </form>
+    <p class="sub">改完之后已登录的会话都会失效，需要重新登录。</p>
+    <p><a href="${PREFIX}/">返回</a></p>`)
+}
+
+/**
+ * Handle a self-service password change for the signed-in tenant user.
+ *
+ * Everything it needs comes from the session: which tenant, which user. Nothing the
+ * caller supplies decides whose password changes.
+ *
+ * @param req - the request (GET renders the form, POST applies it).
+ * @param res - the response.
+ * @param session - the verified tenant-user session.
+ */
+async function handleAccount(req, res, session) {
+  const deny = (message) => {
+    audit({ tenant: session.tenant.id, user: session.user, url: req.url, status: 400, note: 'account-refused' })
+    send(res, 400, { 'content-type': 'text/html; charset=utf-8' },
+      accountPage({ tenant: session.tenant, user: session.user, error: message }))
+  }
+  if (req.method !== 'POST') {
+    send(res, 200, { 'content-type': 'text/html; charset=utf-8' },
+      accountPage({ tenant: session.tenant, user: session.user }))
+    return
+  }
+  const form = await readForm(req).catch(() => new URLSearchParams())
+  const current = String(form.get('current') ?? '')
+  const next = String(form.get('next') ?? '')
+  const again = String(form.get('again') ?? '')
+  const record = (session.tenant.users ?? []).find((entry) => entry.name === session.user)
+  if (record === undefined) return deny('这个账号不在注册表里，请联系管理员')
+  if (!verifyPassword(current, record.passwordHash)) return deny('当前密码不对')
+  if (next.length < 12) return deny('新密码至少 12 位')
+  if (next !== again) return deny('两次输入的新密码不一致')
+  if (next === current) return deny('新密码不能与当前密码相同')
+  const epoch = (value) => (Number.isInteger(value) ? value : 0) + 1
+  try {
+    updateRegistry(CONFIG_FILE, (document) => {
+      const tenant = (document.tenants ?? []).find((entry) => entry.id === session.tenant.id)
+      const target = (tenant?.users ?? []).find((entry) => entry.name === session.user)
+      if (target === undefined) throw new Error('user is not in the registry')
+      target.passwordHash = hashPassword(next)
+      // Withdraws the sessions this password authorized: a cookie obtained with the
+      // old password should not outlive the change.
+      target.sessionEpoch = epoch(target.sessionEpoch)
+    })
+    // Keep the in-memory copy in step, so the next request compares against the new
+    // epoch instead of continuing to honour the old one.
+    record.passwordHash = hashPassword(next)
+    record.sessionEpoch = epoch(record.sessionEpoch)
+    audit({ tenant: session.tenant.id, user: session.user, url: req.url, status: 303, note: 'account-changed' })
+  } catch (error) {
+    console.error(`mt-gateway: account change failed: ${error.message}`)
+    return deny('写入失败，请稍后重试或联系管理员')
+  }
+  send(res, 303, {
+    location: `${PREFIX}/login?changed=1`,
+    'set-cookie': `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+    'cache-control': 'no-store',
+  }, '')
+}
+
 function errorPage(status, message, detail = '') {
   const extra = detail === '' ? '' : `<p class="sub">${detail}</p>`
   return htmlPage(`DSH ${String(status)}`, `<h1>${String(status)}</h1><p class="sub">${message}</p>${extra}`)
@@ -1809,12 +1894,20 @@ function handleRequest(req, res) {
     return
   }
 
+  // Self-service password change, inside the signed-in branch: the tenant and the
+  // user come from the session, not from anything the caller sends.
+  if (url.pathname === `${PREFIX}/account`) {
+    handleAccount(req, res, session)
+    return
+  }
+
   if (url.pathname === `${PREFIX}/`) {
     send(res, 200, { 'content-type': 'text/html; charset=utf-8' }, htmlPage('DSH', `
       <h1>${session.tenant.title ?? session.tenant.id}</h1>
       <p class="sub">已登录：${session.user} @ ${session.tenant.id}</p>
       <p><a href="/">进入 ${session.tenant.id}</a></p>
       <p><a href="${PREFIX}/logout">退出登录 / 切换用户</a></p>
+        <p><a href="${PREFIX}/account">修改密码</a></p>
       <p class="sub" style="margin-top:22px">直接访问 <code>${PREFIX}/logout</code> 可在任何页面退出。</p>`))
     return
   }
