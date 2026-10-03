@@ -138,8 +138,25 @@ function countLogLines(logDir, name) {
  * @param options.edgePort - the public entry port.
  * @returns the exposition text.
  */
-function render({ tenants, logDir, root, startedAt, edgePort }) {
+function render({ tenants, logDir, root, startedAt, edgePort, nodes: agents = [] }) {
   const lines = []
+
+  // Node agents. mt_agent_up is whether the control plane can reach one at all;
+  // mt_agent_control_plane_configured is whether that agent registers tenants or
+  // only serves operations. The second is the one worth alerting on: an agent with
+  // no control plane reports healthy and quietly does nothing, until a tenant
+  // restarts and the entry point starts answering 303.
+  if (agents.length > 0) {
+    lines.push('# HELP mt_agent_up Whether the control plane can reach this node agent.')
+    lines.push('# TYPE mt_agent_up gauge')
+    lines.push('# HELP mt_agent_control_plane_configured Whether this node agent registers tenants (0 = operations only).')
+    lines.push('# TYPE mt_agent_control_plane_configured gauge')
+    for (const agent of agents) {
+      lines.push(sample('mt_agent_up', { node: agent.node }, agent.agent === 'up' ? 1 : 0))
+      lines.push(sample('mt_agent_control_plane_configured', { node: agent.node }, agent.controlPlane === true ? 1 : 0))
+    }
+    lines.push('')
+  }
   const usage = usageFromLog(logDir)
 
   const registered = tenants.map((tenant) => sample('mt_tenant_registered', { tenant: tenant.id }, tenant.registered ? 1 : 0))

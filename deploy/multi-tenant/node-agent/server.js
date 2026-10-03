@@ -907,7 +907,7 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/health') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ ok: true, node: NODE_NAME, address: nodeAddress, docker: dockerAvailable, provision: PROJECT_DIR !== '', tenants: [...reported.keys()], busy: busyWith() ?? null }))
+    res.end(JSON.stringify({ ok: true, node: NODE_NAME, address: nodeAddress, docker: dockerAvailable, provision: PROJECT_DIR !== '', tenants: [...reported.keys()], busy: busyWith() ?? null, controlPlane: CONTROL_PLANE !== '' }))
     return
   }
 

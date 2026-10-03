@@ -1105,14 +1105,20 @@ async function adminState() {
     if (agentUrl === undefined && node === (process.env.MT_NODE_NAME ?? 'local') && NODE_AGENT_URL !== '') agentUrl = NODE_AGENT_URL
     let agent = 'none'
     let busy
+    let controlPlane
     if (agentUrl !== undefined) {
       const health = await admin.callHealth(agentUrl)
       agent = health.ok === true ? 'up' : 'down'
       // What that agent is running right now, so the console can say why a button
       // will refuse rather than leaving the operator to guess.
       busy = health.busy === null || health.busy === undefined ? undefined : health.busy.op
+      // Whether that agent registers tenants at all. An empty control plane means it
+      // serves operations only, and does so silently: the console works, the node
+      // looks healthy, and nothing registers until a tenant restarts and the entry
+      // point starts answering 303. Alerted on via mt_agent_control_plane_configured.
+      controlPlane = health.controlPlane === true
     }
-    return { node, tenants: mine.length, ready: mine.filter((row) => row.ready === true).length, agent, agentUrl, busy }
+    return { node, tenants: mine.length, ready: mine.filter((row) => row.ready === true).length, agent, agentUrl, busy, controlPlane }
   }))
 
   return { tenants: rows, nodes, edgePort: EDGE_PORT, origin }
@@ -1669,13 +1675,17 @@ function handleRequest(req, res) {
         node: entry.node ?? 'local',
         limits: tenant.modelLimits ?? {},
       }
-    })).then((rows) => {
+    })).then(async (rows) => {
       const text = renderMetrics({
         tenants: rows,
         logDir: LOG_DIR,
         root: DEPLOY_ROOT,
         startedAt: PROCESS_STARTED_AT,
         edgePort: EDGE_PORT,
+        // Asking the agents costs a request each. The scrape interval is 30s and the
+        // call carries its own short timeout, so a slow agent delays the scrape
+        // rather than failing it, and a broken one reads as down.
+        nodes: await adminState().then((state) => state.nodes).catch(() => []),
       })
       send(res, 200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' }, text)
     }).catch((error) => {
