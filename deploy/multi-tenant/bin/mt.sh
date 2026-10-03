@@ -28,6 +28,7 @@
 #   bin/mt.sh render             re-render docker-compose.yml from tenants.json
 #   bin/mt.sh admin-passwd       set the administrator console password (revokes sessions)
 #   bin/mt.sh admin-kick         revoke every admin session, keep the password
+#   bin/mt.sh wire-prometheus    wire the alert rules into this host's Prometheus
 #   bin/mt.sh register <id>      register a tenant runtime with the control plane
 #   bin/mt.sh unregister <id>    make the control plane forget a tenant runtime
 #   bin/mt.sh runtimes           list the runtimes the control plane knows about
@@ -671,6 +672,7 @@ case "${1:-}" in
   limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额
   registry-push) shift; bash bin/registry-push.sh "$@" ;;  # 把镜像推进内网仓库（离线环境用）
   disk)    shift; bash bin/disk.sh "$@" ;;                 # 磁盘现状与会话/镜像回收
+  wire-prometheus) shift; bash bin/wire-prometheus.sh "$@" ;;  # 把告警接进本机 Prometheus
   upgrade) shift; bash bin/upgrade.sh "$@" ;;              # 滚动升级租户运行时镜像
   remove)  shift; cmd_remove "$@" ;;
   key)     shift; cmd_key "$@" ;;
