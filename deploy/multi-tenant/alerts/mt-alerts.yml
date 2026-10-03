@@ -101,6 +101,27 @@ groups:
   # /home/dsh-mt 所在分区写满会让租户会话与备份一起失败。
   # 节点代理两项：控制面为空时代理只运维、不注册租户，且这是静默降级；
   # 连不上代理时控制台的运维按钮会失败，但租户不受影响。
+      - alert: DshTenantNearQuota
+        # 配额强制要文件系统以 prjquota 挂载（需要一次重启），但"用了多少 / 该用多少"
+        # 现在就能报 —— 这条规则在强制生效之前就有用。
+        expr: mt_tenant_disk_limit_bytes > 0 and (mt_tenant_disk_used_bytes / mt_tenant_disk_limit_bytes) > 0.85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "租户 {{ $labels.tenant }} 的磁盘用量已达配额的 {{ $value | humanizePercentage }}"
+          description: "超过 85% 就该处理：先看 bin/mt.sh usage 与 bin/mt.sh disk report，再决定清理还是提高配额。"
+
+      - alert: DshTenantDiskGrowing
+        # 没设配额的租户不会触发上一条。这条按增长速度提醒：六小时涨过 500MB 就提一声。
+        expr: increase(mt_tenant_disk_used_bytes[6h]) > 524288000
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "租户 {{ $labels.tenant }} 六小时内磁盘增长 {{ $value | humanize1024 }}B"
+          description: "会话归档与工作区数据都在这个目录下。若持续增长，考虑设置配额。"
+
   - name: dsh-multitenant-host
     rules:
     - alert: DshDeployDiskFillingUp

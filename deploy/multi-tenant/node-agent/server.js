@@ -409,6 +409,78 @@ const reported = new Map()
  * @param nodeAddress - address the control plane should use for this agent.
  * @returns whether the control plane accepted it.
  */
+/**
+ * Bytes under a tenant directory.
+ *
+ * Uses PROJECT_DIR, not MT_DATA_ROOT: this agent mounts the deployment at the same
+ * path it has on the host, and DATA_ROOT's path does not exist in this container.
+ * Measured here because the control plane mounts only its own configuration and state
+ * and cannot see the tenant directory at all.
+ *
+ * @param tenant - tenant id.
+ * @returns bytes, or 0 when unreadable.
+ */
+function measureTenantBytes(tenant) {
+  const root = path.join(PROJECT_DIR, 'tenants', tenant)
+  let total = 0
+  const walk = (dir) => {
+    let entries
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      try {
+        if (entry.isDirectory()) walk(full)
+        else if (entry.isFile()) total += fs.statSync(full).size
+      } catch {
+        // Raced with a write: count it as nothing this round.
+      }
+    }
+  }
+  walk(root)
+  return total
+}
+
+/** Sizes are cached: measuring on every sync would be wasteful, and 15 seconds of
+ * staleness means nothing to an alert with a 15-minute `for`. */
+const DISK_CACHE = new Map()
+const DISK_CACHE_MS = 300_000
+
+/**
+ * Cached size of one tenant directory.
+ * @param tenant - tenant id.
+ * @returns bytes.
+ */
+function measureTenant(tenant) {
+  const now = Date.now()
+  const cached = DISK_CACHE.get(tenant)
+  if (cached !== undefined && now - cached.at < DISK_CACHE_MS) return cached.bytes
+  const bytes = measureTenantBytes(tenant)
+  DISK_CACHE.set(tenant, { at: now, bytes })
+  return bytes
+}
+
+/**
+ * The quota intended for a tenant, as written by bin/quota.sh.
+ * @param tenant - tenant id.
+ * @returns bytes, or 0 when none is intended.
+ */
+function quotaFor(tenant) {
+  let raw
+  try {
+    raw = JSON.parse(fs.readFileSync(path.join(PROJECT_DIR, 'state', 'quota.json'), 'utf8'))
+  } catch {
+    return 0
+  }
+  const match = /^([0-9]+)\s*([kmgt])?$/i.exec(String(raw?.[tenant]?.size ?? ''))
+  if (match === null) return 0
+  const unit = (match[2] ?? 'm').toLowerCase()
+  return Number(match[1]) * ({ k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 }[unit] ?? 1)
+}
+
 function register(tenant, target, token, nodeAddress) {
   const body = JSON.stringify({
     tenant,
@@ -416,6 +488,9 @@ function register(tenant, target, token, nodeAddress) {
     token,
     node: NODE_NAME,
     local: target,
+    // The control plane cannot read the tenant directory, so the agent that can reports it.
+    diskUsed: measureTenant(tenant),
+    quotaLimit: quotaFor(tenant),
     // Where to reach this agent for lifecycle actions. The control plane holds no
     // Docker access, so a restart or a stop it wants done has to come back here.
     agent: `http://${nodeAddress}:${String(PORT)}`,

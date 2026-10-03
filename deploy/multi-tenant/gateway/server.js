@@ -1037,7 +1037,12 @@ function handleRegister(req, res) {
       // a stale agent address behind, or the console would try to restart a
       // container through an agent that no longer reports this tenant.
       ...(typeof body?.agent === 'string' && body.agent !== '' ? { agent: body.agent } : {}),
-      registeredAt: new Date().toISOString(),
+      // Reported by the agent on every registration. The control plane mounts only its
+    // own configuration and state, so it cannot read the tenant directory or the quota
+    // file itself - it stores what the agent measured.
+    diskUsed: Number.isFinite(body?.diskUsed) ? body.diskUsed : previous?.diskUsed,
+    quotaLimit: Number.isFinite(body?.quotaLimit) ? body.quotaLimit : previous?.quotaLimit,
+    registeredAt: new Date().toISOString(),
     })
     saveRuntimes()
     audit({ tenant: id, user: '-', status: 200, note: previous === undefined ? 'runtime-registered' : 'runtime-updated', node: runtimes.get(id).node, endpoint })
@@ -1183,6 +1188,11 @@ async function adminState() {
     const probe = entry === undefined ? undefined : { ready: reachable && hasToken, reachable, hasToken }
     return {
       id: tenant.id,
+      // Passed through to the metrics renderer. Measured by this tenant's agent: the
+      // control plane cannot see the tenant directory itself, and reading it here once
+      // returned ENOENT for every tenant - which reads as zero bytes, not as an error.
+      diskUsed: entry?.diskUsed,
+      quotaLimit: entry?.quotaLimit,
       title: tenant.title ?? '',
       users: (tenant.users ?? []).map((user) => user.name),
       node: entry?.node ?? tenant.node ?? 'local',
@@ -1838,6 +1848,10 @@ function handleRequest(req, res) {
         hasToken,
         node: entry.node ?? 'local',
         limits: tenant.modelLimits ?? {},
+        // 指标用的这一份 rows 与控制台页面的那份是两个不同的对象。上一步我只给
+        // 控制台那份加了这两个字段，指标照旧读不到 —— 值一直是 0。
+        diskUsed: entry.diskUsed,
+        quotaLimit: entry.quotaLimit,
       }
     })).then(async (rows) => {
       const text = renderMetrics({

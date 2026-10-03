@@ -159,6 +159,26 @@ function render({ tenants, logDir, root, startedAt, edgePort, nodes: agents = []
   }
   const usage = usageFromLog(logDir)
 
+  // 每个租户的磁盘占用与配额目标，都来自节点代理的上报。
+  //
+  // 不在这里量目录：控制面只挂了自己的配置与 state，看不到 tenants/ 与 quota.json。
+  // 这点实测过 —— 目录读出来是 ENOENT，指标恒为 0，而"0 字节"看起来像正常值，
+  // 不会有人去查。谁看得见就由谁上报。
+  const diskUsed = tenants.map((tenant) => sample('mt_tenant_disk_used_bytes', { tenant: tenant.id }, tenant.diskUsed ?? 0))
+  if (diskUsed.length > 0) {
+    lines.push('# HELP mt_tenant_disk_used_bytes Bytes under the tenant directory, as reported by its node agent')
+    lines.push('# TYPE mt_tenant_disk_used_bytes gauge')
+    lines.push(...diskUsed)
+  }
+  const diskLimit = tenants
+    .filter((tenant) => (tenant.quotaLimit ?? 0) > 0)
+    .map((tenant) => sample('mt_tenant_disk_limit_bytes', { tenant: tenant.id }, tenant.quotaLimit))
+  if (diskLimit.length > 0) {
+    lines.push('# HELP mt_tenant_disk_limit_bytes Configured quota for the tenant directory, 0 when none')
+    lines.push('# TYPE mt_tenant_disk_limit_bytes gauge')
+    lines.push(...diskLimit)
+  }
+
   const registered = tenants.map((tenant) => sample('mt_tenant_registered', { tenant: tenant.id }, tenant.registered ? 1 : 0))
   family(lines, 'mt_tenant_registered', 'gauge', 'Whether the control plane has a registered runtime for this tenant (1) or not (0).')
   lines.push(...registered)

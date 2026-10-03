@@ -19,6 +19,35 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 TENANTS_DIR="${MT_QUOTA_TENANTS:-$PWD/tenants}"
+
+# 意图文件，与带宽那份同样的道理：配额可能还没在文件系统上启用，但"这个租户应该有多少"
+# 必须记下来 —— 指标与告警靠它工作，启用之后也靠它恢复。
+QUOTA_FILE="$PWD/state/quota.json"
+
+quota_intent_set() {
+  python3 - "$QUOTA_FILE" "$1" "$2" <<'PY'
+import json
+import os
+import sys
+
+path, tenant, size = sys.argv[1], sys.argv[2], sys.argv[3]
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except ValueError:
+        data = {}
+if size == '':
+    data.pop(tenant, None)
+else:
+    data[tenant] = {'size': size}
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+os.chmod(path, 0o600)
+PY
+}
 MOUNT_POINT="${MT_QUOTA_MOUNT:-$(df -T "$TENANTS_DIR" 2>/dev/null | awk 'NR==2 {print $NF}')}"
 # project id 由租户名决定：同一个租户每次算出来都一样，不依赖顺序，删了再加也对得上。
 projid_of() {
@@ -89,14 +118,22 @@ cmd_set() {
   esac
   local dir="$TENANTS_DIR/$tenant"
   [ -d "$dir" ] || { echo "没有这个租户的目录: $dir" >&2; exit 1; }
-  prjquota_enabled || { explain_how; exit 1; }
+  if ! prjquota_enabled; then
+    # 记下意图再退出：启用配额要一次重启，而"打算给多少"这件事不该等到那时才能表达。
+    # 指标与告警因此可以先于强制生效。
+    quota_intent_set "$tenant" "$size"
+    echo "已记下租户 $tenant 的配额意图 $size —— 但这台机器上还没启用配额，暂不强制。"
+    explain_how
+    exit 1
+  fi
 
   local p; p="$(projid_of "$tenant")"
   xfs_quota -x -c "project -s -p $dir $p" "$MOUNT_POINT" >/dev/null 2>&1
   # 软上限设成硬上限的 90%：到软上限会开始有宽限期警告，硬上限才是写不进去的那条线。
   local soft; soft="$(printf '%s' "$size" | awk '{n=$0; u=substr(n,length(n),1); v=substr(n,1,length(n)-1)+0; if (u ~ /[0-9]/) {v=n+0; u="m"} print int(v*0.9) u}')"
   if xfs_quota -x -c "limit -p bhard=$size bsoft=$soft $p" "$MOUNT_POINT" 2>&1; then
-    echo "已为租户 $tenant 设置磁盘配额 $size（软 $soft，project $p）"
+    quota_intent_set "$tenant" "$size"
+    echo "已为租户 $tenant 设置磁盘配额 $size（软 $soft，project $p，已记入 state/quota.json）"
     echo "  注意：配额按【目录】统计，包含它的会话归档与工作区数据。"
   else
     echo "设置失败" >&2
@@ -107,11 +144,18 @@ cmd_set() {
 cmd_clear() {
   local tenant="${1:-}"
   [ -z "$tenant" ] && { echo "用法: bin/quota.sh clear <租户>" >&2; exit 2; }
-  prjquota_enabled || { explain_how; exit 1; }
+  # 先删意图，再检查挂载：意图是"打算给多少"，与文件系统能不能强制无关。
+  # 放在 guard 之后的话，在没启用配额的机器上就永远删不掉自己刚记下的意图。
+  quota_intent_set "$tenant" ""
+  if ! prjquota_enabled; then
+    echo "已删除租户 $tenant 的配额意图（这台机器上本来也没有强制）"
+    exit 0
+  fi
   local p dir; p="$(projid_of "$tenant")"; dir="$TENANTS_DIR/$tenant"
   xfs_quota -x -c "limit -p bhard=0 bsoft=0 $p" "$MOUNT_POINT" >/dev/null 2>&1
   xfs_quota -x -c "project -C -p $dir $p" "$MOUNT_POINT" >/dev/null 2>&1
-  echo "已移除租户 $tenant 的磁盘配额"
+  quota_intent_set "$tenant" ""
+  echo "已移除租户 $tenant 的磁盘配额（意图也已删除）"
 }
 
 case "${1:-show}" in
