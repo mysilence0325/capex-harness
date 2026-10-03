@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>browser-floor-lane smoke fixture</title>
+<!--
+  The lane's own smoke page: it stands in for the served client so a teammate
+  can prove the driver, the probe, and every check reach the page without a
+  running server. It mirrors the facts the checks read - the composer control
+  row and the header title row marked below 560/540px, the turn-rail band below
+  900px, the trajectory pane below 620px, and a conversation scroller that
+  reserves its scrollbar - and it never loads the client, so the floor-API
+  checks report themselves as not applicable here. It is not evidence about the
+  product; only a run against a server is.
+-->
+<style>
+  html, body { margin: 0; background: #fff; color: #111; font: 12px system-ui, sans-serif; }
+  .fixture_card { width: calc(100% - 40px); margin: 8px; padding: 8px; border: 1px solid #bbb; }
+  .fixture_row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 2px 8px 6px; }
+  .fixture_tools, .fixture_trailing { display: flex; align-items: center; gap: 12px; }
+  /* The marked row tightens its control groups, the fact the lane reads back. */
+  .fixture_row[data-narrow] .fixture_tools,
+  .fixture_row[data-narrow] .fixture_trailing { gap: 8px; }
+  header { padding: 8px 16px; }
+  .fixture_titleRow { display: flex; align-items: center; gap: 10px; }
+  .fixture_band { margin: 8px; }
+  .fixture_frame { height: 72px; background: #eee; }
+  /* The marked band hides its frame, the fact the lane reads back. */
+  .fixture_band[data-narrow] .fixture_frame { display: none; }
+  .fixture_tablePane { margin: 8px; padding: 8px; border: 1px solid #ddd; }
+  .fixture_eventColumn { width: 122px; padding: 6px; background: #f2f2f2; }
+  /* The marked pane compacts its event column, the fact the lane reads back. */
+  .fixture_tablePane[data-narrow] .fixture_eventColumn { width: 50px; }
+  .fixture_scrollBody { height: 96px; overflow-y: scroll; border: 1px solid #ccc; margin: 8px; }
+  .fixture_scrollBody p { margin: 4px 8px; }
+</style>
+</head>
+<body data-fixture-ready>
+  <div class="fixture_card">
+    <div class="fixture_row" data-fixture-row data-fixture-marks="data-narrow data-tight">
+      <div class="fixture_tools"><span>Attach</span><span>Plan</span></div>
+      <div class="fixture_trailing"><span>Model</span><span>Send</span></div>
+    </div>
+  </div>
+
+  <header>
+    <div class="fixture_titleRow" data-fixture-marks="data-narrow data-tight"><span>Session title</span><span>Actions</span></div>
+  </header>
+
+  <div class="fixture_band" data-fixture-marks="data-narrow">
+    <div class="fixture_frame">
+      <div class="fixture_scroller">
+        <button type="button" data-index="0">Turn 1</button>
+        <button type="button" data-index="1">Turn 2</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="fixture_tablePane" data-fixture-marks="data-narrow">
+    <div class="fixture_eventColumn">Event</div>
+    <div class="fixture_event">Turn 1 request</div>
+  </div>
+
+  <div class="fixture_scrollBody" data-fixture-scroll>
+    <p>Line 1</p><p>Line 2</p><p>Line 3</p><p>Line 4</p><p>Line 5</p>
+    <p>Line 6</p><p>Line 7</p><p>Line 8</p><p>Line 9</p><p>Line 10</p>
+  </div>
+
+  <script>
+    (function () {
+      // One viewport threshold stands in for the four breakpoints the product
+      // measures on the elements themselves; the checks read the marked and the
+      // unmarked side, not the product's threshold arithmetic.
+      function apply() {
+        var narrow = window.innerWidth <= 1000;
+        var marked = document.querySelectorAll('[data-fixture-marks]');
+        for (var index = 0; index < marked.length; index += 1) {
+          var names = marked[index].getAttribute('data-fixture-marks').split(' ');
+          for (var name = 0; name < names.length; name += 1) {
+            marked[index].toggleAttribute(names[name], narrow);
+          }
+        }
+      }
+      window.addEventListener('resize', apply);
+      apply();
+    })();
+  </script>
+</body>
+</html>

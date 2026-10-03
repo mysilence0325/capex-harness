@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write scripts/browser-floor-lane/README.md
+/chromium-90-browser-floor-lane:
+  en: 9a9f24e460800209
+  zh: a8fc319d2b2aed3a
+/chromium-90-browser-floor-lane/why-it-lives-here:
+  en: cef3b0acc28fce56
+  zh: 30f6d6a2a6eb43ce
+/chromium-90-browser-floor-lane/get-the-portable-build:
+  en: bd75677f2bcbf4de
+  zh: 7bfb0db384bfeee6
+/chromium-90-browser-floor-lane/start-a-server:
+  en: bb0d022c1faf56d7
+  zh: e7e9999381b19c65
+/chromium-90-browser-floor-lane/run-the-lane:
+  en: e58c5ef8f6d872de
+  zh: e15a78abb6e1dec6
+/chromium-90-browser-floor-lane/what-each-check-means:
+  en: 9b64b16e73549be2
+  zh: ddc6241f62b6152d
+/chromium-90-browser-floor-lane/what-it-cannot-see:
+  en: a5cbca6134f09cf1
+  zh: efae0ab202c1702b
+/chromium-90-browser-floor-lane/why-this-is-a-manual-lane-not-a-ci-job:
+  en: 8d737a60b1e4f1da
+  zh: 88ba2a0679ff7244
+/chromium-90-browser-floor-lane/files:
+  en: 3fd2fd5103c79e64
+  zh: 1405c6e57aa1572c
