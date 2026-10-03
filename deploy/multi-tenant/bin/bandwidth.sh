@@ -9,6 +9,13 @@
 #
 #   容器本身不需要 NET_ADMIN —— 是宿主 nsenter 进去改的，租户容器不必放权。
 #
+# 为什么是两层 nsenter：
+#   -t 1 -m        先进入宿主的 mount 命名空间。节点代理镜像里【没有 tc】，而离线环境
+#                  装不了包；宿主文件系统里有。实测过：不加这层报
+#                  "nsenter: failed to execute tc: No such file or directory"。
+#   -t <pid> -n    再切到租户容器的网络命名空间。
+# 在宿主上直接跑这个脚本时，外层等于原地，所以同一段代码两边都能用。
+#
 # 重要：这是**运行时**规则，不在 compose 里。
 #   容器一旦重建（升级、改配置、bin/mt.sh up 之后），限速就没了，需要重新执行。
 #   要长期生效，把它挂在重建之后（例如自建的 post-up 脚本里逐个调用）。
@@ -102,14 +109,14 @@ print((d.get(sys.argv[2]) or {}).get(sys.argv[3], ""))' "$STATE_FILE" "$1" "$2" 
 apply_rules() {
   local tenant="$1" pid="$2" rate="$3" direction="$4"
   if [ "$direction" = "up" ] || [ "$direction" = "both" ]; then
-    nsenter -t "$pid" -n tc qdisc replace dev eth0 root tbf rate "$rate" burst 32kbit latency 400ms || return 1
+    nsenter -t 1 -m -- nsenter -t "$pid" -n tc qdisc replace dev eth0 root tbf rate "$rate" burst 32kbit latency 400ms || return 1
   fi
   if [ "$direction" = "down" ] || [ "$direction" = "both" ]; then
     # 下行是进入容器的流量，root qdisc 管不到，要 ingress qdisc + police（丢包式，TCP 会退避）。
-    nsenter -t "$pid" -n tc qdisc add dev eth0 handle ffff: ingress 2>/dev/null \
-      || nsenter -t "$pid" -n tc qdisc replace dev eth0 handle ffff: ingress 2>/dev/null || true
-    nsenter -t "$pid" -n tc filter del dev eth0 parent ffff: 2>/dev/null || true
-    nsenter -t "$pid" -n tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 \
+    nsenter -t 1 -m -- nsenter -t "$pid" -n tc qdisc add dev eth0 handle ffff: ingress 2>/dev/null \
+      || nsenter -t 1 -m -- nsenter -t "$pid" -n tc qdisc replace dev eth0 handle ffff: ingress 2>/dev/null || true
+    nsenter -t 1 -m -- nsenter -t "$pid" -n tc filter del dev eth0 parent ffff: 2>/dev/null || true
+    nsenter -t 1 -m -- nsenter -t "$pid" -n tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 \
       police rate "$rate" burst 32k drop flowid :1 || return 1
   fi
   return 0
@@ -144,15 +151,15 @@ show_one() {
   fi
   # 上行：root qdisc（tbf）。下行：ingress qdisc + police 过滤器。
   local up down
-  up="$(nsenter -t "$pid" -n tc qdisc show dev eth0 2>/dev/null | grep -o 'tbf.*rate [^ ]*' | head -1)"
-  down="$(nsenter -t "$pid" -n tc filter show dev eth0 parent ffff: 2>/dev/null | grep -o 'police .*rate [^ ]*' | head -1)"
+  up="$(nsenter -t 1 -m -- nsenter -t "$pid" -n tc qdisc show dev eth0 2>/dev/null | grep -o 'tbf.*rate [^ ]*' | head -1)"
+  down="$(nsenter -t 1 -m -- nsenter -t "$pid" -n tc filter show dev eth0 parent ffff: 2>/dev/null | grep -o 'police .*rate [^ ]*' | head -1)"
   if [ -n "$up" ]; then
     printf '  %-8s 上行已限速（%s）\n' "$t" "$(printf '%s' "$up" | grep -o 'rate [^ ]*')"
-    nsenter -t "$pid" -n tc -s qdisc show dev eth0 2>/dev/null | sed -n '2p' | sed 's/^ */            /'
+    nsenter -t 1 -m -- nsenter -t "$pid" -n tc -s qdisc show dev eth0 2>/dev/null | sed -n '2p' | sed 's/^ */            /'
   fi
   if [ -n "$down" ]; then
     printf '  %-8s 下行已限速（%s）\n' "$t" "$(printf '%s' "$down" | grep -o 'rate [^ ]*')"
-    nsenter -t "$pid" -n tc -s filter show dev eth0 parent ffff: 2>/dev/null \
+    nsenter -t 1 -m -- nsenter -t "$pid" -n tc -s filter show dev eth0 parent ffff: 2>/dev/null \
       | grep -E 'Sent .*pkt' | sed 's/^ */            /'
   fi
   [ -z "$up" ] && [ -z "$down" ] && printf '  %-8s 未限速\n' "$t"
@@ -232,9 +239,9 @@ case "$COMMAND" in
     PID="$(pid_or_empty "$TENANT")"
     if [ -z "$PID" ]; then not_running "$TENANT"; exit 1; fi
     removed=0
-    nsenter -t "$PID" -n tc qdisc del dev eth0 root 2>/dev/null && removed=1
-    nsenter -t "$PID" -n tc filter del dev eth0 parent ffff: 2>/dev/null && removed=1
-    nsenter -t "$PID" -n tc qdisc del dev eth0 ingress 2>/dev/null && removed=1
+    nsenter -t 1 -m -- nsenter -t "$PID" -n tc qdisc del dev eth0 root 2>/dev/null && removed=1
+    nsenter -t 1 -m -- nsenter -t "$PID" -n tc filter del dev eth0 parent ffff: 2>/dev/null && removed=1
+    nsenter -t 1 -m -- nsenter -t "$PID" -n tc qdisc del dev eth0 ingress 2>/dev/null && removed=1
     state_set "$TENANT" "" ""
     if [ "$removed" = "1" ]; then
       echo "已移除租户 $TENANT 的网络限制（上行与下行都清，意图也已删除）"

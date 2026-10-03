@@ -227,6 +227,46 @@ else
   skip "配额的实际拦写（需要先在 fstab 里开 prjquota 并重启）"
 fi
 
+# ---------------------------------------------------------------- 租户磁盘用量
+head_ "租户磁盘用量"
+MKEY2="$(grep -o '"metrics": *"[^"]*"' state/keys.json 2>/dev/null | sed 's/.*: *"//; s/"$//')"
+METRICS="$(curl -sSk -H "x-mt-registry-key: $MKEY2" "https://$IP:$EDGE/__mt/metrics" 2>/dev/null)"
+DISK="$(printf '%s' "$METRICS" | grep -E '^mt_tenant_disk_used_bytes' || true)"
+if [ -z "$DISK" ]; then
+  fail "指标里没有 mt_tenant_disk_used_bytes"
+else
+  # 用 grep -c 数行数，不用 wc -l：$(...) 会去掉结尾换行，wc -l 因此少数一行。
+  # 这个错我犯过一次——检查报"4/3"，而指标本身是对的，误报比没有检查更糟。
+  ALL="$(printf '%s' "$DISK" | grep -c '^mt_tenant_disk_used_bytes')"
+  NZ="$(printf '%s' "$DISK" | awk '$2 != 0' | grep -c '^mt_tenant_disk_used_bytes')"
+  assert_eq "$ALL" "$NZ" "磁盘用量指标全部非零（$NZ/$ALL）—— 0 会看起来像正常值"
+  # 与真实目录对账：同量级即可（指标按文件大小，du 按分配的块，本来就略有出入）
+  for t in $TENANTS; do
+    M="$(printf '%s' "$DISK" | awk -v t="$t" '$0 ~ "tenant=\"" t "\"" {print $2}')"
+    D="$(du -sb "tenants/$t" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$M" ] || [ -z "$D" ]; then skip "$t 无法对账"; continue; fi
+    RATIO="$(awk -v m="$M" -v d="$D" 'BEGIN{ if (d == 0) { print "na"; exit } r = m / d; print (r > 0.8 && r <= 1.01) ? "ok" : "bad" }')"
+    [ "$RATIO" = "ok" ] && pass "$t 指标 $M 与目录 $D 同量级" || fail "$t 指标 $M 与目录 $D 不成比例"
+  done
+fi
+
+# 配额意图：设一个，指标里必须出现限额，再清掉
+if [ "$QUICK" = yes ]; then
+  skip "配额目标指标（--quick 跳过）"
+else
+  QT="$(printf '%s' "$TENANTS" | awk '{print $1}')"
+  bin/mt.sh quota set "$QT" 2g >/dev/null 2>&1
+  # 代理 15 秒一轮，指标要等它上报
+  FOUND=""
+  for _ in $(seq 1 12); do
+    sleep 5
+    FOUND="$(curl -sSk -H "x-mt-registry-key: $MKEY2" "https://$IP:$EDGE/__mt/metrics" 2>/dev/null | grep -E '^mt_tenant_disk_limit_bytes' | awk -v t="$QT" '$0 ~ "tenant=\"" t "\"" {print $2}')"
+    [ -n "$FOUND" ] && break
+  done
+  assert_eq "2147483648" "$FOUND" "配额意图出现在指标里（2g）"
+  bin/mt.sh quota clear "$QT" >/dev/null 2>&1
+fi
+
 # ---------------------------------------------------------------- 多节点与注册
 head_ "注册与节点"
 NODES="$(python3 -c "import json;d=json.load(open('state/runtimes.json'))['runtimes'];print(','.join(sorted({d[t]['node'] for t in d})))" 2>/dev/null)"

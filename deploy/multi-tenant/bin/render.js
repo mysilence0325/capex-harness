@@ -738,6 +738,12 @@ ${loggingBlock()}
     build: ./node-agent
     image: mt-node-agent:local
     container_name: ${NAME_PREFIX}node-agent
+    # 配额与限速要 nsenter 进租户的网络命名空间。代理自己的 PID 命名空间里看不到
+    # 那些进程（实测 /proc/<pid>/ns/net 不存在），所以要宿主 PID 命名空间；
+    # 又因为代理镜像里没有 tc，还需要宿主的 mount 命名空间 —— 命令里用
+    # nsenter -t 1 -m -- nsenter -t <pid> -n tc … 两层进去，不必给镜像装东西。
+    pid: host
+    privileged: true
     restart: unless-stopped
     # Host networking: it must reach the control plane and be reachable by it, and
     # this host cannot route bridge-published ports.

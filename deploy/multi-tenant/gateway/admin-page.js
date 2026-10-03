@@ -208,6 +208,31 @@ function consolePage({ user, role }) {
 </div>
 <pre id="ops-out" style="display: none; max-height: 340px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: #0b1020; color: #d6e2ff; padding: 12px; border-radius: 8px"></pre>
 
+<h2>配额与限速</h2>
+<div class="card">
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap">
+    <input id="lim-tenant" placeholder="租户名" size="12">
+    <button onclick="limitsReport()">查看当前</button>
+    <span class="muted">限速在容器重建后需要重新应用；bin/mt.sh up 会自动恢复。</span>
+  </div>
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px">
+    <input id="lim-rate" placeholder="速率，例如 10mbit" size="16">
+    <select id="lim-dir">
+      <option value="up">上行（容器发出）</option>
+      <option value="down">下行（容器下载）</option>
+      <option value="both">两个方向</option>
+    </select>
+    <button onclick="bandwidthSet()">限速</button>
+    <button onclick="bandwidthClear()">取消限速</button>
+  </div>
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px">
+    <input id="lim-size" placeholder="配额，例如 2g" size="16">
+    <button onclick="quotaSet()">设磁盘配额</button>
+    <button onclick="quotaClear()">取消配额</button>
+    <span class="muted">配额要文件系统以 prjquota 挂载才能强制；未启用时只记下意图，指标与告警照样工作。</span>
+  </div>
+</div>
+
 <h2>租户移交</h2>
 <div class="card">
   <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap">
@@ -501,6 +526,62 @@ async function tenantImport() {
   if (!confirm('把 ' + archive + ' 导入为租户 ' + tenant + '？\n导入后还需要 render + up 才会启动它。')) return
   showOps('导入 ' + archive + ' → ' + tenant,
     await post('api/tenant', { action: 'ops', node: 'local', op: 'tenant-import', params: { archive, tenant } }))
+}
+
+/**
+ * Run one host operation for the quota/rate card and show what it printed.
+ *
+ * These go through the node agent like every other host operation: the console has no
+ * Docker access, and the agent is where the tenant's filesystem and network actually are.
+ *
+ * @param label - what to call the operation in the output panel.
+ * @param op - the agent operation name.
+ * @param params - its validated parameters.
+ */
+async function limitsOp(label, op, params) {
+  showOps(label, await post('api/tenant', { action: 'ops', node: 'local', op, params }))
+}
+
+/** @returns the tenant the card is pointed at, or shows why it cannot proceed. */
+function limitsTenant() {
+  const tenant = document.querySelector('#lim-tenant').value.trim()
+  if (tenant === '') { showOps('配额与限速', { ok: false, error: '先填租户名' }); return undefined }
+  return tenant
+}
+
+async function limitsReport() {
+  const tenant = limitsTenant()
+  if (tenant === undefined) return
+  await limitsOp('租户 ' + tenant + ' 的配额与限速', 'limits-report', { tenant })
+}
+
+async function bandwidthSet() {
+  const tenant = limitsTenant()
+  if (tenant === undefined) return
+  const rate = document.querySelector('#lim-rate').value.trim()
+  const direction = document.querySelector('#lim-dir').value
+  if (rate === '') { showOps('限速', { ok: false, error: '先填速率，例如 10mbit' }); return }
+  await limitsOp('限速 ' + tenant + ' → ' + rate + '（' + direction + '）', 'bandwidth-set', { tenant, rate, direction })
+}
+
+async function bandwidthClear() {
+  const tenant = limitsTenant()
+  if (tenant === undefined) return
+  await limitsOp('取消 ' + tenant + ' 的限速', 'bandwidth-clear', { tenant })
+}
+
+async function quotaSet() {
+  const tenant = limitsTenant()
+  if (tenant === undefined) return
+  const size = document.querySelector('#lim-size').value.trim()
+  if (size === '') { showOps('配额', { ok: false, error: '先填配额，例如 2g' }); return }
+  await limitsOp('给 ' + tenant + ' 设配额 ' + size, 'quota-set', { tenant, size })
+}
+
+async function quotaClear() {
+  const tenant = limitsTenant()
+  if (tenant === undefined) return
+  await limitsOp('取消 ' + tenant + ' 的配额', 'quota-clear', { tenant })
 }
 
 async function loadHistory() {

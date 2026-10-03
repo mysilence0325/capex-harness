@@ -549,7 +549,10 @@ async function sync(nodeAddress, force = false) {
     } catch (error) {
       console.error(`mt-node-agent: token lookup for ${tenant} failed: ${error.message}`)
     }
-    const signature = `${target}|${token ?? ''}`
+    // 测量值与配额意图也算"变化"：否则磁盘用量只在容器重启时更新一次，
+    // 而改配额意图永远不会触发重报 —— 实测过，指标会一直停在旧值。
+    // 大小是 5 分钟缓存的，所以这最多让每个租户每 5 分钟重报一次。
+    const signature = `${target}|${token ?? ''}|${measureTenant(tenant)}|${quotaFor(tenant)}`
     if (!force && reported.get(tenant) === signature) continue
     // A runtime that has not printed its token yet would be registered unusable,
     // so wait for the next pass instead.
@@ -599,6 +602,48 @@ const OPS = {
     argv: (params) => [params.tenant],
     validate: (params) => (isTenantId(params.tenant) ? undefined : 'tenant 不是合法的租户 id'),
     timeoutMs: 300_000,
+  },
+  // 配额与限速：与导出/导入同一套——控制台没有 Docker，宿主操作都经代理执行。
+  // 参数一律先过白名单：速率和大小要进入 tc / xfs_quota 的命令行。
+  'limits-report': {
+    script: 'bin/limits-report.sh',
+    argv: () => [],
+    timeoutMs: 60_000,
+  },
+  'bandwidth-set': {
+    script: 'bin/bandwidth.sh',
+    argv: (params) => ['set', params.tenant, params.rate, `--${params.direction ?? 'up'}`],
+    validate: (params) => {
+      if (!isTenantId(params.tenant)) return 'tenant 不是合法的租户 id'
+      if (typeof params.rate !== 'string' || !/^[0-9]{1,5}(kbit|mbit|gbit)$/.test(params.rate)) {
+        return 'rate 形如 10mbit'
+      }
+      if (!['up', 'down', 'both'].includes(params.direction ?? 'up')) return 'direction 只能是 up / down / both'
+      return undefined
+    },
+    timeoutMs: 60_000,
+  },
+  'bandwidth-clear': {
+    script: 'bin/bandwidth.sh',
+    argv: (params) => ['clear', params.tenant],
+    validate: (params) => (isTenantId(params.tenant) ? undefined : 'tenant 不是合法的租户 id'),
+    timeoutMs: 60_000,
+  },
+  'quota-set': {
+    script: 'bin/quota.sh',
+    argv: (params) => ['set', params.tenant, params.size],
+    validate: (params) => {
+      if (!isTenantId(params.tenant)) return 'tenant 不是合法的租户 id'
+      if (typeof params.size !== 'string' || !/^[0-9]{1,6}[kmgt]$/.test(params.size)) return 'size 形如 2g'
+      return undefined
+    },
+    timeoutMs: 60_000,
+  },
+  'quota-clear': {
+    script: 'bin/quota.sh',
+    argv: (params) => ['clear', params.tenant],
+    validate: (params) => (isTenantId(params.tenant) ? undefined : 'tenant 不是合法的租户 id'),
+    timeoutMs: 60_000,
   },
   'tenant-import': {
     script: 'bin/tenant-import.sh',
@@ -849,7 +894,7 @@ function runOp(name, params) {
  * operations are deliberately absent — an operator must be able to read a disk
  * report while an upgrade is running.
  */
-const MUTATING_OPS = new Set(['disk-prune-images', 'disk-prune-sessions', 'backup', 'restore', 'upgrade'])
+const MUTATING_OPS = new Set(['disk-prune-images', 'disk-prune-sessions', 'backup', 'restore', 'upgrade', 'bandwidth-set', 'bandwidth-clear', 'quota-set', 'quota-clear'])
 
 /** The mutating operation currently running, if any. */
 let running
