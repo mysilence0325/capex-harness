@@ -415,5 +415,18 @@ else
   warn "没有设置 MT_SESSION_RETENTION_DAYS，也没有自动清理：会话会一直增长，磁盘会慢慢满"
 fi
 
+# 节点代理的控制面地址。留空时代理只提供运维能力、不做租户发现与注册，而且这是静默的：
+# 界面上一切正常，直到某个租户重启（启动 token 会轮换）之后，统一入口才开始一直返回 303。
+# 这一项曾经丢掉过一次（restore 用归档里的 .env 覆盖了当前配置），排查了一整轮，所以它是失败项。
+if [ -n "$(grep '^MT_CONTROL_PLANE=' .env 2>/dev/null | cut -d= -f2-)" ]; then
+  if [ -n "$(grep '^MT_CONTROL_PLANE_CA=' .env 2>/dev/null | cut -d= -f2-)" ]; then
+    ok "节点代理已配置控制面地址与 CA（会注册租户）"
+  else
+    warn "节点代理有控制面地址但没有 MT_CONTROL_PLANE_CA：HTTPS 自签证书下注册会失败"
+  fi
+else
+  bad "MT_CONTROL_PLANE 为空：节点代理不会注册租户，租户重启后统一入口会一直返回 303"
+fi
+
 printf '\n\033[36m== 结论 ==\033[0m\n  %s 项通过, %s 项警告, %s 项失败\n' "$OK" "$WARN" "$BAD"
 [ "$BAD" -eq 0 ] || exit 1
