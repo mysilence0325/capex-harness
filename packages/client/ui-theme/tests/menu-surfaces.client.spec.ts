@@ -49,7 +49,7 @@ function materialOverrides(css: string, selectors: ReadonlySet<string>): string[
     const targetsMenu = rule.selectors.some(selector => !selector.includes('::') && [...selector.matchAll(/\.([\w-]+)/g)]
       .some(match => selectors.has(match[1]!)))
     return targetsMenu ? rule.declarations
-      .filter(([name]) => ['background', 'background-color', 'backdrop-filter', 'anchor-name'].includes(name))
+      .filter(([name]) => ['background', 'background-color', 'backdrop-filter'].includes(name))
       .map(([name]) => `${rule.selectors.join(', ')}: ${name}`) : []
   })
 }

@@ -153,7 +153,7 @@ describe('client stylesheet downleveling', () => {
     }
     expect(counts).toEqual({
       has: 10, container: 0, gutter: 0, fieldSizing: 2, accentColor: 5,
-      anchorPositioning: 4, startingStyle: 1, textWrap: 1, selectorList: 0,
+      anchorPositioning: 0, startingStyle: 1, textWrap: 1, selectorList: 0,
     })
   })
 })

@@ -7,7 +7,8 @@
  * is asserted here is the wiring the clamp depends on: the
  * listeners and the panel-size observer are attached while open and released on
  * close, a size change replays the placement, and the hook still works where
- * `ResizeObserver` does not exist.
+ * `ResizeObserver` does not exist. The cover placement is asserted the same way,
+ * with the anchor's rectangle stated by the test.
  */
 import { useRef } from 'react'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -16,6 +17,7 @@ import { useAnchoredPosition } from '../src/useAnchoredPosition.ts'
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
@@ -59,6 +61,23 @@ function Host({ open, align }: { open: boolean; align?: 'start' | 'end' }) {
     <>
       <button ref={anchorRef} type="button">anchor</button>
       {open && <div ref={panelRef} data-testid="panel" style={position ?? { visibility: 'hidden' }} />}
+    </>
+  )
+}
+
+/**
+ * Host component that covers a panel over its anchor and reports the copied rectangle.
+ * @param props - whether the panel is shown.
+ * @returns the anchor and, while shown, the panel carrying the copied geometry.
+ */
+function CoverHost({ open }: { open: boolean }) {
+  const anchorRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const position = useAnchoredPosition({ open, placement: 'cover', anchorRef, panelRef })
+  return (
+    <>
+      <button ref={anchorRef} type="button">anchor</button>
+      {open && <div ref={panelRef} data-testid="cover" style={position ?? { visibility: 'hidden' }} />}
     </>
   )
 }
@@ -141,6 +160,76 @@ describe('useAnchoredPosition', () => {
     const add = vi.spyOn(window, 'addEventListener')
 
     render(<Host open={false} />)
+
+    expect(made).toHaveLength(0)
+    expect(add.mock.calls.filter(([type]) => type === 'scroll' || type === 'resize')).toEqual([])
+    add.mockRestore()
+  })
+
+  it('copies the anchor rectangle onto the panel without clamping it into the viewport', () => {
+    // The whole point of the cover placement is overlaying the anchor, so the
+    // panel keeps a rectangle the clamp would have moved: off both viewport
+    // edges, and larger than the viewport itself.
+    vi.stubGlobal('innerWidth', 100)
+    vi.stubGlobal('innerHeight', 100)
+    vi.spyOn(HTMLButtonElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(900, -40, 320, 500))
+
+    const { getByTestId } = render(<CoverHost open />)
+    const panel = getByTestId('cover')
+
+    expect(panel.style.left).toBe('900px')
+    expect(panel.style.top).toBe('-40px')
+    expect(panel.style.width).toBe('320px')
+    expect(panel.style.height).toBe('500px')
+  })
+
+  it('re-copies the anchor rectangle after a commit that moved it', () => {
+    const rect = vi.spyOn(HTMLButtonElement.prototype, 'getBoundingClientRect')
+    rect.mockReturnValue(new DOMRect(10, 20, 100, 30))
+    const { getByTestId, rerender } = render(<CoverHost open />)
+    expect(getByTestId('cover').style.left).toBe('10px')
+    expect(getByTestId('cover').style.width).toBe('100px')
+
+    // A caller can move its anchor without a scroll, a resize, or a size change
+    // (Menu positions a portalled list in its own layout effect), so each commit
+    // re-reads the rectangle. One field moves per commit.
+    const moved = [
+      new DOMRect(11, 20, 100, 30),
+      new DOMRect(11, 21, 100, 30),
+      new DOMRect(11, 21, 101, 30),
+      new DOMRect(11, 21, 101, 31),
+    ]
+    for (const next of moved) {
+      rect.mockReturnValue(next)
+      rerender(<CoverHost open />)
+      expect(getByTestId('cover').style.left).toBe(`${next.left}px`)
+      expect(getByTestId('cover').style.top).toBe(`${next.top}px`)
+      expect(getByTestId('cover').style.width).toBe(`${next.width}px`)
+      expect(getByTestId('cover').style.height).toBe(`${next.height}px`)
+    }
+
+    // A commit that measures the same rectangle keeps the recorded geometry.
+    rerender(<CoverHost open />)
+    expect(getByTestId('cover').style.left).toBe('11px')
+  })
+
+  it('observes the anchor while the cover is open and disconnects when it closes', () => {
+    const made = stubResizeObserver()
+    const ui = render(<CoverHost open />)
+
+    expect(made).toHaveLength(1)
+    expect(made[0]?.observed).toEqual([ui.getByRole('button')])
+
+    ui.rerender(<CoverHost open={false} />)
+
+    expect(made[0]?.disconnected).toBe(true)
+  })
+
+  it('attaches nothing while the cover is closed', () => {
+    const made = stubResizeObserver()
+    const add = vi.spyOn(window, 'addEventListener')
+
+    render(<CoverHost open={false} />)
 
     expect(made).toHaveLength(0)
     expect(add.mock.calls.filter(([type]) => type === 'scroll' || type === 'resize')).toEqual([])
