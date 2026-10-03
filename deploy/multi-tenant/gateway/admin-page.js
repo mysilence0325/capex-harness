@@ -207,6 +207,21 @@ function consolePage({ user, role }) {
 </div>
 <pre id="ops-out" style="display: none; max-height: 340px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: #0b1020; color: #d6e2ff; padding: 12px; border-radius: 8px"></pre>
 
+<h2>租户移交</h2>
+<div class="card">
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap">
+    <input id="tr-tenant" placeholder="租户名" size="12">
+    <button onclick="tenantExport()">导出为归档</button>
+    <span class="muted">写出 exports/&lt;租户&gt;-&lt;时间&gt;.tar.gz（含口令哈希与模型凭据，权限 0600）</span>
+  </div>
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px">
+    <input id="tr-archive" placeholder="归档文件名" size="34">
+    <input id="tr-as" placeholder="导入为（新租户名）" size="14">
+    <button onclick="tenantImport()">导入</button>
+    <span class="muted">只能是 exports/ 里的文件名；导入会分配新端口与服务名，口令不变</span>
+  </div>
+</div>
+
 <h2>操作历史</h2>
 <div class="card">
   <div class="row" style="justify-content: space-between; align-items: center">
@@ -214,7 +229,7 @@ function consolePage({ user, role }) {
     <button onclick="loadHistory()">刷新（最近 100 条）</button>
   </div>
   <table id="history" style="margin-top: 10px">
-    <thead><tr><th style="width: 180px">时间</th><th style="width: 160px">动作</th><th style="width: 150px">对象</th><th>结果</th></tr></thead>
+    <thead><tr><th style="width: 180px">时间</th><th style="width: 120px">来源</th><th style="width: 160px">动作</th><th style="width: 150px">对象</th><th>结果</th></tr></thead>
     <tbody><tr><td colspan="4" class="muted">点上面按钮加载</td></tr></tbody>
   </table>
 </div>
@@ -456,16 +471,43 @@ async function saveEgressAllow() {
  * up "who restarted that tenant" needs the record the control plane wrote, not what
  * this tab happens to have seen.
  */
+/**
+ * Export one tenant to an archive, through the node agent.
+ *
+ * The console has no Docker access, so this is a host operation like the others: it goes
+ * to the agent as a named operation, and the agent validates the tenant id.
+ */
+async function tenantExport() {
+  const tenant = document.querySelector('#tr-tenant').value.trim()
+  if (tenant === '') { showOps('导出', { ok: false, error: '先填租户名' }); return }
+  showOps('导出租户 ' + tenant, await post('api/tenant', { action: 'ops', node: 'local', op: 'tenant-export', params: { tenant } }))
+}
+
+/**
+ * Import a tenant from an archive in exports/.
+ *
+ * The archive is named, never a path: the agent rejects anything that is not a bare
+ * file name, because this field arrives from a browser session.
+ */
+async function tenantImport() {
+  const archive = document.querySelector('#tr-archive').value.trim()
+  const tenant = document.querySelector('#tr-as').value.trim()
+  if (archive === '' || tenant === '') { showOps('导入', { ok: false, error: '归档名与新租户名都要填' }); return }
+  if (!confirm('把 ' + archive + ' 导入为租户 ' + tenant + '？\n导入后还需要 render + up 才会启动它。')) return
+  showOps('导入 ' + archive + ' → ' + tenant,
+    await post('api/tenant', { action: 'ops', node: 'local', op: 'tenant-import', params: { archive, tenant } }))
+}
+
 async function loadHistory() {
   const answer = await post('api/tenant', { action: 'ops-history', limit: 100 })
   const body = document.querySelector('#history tbody')
   if (!answer.ok) {
-    body.innerHTML = '<tr><td colspan="4" class="muted">读取失败：' + escapeHtml(answer.error || '') + '</td></tr>'
+    body.innerHTML = '<tr><td colspan="5" class="muted">读取失败：' + escapeHtml(answer.error || '') + '</td></tr>'
     return
   }
   const entries = answer.entries || []
   if (entries.length === 0) {
-    body.innerHTML = '<tr><td colspan="4" class="muted">还没有记录</td></tr>'
+    body.innerHTML = '<tr><td colspan="5" class="muted">还没有记录</td></tr>'
     return
   }
   body.innerHTML = entries.map((entry) => {
@@ -476,7 +518,10 @@ async function loadHistory() {
       : entry.status !== undefined ? 'HTTP ' + entry.status
         : entry.result !== undefined ? entry.result
           : entry.note !== undefined ? entry.note : '—'
-    return '<tr><td class="muted">' + escapeHtml(when) + '</td><td>' + escapeHtml(entry.action || '?')
+    // 两份审计合在一起，所以要说清每条来自哪一边：控制台自己的操作，还是网关
+    // 替租户用户做的事（登录、改密、跨租户拒绝）。后者以前根本看不到。
+    const from = entry.source === 'gateway' ? '网关' : '控制台'
+    return '<tr><td class="muted">' + escapeHtml(when) + '</td><td class="muted">' + from + '</td><td>' + escapeHtml(entry.action || '?')
       + '</td><td>' + escapeHtml(entry.tenant || '-') + what + '</td><td>' + escapeHtml(String(outcome)) + who + '</td></tr>'
   }).join('')
 }

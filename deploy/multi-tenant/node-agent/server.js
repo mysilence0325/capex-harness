@@ -517,6 +517,26 @@ const nodeAddress = resolveNodeAddress()
  * instant, a rolling upgrade recreates every tenant container in turn.
  */
 const OPS = {
+  // 租户移交。归档名必须是纯文件名：它由控制台传入，而控制台是可被管理员会话访问的，
+  // 允许路径就会变成"用一次导入去写任意位置"。这里只用正则挡，不接受任何分隔符。
+  'tenant-export': {
+    script: 'bin/tenant-export.sh',
+    argv: (params) => [params.tenant],
+    validate: (params) => (isTenantId(params.tenant) ? undefined : 'tenant 不是合法的租户 id'),
+    timeoutMs: 300_000,
+  },
+  'tenant-import': {
+    script: 'bin/tenant-import.sh',
+    argv: (params) => [params.archive, '--as', params.tenant],
+    validate: (params) => {
+      if (!isTenantId(params.tenant)) return 'tenant 不是合法的租户 id'
+      if (typeof params.archive !== 'string' || !/^[A-Za-z0-9._-]+\.tar\.gz$/.test(params.archive)) {
+        return 'archive 必须是 exports/ 里的文件名，形如 delta-20260101T000000Z.tar.gz'
+      }
+      return undefined
+    },
+    timeoutMs: 300_000,
+  },
   'disk-report': {
     script: 'bin/disk.sh',
     argv: () => ['report'],
