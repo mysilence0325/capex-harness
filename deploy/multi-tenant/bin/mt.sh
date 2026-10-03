@@ -29,7 +29,9 @@
 #   bin/mt.sh admin-passwd       set the administrator console password (revokes sessions)
 #   bin/mt.sh admin-kick         revoke every admin session, keep the password
 #   bin/mt.sh admin-users        list | add | passwd | remove administrators and roles
+#   bin/mt.sh bandwidth         per-tenant network rate limit (show/set/clear)
 #   bin/mt.sh keys              generate the per-purpose keys (metrics/register/ops)
+#   bin/mt.sh bandwidth         per-tenant network rate limit (show/set/clear)
 #   bin/mt.sh keys              generate the per-purpose keys (metrics/register/ops)
 #   bin/mt.sh usage [--days N] [--csv|--json]   per-tenant model usage, no rates
 #   bin/mt.sh export <tenant>    write a portable archive of one tenant
@@ -664,6 +666,7 @@ case "${1:-}" in
   admin-passwd) shift; cmd_admin_passwd "$@" ;; # 设置管理控制台的管理员密码（同时吊销已登录会话）
   admin-kick) shift; node_run bin/admin-kick.js ;;    # 只吊销所有管理员会话，不改密码
   admin-users) shift; node_run bin/admin-users.js "$@" ;;  # 管理员与角色：list/add/passwd/remove
+  bandwidth) shift; bash bin/bandwidth.sh "$@" ;;                # 租户网络限速：show/set/clear
   keys)    shift; node_run bin/keys.js "$@" ;;                     # 生成/查看分用途密钥
   usage)   shift; node_run bin/usage.js "$@" ;;                  # 每租户模型用量（不带费率）
   export)  shift; node_run bin/tenant-transfer.js export "$@" ;;   # 导出一个租户（移交归档）
