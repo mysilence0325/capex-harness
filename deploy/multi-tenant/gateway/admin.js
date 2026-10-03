@@ -20,6 +20,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const keys = require('./keys.js')
 const http = require('node:http')
 const { appendRotated, rotatedFiles } = require('./rotate.js')
 /** Where the administrator's own credential lives, separate from any tenant. */
@@ -467,7 +468,10 @@ class AdminConsole {
         method: 'POST',
         path: url.pathname,
         headers: {
-          'x-mt-registry-key': this.options.registryKey,
+          // 运维密钥。这些调用都是网关替控制台向代理发起的（执行运维、探活），
+          // 走的是"能改东西"的那条链路，所以出示运维密钥而不是共用密钥。
+          // 代理同时接受旧密钥，因此两端切换的先后都不影响可用性。
+          'x-mt-registry-key': keys.readKeys(this.options.stateDir).ops,
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
         },
@@ -511,7 +515,10 @@ class AdminConsole {
         method: 'POST',
         path: url.pathname,
         headers: {
-          'x-mt-registry-key': this.options.registryKey,
+          // 运维密钥。这些调用都是网关替控制台向代理发起的（执行运维、探活），
+          // 走的是"能改东西"的那条链路，所以出示运维密钥而不是共用密钥。
+          // 代理同时接受旧密钥，因此两端切换的先后都不影响可用性。
+          'x-mt-registry-key': keys.readKeys(this.options.stateDir).ops,
           ...(payload === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }),
         },
         agent: false,

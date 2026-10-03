@@ -18,6 +18,7 @@
 const fs = require('node:fs')
 const crypto = require('node:crypto')
 const path = require('node:path')
+const keys = require('../gateway/keys.js')
 
 const ROOT = path.resolve(__dirname, '..')
 const ARGV = process.argv.slice(2)
@@ -94,6 +95,21 @@ for (const tenant of tenants) {
       process.exit(1)
     }
   }
+}
+
+// 分用途密钥：首次渲染时生成，并把代理需要的两把写成文件挂给它。
+//
+// 代理入站 /ops 用运维密钥、出站注册用注册密钥。网关替控制台调代理时也出示运维密钥，
+// 所以控制台在拆分后照常工作——但前提是这两端都能读到各自的密钥文件。
+//
+// 注意常量名是 ROOT（大写）：写成 root 会让渲染直接崩溃，而崩溃的表现是
+// "compose 没更新"，看起来像渲染没跑，不像代码写错了。
+const KEY_STATE_DIR = path.join(ROOT, 'state')
+keys.generateKeys(KEY_STATE_DIR)
+for (const purpose of ['ops', 'register']) {
+  fs.writeFileSync(path.join(KEY_STATE_DIR, `${purpose}.key`), `${keys.readKeys(KEY_STATE_DIR)[purpose]}\n`, {
+    mode: 0o600,
+  })
 }
 
 const edgePort = Number(process.env.MT_EDGE_PORT ?? 8090)
@@ -710,6 +726,9 @@ ${loggingBlock()}
       MT_CONTROL_PLANE: \${MT_CONTROL_PLANE:-}
       MT_CONTROL_PLANE_CA: \${MT_CONTROL_PLANE_CA:-}
       MT_REGISTRY_KEY_FILE: /key/registry.key
+      # 入站运维与出站注册各用一把；两把都接受旧共用密钥作为回退。
+      MT_OPS_KEY_FILE: /key/ops.key
+      MT_REGISTER_KEY_FILE: /key/register.key
       MT_NETWORK: \${MT_NETWORK:-mt-net}
       MT_CONTAINER_NAME_PREFIX: \${MT_CONTAINER_NAME_PREFIX:-mt-}
       MT_PROJECT_DIR: ${hostRoot()}

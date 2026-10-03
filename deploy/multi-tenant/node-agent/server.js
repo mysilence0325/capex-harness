@@ -804,7 +804,9 @@ function authorized(req) {
   const presented = req.headers['x-mt-registry-key']
   if (typeof presented !== 'string' || presented === '') return false
   // 运维 key 优先；未配置时回退到注册密钥。
-  return presented === (opsKey !== '' ? opsKey : registryKey)
+  // 运维密钥与旧共用密钥都接受。两把都收是刻意的：部署时两端不会同时切换，
+  // 只认新密钥会在切换的窗口里把控制台的运维按钮打断（我这么断过一次）。
+  return presented === opsKey || presented === registryKey
 }
 
 /**
