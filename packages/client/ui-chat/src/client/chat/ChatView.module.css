@@ -125,11 +125,10 @@
 }
 
 /* The last visible row before the status must contain output, not an input.
-   Hidden and empty seats do not separate a user message from the status. */
-.column > :nth-last-child(2 of :not([hidden]):not(.flowItem:is(:empty, :has(> [data-slot="conversation.chat.node"]:empty)))):is(
-  .flowItem:not([data-chat-flow-kind="user"]):not([data-chat-flow-kind="steering"]):not([data-chat-flow-kind="turn-trigger"]),
-  [data-chat-group-key]
-) ~ .running > .runningDivider {
+   Hidden and empty seats do not separate a user message from the status; both
+   are DOM facts, so ChatView mirrors them onto the column (use-status-tail.ts)
+   for the engines that cannot evaluate an "of" selector list or :has(). */
+.column[data-chat-status-tail="output"] > .running > .runningDivider {
   display: block;
 }
 

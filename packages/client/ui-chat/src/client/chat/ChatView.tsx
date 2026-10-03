@@ -21,6 +21,7 @@ import { TurnNavigator } from './TurnNavigator.tsx'
 import { RunningStatus } from './RunningStatus.tsx'
 import { mergeTurnRailItems } from './turn-rail-items.ts'
 import { useChatScroll } from './use-chat-scroll.ts'
+import { useStatusTail } from './use-status-tail.ts'
 import { fileMediaUrl, resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 import css from './ChatView.module.css'
 
@@ -236,6 +237,7 @@ export function ChatView({
     submissionId: visibleSubmissions.at(-1)?.requestId ?? null,
     loadedTurns: turnNavigationItems,
   })
+  useStatusTail(scroll.columnRef, running)
 
   return (
     <div className={css.frame}>

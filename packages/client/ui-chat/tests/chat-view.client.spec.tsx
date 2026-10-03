@@ -4179,6 +4179,8 @@ describe('ChatView', () => {
     const column = view.container.querySelector('[data-chat-flow]')!
     const status = column.querySelector('[data-chat-running]')
     expect(column.lastElementChild).toBe(status)
+    // The divider rule reads this marker instead of an "of" selector list.
+    expect(column.getAttribute('data-chat-status-tail')).toBe('output')
     expect(within(status as HTMLElement).getByRole('status').textContent).toBe('深度求索中')
     expect(status?.lastElementChild?.textContent).toBe('深度求索中')
     const icon = status?.querySelector('svg')?.parentElement

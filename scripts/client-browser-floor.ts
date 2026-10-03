@@ -22,12 +22,14 @@ export const CLIENT_FLOOR_APIS: readonly string[] = [
   'AbortSignal.any',
   'AbortSignal.timeout',
   'AbortSignal.prototype.throwIfAborted',
-  // Third-party payloads reach these unguarded; pdf.js needs all four in the page
+  // Third-party payloads reach these unguarded; pdf.js needs all six in the page
   // realm and in its Worker.
   'Iterator',
   'Promise.try',
   'URL.parse',
   'Uint8Array.fromBase64',
+  'RegExp.escape',
+  'Response.prototype.bytes',
 ]
 
 /**
@@ -35,8 +37,9 @@ export const CLIENT_FLOOR_APIS: readonly string[] = [
  *
  * A Worker is its own realm and never evaluates the shell's compat entry, so a
  * payload that calls one of these throws there even though the page works.
- * `structuredClone` is deliberately absent: no shipped payload calls it, and
- * its full copy semantics do not belong in an injected preamble.
+ * Membership follows the shipped payloads: an API one of them calls belongs
+ * here. `structuredClone` is the one entry left out, because no shipped payload
+ * calls it and its full copy semantics do not belong in an injected preamble.
  */
 export const CLIENT_FLOOR_WORKER_APIS: readonly string[] = [
   'Iterator',
@@ -53,6 +56,8 @@ export const CLIENT_FLOOR_WORKER_APIS: readonly string[] = [
   'AbortSignal.prototype.throwIfAborted',
   'AbortSignal.any',
   'AbortSignal.timeout',
+  'RegExp.escape',
+  'Response.prototype.bytes',
 ]
 
 /**
@@ -166,6 +171,60 @@ export const CLIENT_FLOOR_WORKER_PREAMBLE = `(function () {
         controller.abort(new DOMException('The operation timed out.', 'TimeoutError'));
       }, milliseconds);
       return controller.signal;
+    });
+  }
+  var reverseSolidus = '\\u005c';
+  // Code units 9-13, in order: tab, line feed, vertical tab, form feed, carriage return.
+  var controlEscapes = 'tnvfr';
+  var escapedSyntax = '^$' + reverseSolidus + '.*+?()[]{}|/';
+  // U+0027 and U+0060 are the two other punctuators a quoted literal cannot spell.
+  var otherPunctuators = ',-=<>#&!%:;@~' + String.fromCharCode(39, 96) + '"';
+  var escapedWhitespace = ' \\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
+  var hexDigits = '0123456789abcdef';
+  function encodeCodeUnit(unit) {
+    var width = unit < 256 ? 2 : 4;
+    var hex = '';
+    var remaining = unit;
+    for (var digits = 0; digits < width; digits += 1) {
+      hex = hexDigits.charAt(remaining % 16) + hex;
+      remaining = Math.floor(remaining / 16);
+    }
+    return reverseSolidus + (width === 2 ? 'x' : 'u') + hex;
+  }
+  function isAsciiAlphanumeric(unit) {
+    return (unit >= 48 && unit <= 57) || (unit >= 65 && unit <= 90) || (unit >= 97 && unit <= 122);
+  }
+  function isUnpairedSurrogate(value, index, unit) {
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      var next = value.charCodeAt(index + 1);
+      return !(next >= 0xdc00 && next <= 0xdfff);
+    }
+    if (unit >= 0xdc00 && unit <= 0xdfff) {
+      var previous = value.charCodeAt(index - 1);
+      return !(previous >= 0xd800 && previous <= 0xdbff);
+    }
+    return false;
+  }
+  define(RegExp, 'escape', function escape(value) {
+    if (typeof value !== 'string') throw new TypeError('RegExp.escape expects a string');
+    var result = '';
+    var index = 0;
+    while (index < value.length) {
+      var unit = value.charCodeAt(index);
+      var character = value.charAt(index);
+      if (index === 0 && isAsciiAlphanumeric(unit)) result += encodeCodeUnit(unit);
+      else if (unit >= 9 && unit <= 13) result += reverseSolidus + controlEscapes.charAt(unit - 9);
+      else if (escapedSyntax.indexOf(character) >= 0) result += reverseSolidus + character;
+      else if (otherPunctuators.indexOf(character) >= 0 || escapedWhitespace.indexOf(character) >= 0) result += encodeCodeUnit(unit);
+      else if (isUnpairedSurrogate(value, index, unit)) result += encodeCodeUnit(unit);
+      else result += character;
+      index += 1;
+    }
+    return result;
+  });
+  if (typeof Response !== 'undefined') {
+    define(Response.prototype, 'bytes', function bytes() {
+      return this.arrayBuffer().then(function (buffer) { return new Uint8Array(buffer); });
     });
   }
 })();

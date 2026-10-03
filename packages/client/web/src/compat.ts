@@ -67,6 +67,16 @@ interface Uint8ArrayCompat {
   fromBase64?: (value: string) => Uint8Array
 }
 
+/** The `RegExp` static Chromium 90 lacks. */
+interface RegExpCompat {
+  escape?: (value: string) => string
+}
+
+/** The response member Chromium 90 lacks, reached through the type pdf.js fetches with. */
+interface ResponseCompat {
+  bytes?: () => Promise<Uint8Array>
+}
+
 interface AbortSignalPrototypeCompat {
   throwIfAborted?: () => void
 }
@@ -386,6 +396,116 @@ function installUint8ArrayFromBase64(installedApis: string[]): void {
   installedApis.push('Uint8Array.fromBase64')
 }
 
+/** Characters `RegExp.escape` prefixes with a reverse solidus. */
+const REGEXP_ESCAPED_SYNTAX = '^$\\.*+?()[]{}|/'
+
+/** Punctuation `RegExp.escape` encodes as \xNN. */
+const REGEXP_OTHER_PUNCTUATORS = ',-=<>#&!%:;@~' + "'`" + '"'
+
+/** Whitespace and line terminators `RegExp.escape` encodes, the control escapes excepted. */
+const REGEXP_ESCAPED_WHITESPACE = ' \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+
+/** `RegExp.escape`'s escape sequences for the code units 9 through 13, in order. */
+const REGEXP_CONTROL_ESCAPES = 'tnvfr'
+
+/**
+ * Encode one code unit in the escape form the specification requires: \xNN below
+ * U+0100, \uNNNN above it, both lowercase.
+ * @param unit - code unit to encode.
+ * @returns the escape sequence.
+ */
+function encodeRegExpEscape(unit: number): string {
+  const width = unit < 256 ? 2 : 4
+  return '\\' + (width === 2 ? 'x' : 'u') + unit.toString(16).padStart(width, '0')
+}
+
+/**
+ * Whether a code unit is an ASCII letter or decimal digit, the class the escape
+ * encodes in first position so the result cannot read as a backreference.
+ * @param unit - code unit to test.
+ * @returns whether the unit is alphanumeric ASCII.
+ */
+function isAsciiAlphanumeric(unit: number): boolean {
+  return (unit >= 0x30 && unit <= 0x39) || (unit >= 0x41 && unit <= 0x5a) || (unit >= 0x61 && unit <= 0x7a)
+}
+
+/**
+ * Whether one code unit is a surrogate with no counterpart beside it.
+ * @param value - string the unit belongs to.
+ * @param index - position of the unit.
+ * @param unit - code unit to test.
+ * @returns whether the unit is an unpaired surrogate.
+ */
+function isUnpairedSurrogate(value: string, index: number, unit: number): boolean {
+  if (unit >= 0xd800 && unit <= 0xdbff) {
+    const next = value.charCodeAt(index + 1)
+    return !(next >= 0xdc00 && next <= 0xdfff)
+  }
+  if (unit >= 0xdc00 && unit <= 0xdfff) {
+    const previous = value.charCodeAt(index - 1)
+    return !(previous >= 0xd800 && previous <= 0xdbff)
+  }
+  return false
+}
+
+/**
+ * Escape a string for literal use inside a regular expression, as
+ * `RegExp.escape` specifies it: syntax characters and the solidus take a
+ * reverse solidus, a leading ASCII letter or digit, the control characters, the
+ * other punctuators, and the whitespace and line terminators take the
+ * specification's `\xNN` or `\uNNNN` form, a well-formed surrogate pair
+ * stays as written, and an unpaired surrogate is encoded.
+ * @param value - string to escape.
+ * @returns the escaped pattern source.
+ */
+function escapeRegExpPattern(value: string): string {
+  let result = ''
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    const character = value.charAt(index)
+    if (index === 0 && isAsciiAlphanumeric(unit)) result += encodeRegExpEscape(unit)
+    else if (unit >= 9 && unit <= 13) result += '\\' + REGEXP_CONTROL_ESCAPES.charAt(unit - 9)
+    else if (REGEXP_ESCAPED_SYNTAX.includes(character)) result += '\\' + character
+    else if (REGEXP_OTHER_PUNCTUATORS.includes(character) || REGEXP_ESCAPED_WHITESPACE.includes(character)) {
+      result += encodeRegExpEscape(unit)
+    } else if (isUnpairedSurrogate(value, index, unit)) result += encodeRegExpEscape(unit)
+    else result += character
+  }
+  return result
+}
+
+/**
+ * Install `RegExp.escape`.
+ *
+ * The installed member is a standard API third-party JavaScript calls, so it
+ * keeps the specification's TypeError for an input the static parameter type
+ * cannot exclude.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installRegExpEscape(installedApis: string[]): void {
+  const regexp = RegExp as RegExpCompat
+  if (regexp.escape !== undefined) return
+  regexp.escape = (value: string): string => {
+    if (typeof value !== 'string') throw new TypeError('RegExp.escape expects a string')
+    return escapeRegExpPattern(value)
+  }
+  installedApis.push('RegExp.escape')
+}
+
+/**
+ * Install `Response.prototype.bytes`, which pdf.js calls for the cmap and font
+ * bodies it fetches with that response type.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installResponseBytes(installedApis: string[]): void {
+  const prototype = Response.prototype as ResponseCompat
+  if (prototype.bytes !== undefined) return
+  prototype.bytes = function bytes(this: Response): Promise<Uint8Array> {
+    return this.arrayBuffer().then(buffer => new Uint8Array(buffer))
+  }
+  installedApis.push('Response.prototype.bytes')
+}
+
 /**
  * Install every missing API of the client's browser floor.
  *
@@ -409,5 +529,7 @@ export function installBrowserCompat(): string[] {
   installPromiseTry(installedApis)
   installUrlParse(installedApis)
   installUint8ArrayFromBase64(installedApis)
+  installRegExpEscape(installedApis)
+  installResponseBytes(installedApis)
   return installedApis
 }

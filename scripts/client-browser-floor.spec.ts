@@ -152,8 +152,8 @@ describe('client stylesheet downleveling', () => {
       counts.selectorList += [...source.matchAll(/:nth-(?:last-)?child\([^)]*\bof\b/g)].length
     }
     expect(counts).toEqual({
-      has: 13, container: 0, gutter: 0, fieldSizing: 2, accentColor: 5,
-      anchorPositioning: 4, startingStyle: 1, textWrap: 1, selectorList: 1,
+      has: 12, container: 0, gutter: 0, fieldSizing: 2, accentColor: 5,
+      anchorPositioning: 4, startingStyle: 1, textWrap: 1, selectorList: 0,
     })
   })
 })
@@ -171,8 +171,9 @@ describe('shell install contract', () => {
 describe('worker realm install', () => {
   it('promises only APIs the shell contract lists', () => {
     expect([...CLIENT_FLOOR_WORKER_APIS].filter(api => !CLIENT_FLOOR_APIS.includes(api))).toEqual([])
-    // structuredClone is the one entry no shipped payload calls, and its copy
-    // semantics do not belong in an injected preamble.
+    // The worker list carries every floor entry a shipped payload calls, so
+    // structuredClone is the one entry left out; its copy semantics do not
+    // belong in an injected preamble.
     expect([...CLIENT_FLOOR_APIS].filter(api => !CLIENT_FLOOR_WORKER_APIS.includes(api))).toEqual(['structuredClone'])
   })
 

@@ -25,7 +25,15 @@ const FLOOR = [
   'Promise.try',
   'URL.parse',
   'Uint8Array.fromBase64',
+  'RegExp.escape',
+  'Response.prototype.bytes',
 ]
+
+/** `RegExp.escape` as the floor installs it, read at call time. */
+const regexp = RegExp as { escape?: (value: string) => string }
+
+/** `Response.prototype.bytes` as the floor installs it, read at call time. */
+const responseBytes = Response.prototype as { bytes?: () => Promise<Uint8Array> }
 
 /** Undo one removal of a realm API. */
 type Restoration = () => void
@@ -74,6 +82,7 @@ describe('browser compatibility floor', () => {
     restorations.push(
       withNative(Promise, 'try', (callback: () => unknown) => Promise.resolve(callback())),
       withNative(Uint8Array, 'fromBase64', () => new Uint8Array()),
+      withNative(RegExp, 'escape', (value: string) => value),
     )
     // An engine that ships every API: the floor installs nothing.
     const complete = await freshCompat()
@@ -96,6 +105,8 @@ describe('browser compatibility floor', () => {
       without(Promise, 'try'),
       without(URL, 'parse'),
       without(Uint8Array, 'fromBase64'),
+      without(RegExp, 'escape'),
+      without(Response.prototype, 'bytes'),
     )
     // An engine that lacks them: the floor installs each one once. Loading the
     // side-effect entry afterwards covers the shell's own import path.
@@ -263,5 +274,49 @@ describe('browser compatibility floor', () => {
     const fromBase64 = Uint8Array as { fromBase64?: (value: string) => Uint8Array }
     expect([...(fromBase64.fromBase64?.('AQID') ?? new Uint8Array())]).toEqual([1, 2, 3])
     expect(fromBase64.fromBase64?.('')?.length).toBe(0)
+  })
+
+  it('escapes a string for literal use in a pattern', () => {
+    expect(regexp.escape?.('')).toBe('')
+    // The specification's tables: syntax characters and the solidus take a
+    // reverse solidus, the other punctuators and the whitespace take hex forms.
+    expect(regexp.escape?.('^$\\.*+?()[]{}|/')).toBe('\\^\\$\\\\\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\/')
+    expect(regexp.escape?.(',-=<>#&!%:;@~' + "'`" + '"')).toBe('\\x2c\\x2d\\x3d\\x3c\\x3e\\x23\\x26\\x21\\x25\\x3a\\x3b\\x40\\x7e\\x27\\x60\\x22')
+    expect(regexp.escape?.('\t\n\u000b\f\r')).toBe('\\t\\n\\v\\f\\r')
+    expect(regexp.escape?.(' \u00a0\u202f\ufeff')).toBe('\\x20\\xa0\\u202f\\ufeff')
+    // Only an ASCII letter or digit in first position is encoded.
+    expect(regexp.escape?.('The Quick Brown Fox')).toBe('\\x54he\\x20Quick\\x20Brown\\x20Fox')
+    expect(regexp.escape?.('1+1')).toBe('\\x31\\+1')
+    expect(regexp.escape?.('abc')).toBe('\\x61bc')
+    expect(regexp.escape?.('.a1b2c3')).toBe('\\.a1b2c3')
+    // A well-formed surrogate pair survives; either half on its own is encoded.
+    expect(regexp.escape?.('😊')).toBe('😊')
+    expect(regexp.escape?.('\ud800')).toBe('\\ud800')
+    expect(regexp.escape?.('\udc00')).toBe('\\udc00')
+    expect(regexp.escape?.('a\ud800b')).toBe('\\x61\\ud800b')
+    expect(() => (regexp.escape as (value: unknown) => string)(7)).toThrow(TypeError)
+  })
+
+  it('produces a pattern matching the text it escaped', () => {
+    const text = 'C++ (2.0) [beta] {a|b} \\ ^$ * ? + / 😊'
+    const pattern = '^' + (regexp.escape?.(text) ?? '') + '$'
+    expect(new RegExp(pattern).test(text)).toBe(true)
+    // Every syntax character is literal: one changed or added character no
+    // longer matches the anchored pattern.
+    expect(new RegExp(pattern).test(text.replace('2.0', '2x0'))).toBe(false)
+    expect(new RegExp(pattern).test(text + 'x')).toBe(false)
+    expect(new RegExp(pattern).test(text.slice(1))).toBe(false)
+  })
+
+  it('reads a response body as bytes', async () => {
+    const response = new Response(new Uint8Array([1, 2, 3]))
+    const bytes = await responseBytes.bytes?.call(response)
+    expect([...(bytes ?? [])]).toEqual([1, 2, 3])
+  })
+
+  it('resolves the bytes an array buffer would', async () => {
+    const body = new Uint8Array([4, 5, 6])
+    const bytes = await responseBytes.bytes?.call(new Response(body))
+    expect([...(bytes ?? [])]).toEqual([...new Uint8Array(await new Response(body).arrayBuffer())])
   })
 })
