@@ -258,6 +258,19 @@ function consolePage({ user, role }) {
       <button onclick="loadHistory()">查询</button>
     </span>
   </div>
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px">
+    <span class="muted">时间范围</span>
+    <input id="hist-since" type="datetime-local" size="18">
+    <span class="muted">到</span>
+    <input id="hist-until" type="datetime-local" size="18">
+    <button onclick="histReset()">清空时间</button>
+    <span class="muted" id="hist-window"></span>
+  </div>
+  <div class="row" style="align-items: center; gap: 8px; margin-top: 6px">
+    <button onclick="histPage(-1)">← 上一页</button>
+    <span class="muted" id="hist-page">第 1 页</span>
+    <button onclick="histPage(1)">下一页 →</button>
+  </div>
   <table id="history" style="margin-top: 10px">
     <thead><tr><th style="width: 180px">时间</th><th style="width: 120px">来源</th><th style="width: 160px">动作</th><th style="width: 150px">对象</th><th>结果</th></tr></thead>
     <tbody><tr><td colspan="4" class="muted">点上面按钮加载</td></tr></tbody>
@@ -680,47 +693,74 @@ async function mfaDisable() {
   mfaStatus()
 }
 
+// 翻页状态。放在函数外面，因为 loadHistory 每次都会重建自己。
+//
+// 用【游标】而不是 offset：日志一直在增长，新条目会把旧条目往下挤，
+// 于是"第 2 页"在两次请求之间会漂移 —— 实测出现过两页重叠 1 条。
+// 游标是"从我看到的这一页最旧那条往前翻"，日志再怎么长都不受影响。
+let histOldest = undefined       // 本页最旧的时间，翻页用
+let histCursor = undefined      // 当前的 until
+let histStack = []              // 上一页的游标，用来往回翻
+let histPageIndex = 0
+
+/** 往前翻一页：用本页最旧的时间（减 1 毫秒，避免边界那条重复）。 */
+function histPage(direction) {
+  if (direction > 0) {
+    if (histOldest === undefined) return
+    histStack.push(histCursor)
+    histCursor = new Date(new Date(histOldest).getTime() - 1).toISOString()
+    histPageIndex += 1
+  } else {
+    if (histStack.length === 0) return
+    histCursor = histStack.pop()
+    histPageIndex = Math.max(0, histPageIndex - 1)
+  }
+  loadHistory()
+}
+
+/** 清空时间范围并回到第一页。 */
+function histReset() {
+  const since = document.querySelector('#hist-since')
+  const until = document.querySelector('#hist-until')
+  if (since) since.value = ''
+  if (until) until.value = ''
+  histCursor = undefined
+  histStack = []
+  histPageIndex = 0
+  loadHistory()
+}
+
+/**
+ * 把 datetime-local 的值转成绝对时刻。
+ *
+ * datetime-local 给的是【不带时区】的墙钟时间，而服务端在容器里（TZ=Asia/Shanghai），
+ * 这台宿主却在美东 —— 直接发过去会被按服务端时区解析，实测差了 12 小时，
+ * 而且没有任何提示。new Date('2026-10-03T14:45') 会按【浏览器所在时区】解释，
+ * 转成 ISO 就带上了偏移，操作员说的时间才是服务端理解的时间。
+ *
+ * @param selector - the input to read.
+ * @returns an ISO instant, or undefined when the field is empty or unusable.
+ */
+function toInstant(selector) {
+  const field = document.querySelector(selector)
+  if (field === null || field.value === '') return undefined
+  const at = new Date(field.value)
+  return Number.isNaN(at.getTime()) ? undefined : at.toISOString()
+}
+
 async function loadHistory() {
   const picker = document.querySelector('#hist-tenant')
   const tenantFilter = picker ? picker.value : ''
   const q = (document.querySelector('#hist-q') || {}).value || ''
   // 筛选交给服务端：这里只拿到 limit 条，在窗口内筛选会把"没有"和"不在最近一百条里"混为一谈。
-  const answer = await post('api/tenant', { action: 'ops-history', limit: 100, tenantFilter, q })
-  const body = document.querySelector('#history tbody')
-  if (!answer.ok) {
-    body.innerHTML = '<tr><td colspan="5" class="muted">读取失败：' + escapeHtml(answer.error || '') + '</td></tr>'
-    return
-  }
-  // 下拉框选项来自服务端返回的租户清单，这样筛选中也会包含 '-'（未归属请求）。
-  if (picker !== null && picker.options.length <= 1 && Array.isArray(answer.tenants)) {
-    for (const id of answer.tenants) {
-      const option = document.createElement('option')
-      option.value = id
-      option.textContent = id === '-' ? '（未归属）' : id
-      picker.appendChild(option)
-    }
-  }
-  const entries = answer.entries || []
-  if (entries.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" class="muted">' + (answer.total === 0 ? '还没有记录' : '没有匹配的记录（共 ' + answer.total + ' 条）') + '</td></tr>'
-    return
-  }
-  body.innerHTML = entries.map((entry) => {
-    const when = typeof entry.ts === 'string' ? entry.ts.replace('T', ' ').replace(/\..*$/u, '') : ''
-    const who = entry.user ? ' · ' + entry.user : ''
-    const what = entry.node ? '（节点 ' + entry.node + '）' : ''
-    const outcome = entry.error !== undefined ? '失败：' + entry.error
-      : entry.status !== undefined ? 'HTTP ' + entry.status
-        : entry.result !== undefined ? entry.result
-          : entry.note !== undefined ? entry.note : '—'
-    // 两份审计合在一起，所以要说清每条来自哪一边：控制台自己的操作，还是网关
-    // 替租户用户做的事（登录、改密、跨租户拒绝）。后者以前根本看不到。
-    const from = entry.source === 'gateway' ? '网关' : '控制台'
-    return '<tr><td class="muted">' + escapeHtml(when) + '</td><td class="muted">' + from + '</td><td>' + escapeHtml(entry.action || '?')
-      + '</td><td>' + escapeHtml(entry.tenant || '-') + what + '</td><td>' + escapeHtml(String(outcome)) + who + '</td></tr>'
-  }).join('')
-}
-
+  const answer = await post('api/tenant', {
+    action: 'ops-history',
+    limit: 100,
+    tenantFilter,
+    q,
+    since: toInstant('#hist-since'),
+    until: toInstant('#hist-until') ?? histCursor,
+  })
 const post = async (path, body) => {
   const response = await fetch(path, {
     method: 'POST',
