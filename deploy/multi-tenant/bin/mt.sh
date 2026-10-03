@@ -684,6 +684,7 @@ case "${1:-}" in
   admin-mfa) shift; node_run bin/admin-mfa.js "$@" ;;      # 管理员两步验证：setup/confirm/status/remove
   alert-sink) shift; bash bin/alert-sink.sh "$@" ;;              # 告警接收器：up/wire/test/status
   quota)   shift; bash bin/quota.sh "$@" ;;                     # 每租户磁盘配额：show/set/clear/check
+  acceptance) shift; bash bin/acceptance.sh "$@" ;;            # 部署验收（--self-test / --quick）
   bandwidth) shift; bash bin/bandwidth.sh "$@" ;;                # 租户网络限速：show/set/clear
   keys)    shift; node_run bin/keys.js "$@" ;;                     # 生成/查看分用途密钥
   usage)   shift; node_run bin/usage.js "$@" ;;                  # 每租户模型用量（不带费率）
