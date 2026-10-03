@@ -143,5 +143,19 @@ if [ "$KEEP" -gt 0 ]; then
     echo "==> 清理超出保留份数（保留最近 $KEEP 份）"
     echo "$OLD" | while read -r f; do rm -f "$f"; echo "    删除 $(basename "$f")"; done
   fi
+
+  # 会话归档也要一起清理。
+  #
+  # 它们是会话保留策略产生的（bin/retention-loop.sh 调 disk.sh prune-sessions --archive），
+  # 和备份归档放在同一个目录但名字不同。只清理 dsh-mt-* 的话，自动清理会把"会话涨满盘"
+  # 换成"归档涨满盘"——一样是满，而且更隐蔽。每租户每轮产生一份，涨得比备份快。
+  # 按租户分组保留：某个租户最近没被清理时，不该把它的历史归档挤掉。
+  for t in $(ls -1 "$OUT"/sessions-*.tar.gz 2>/dev/null | sed 's|.*/sessions-||; s|-.*||' | sort -u || true); do
+    OLD_SESSIONS="$(ls -1t "$OUT"/sessions-"$t"-*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)) || true)"
+    if [ -n "$OLD_SESSIONS" ]; then
+      echo "==> 清理 $t 的旧会话归档（保留最近 $KEEP 份）"
+      echo "$OLD_SESSIONS" | while read -r f; do rm -f "$f"; echo "    删除 $(basename "$f")"; done
+    fi
+  done
 fi
 rm -rf "$MANIFEST_DIR"
