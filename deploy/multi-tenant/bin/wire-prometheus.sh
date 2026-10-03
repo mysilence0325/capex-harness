@@ -125,18 +125,39 @@ EOF
   echo "    已加抓取任务"
 fi
 
-if grep -q 'DshTenantNotReady' "$TMP/alerts.single-node.yml"; then
-  echo "    告警规则已存在"
-else
-  [ -n "$(tail -c1 "$TMP/alerts.single-node.yml")" ] && printf '\n' >> "$TMP/alerts.single-node.yml"
-  {
-    echo ""
-    echo "  # ===== DSH 多租户（规范副本：${ROOT}/alerts/mt-alerts.yml）====="
-    echo "  # 指标来自 job $JOB。改动请同步回规范副本，否则下次会以那边为准。"
-    sed -n "/^  - name: ${JOB}/,\$p" "$ROOT/alerts/mt-alerts.yml"
-  } >> "$TMP/alerts.single-node.yml"
-  echo "    已追加告警规则"
+# 托管段先在临时文件里组装，并且**数一遍里面的规则**。
+#
+# 上一版的问题是：从源文件里抽规则的那条 sed 什么都没抽到（新规则缩进错了，成了分组项
+# 而不是规则），而旧托管段已经被截断移除——结果是追加了空内容，把他们正在用的 10 条
+# 规则从 Prometheus 里弄没了。所以这里先抽、验数量，再动线上文件。
+{
+  echo ""
+  echo "  # ===== DSH 多租户（规范副本：${ROOT}/alerts/mt-alerts.yml）====="
+  echo "  # 指标来自 job $JOB。改动请同步回规范副本，否则下次会以那边为准。"
+  sed -n "/^  - name: ${JOB}/,\$p" "$ROOT/alerts/mt-alerts.yml"
+} > "$TMP/managed.yml"
+
+WANT="$(grep -c '^      - alert:' "$TMP/managed.yml" || true)"
+if [ "${WANT:-0}" -lt 1 ]; then
+  echo "    ✗ 从 $ROOT/alerts/mt-alerts.yml 里抽不出规则（分组名或缩进不对），线上文件未改动" >&2
+  exit 1
 fi
+echo "    托管段含 ${WANT} 条规则"
+
+# 移除旧的托管段（标记行之前的内容是他们自己的，一律保留）
+if grep -q 'DSH 多租户（规范副本' "$TMP/alerts.single-node.yml"; then
+  awk '/DSH 多租户（规范副本/ { exit } { print }' "$TMP/alerts.single-node.yml" > "$TMP/alerts.trimmed.yml"
+  mv "$TMP/alerts.trimmed.yml" "$TMP/alerts.single-node.yml"
+fi
+cat "$TMP/managed.yml" >> "$TMP/alerts.single-node.yml"
+
+# 最后一道：数一遍组装结果。数量对不上就中止，绝不写线上。
+HAVE="$(grep -c 'alert: Dsh' "$TMP/alerts.single-node.yml" || true)"
+if [ "${HAVE:-0}" -ne "$WANT" ]; then
+  echo "    ✗ 组装后有 ${HAVE} 条 Dsh 规则，源里有 ${WANT} 条，不一致，线上文件未改动" >&2
+  exit 1
+fi
+echo "    组装后有 ${HAVE} 条 Dsh 规则，与源一致"
 
 echo
 echo "==> 4. promtool 校验（不通过就停，线上文件不动）"
