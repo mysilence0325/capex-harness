@@ -29,6 +29,8 @@
 #   bin/mt.sh admin-passwd       set the administrator console password (revokes sessions)
 #   bin/mt.sh admin-kick         revoke every admin session, keep the password
 #   bin/mt.sh admin-users        list | add | passwd | remove administrators and roles
+#   bin/mt.sh export <tenant>    write a portable archive of one tenant
+#   bin/mt.sh import <archive> --as <id>   bring one in with fresh ports and names
 #   bin/mt.sh admin-add <name> --role viewer   add a read-only administrator
 #   bin/mt.sh wire-prometheus    wire the alert rules into this host's Prometheus
 #   bin/mt.sh register <id>      register a tenant runtime with the control plane
@@ -659,6 +661,8 @@ case "${1:-}" in
   admin-passwd) shift; cmd_admin_passwd "$@" ;; # 设置管理控制台的管理员密码（同时吊销已登录会话）
   admin-kick) shift; node_run bin/admin-kick.js ;;    # 只吊销所有管理员会话，不改密码
   admin-users) shift; node_run bin/admin-users.js "$@" ;;  # 管理员与角色：list/add/passwd/remove
+  export)  shift; node_run bin/tenant-transfer.js export "$@" ;;   # 导出一个租户（移交归档）
+  import)  shift; node_run bin/tenant-transfer.js import "$@" ;;   # 从归档导入一个租户
   admin-add)   shift; node_run bin/admin-users.js add "$@" ;;
   admin-remove) shift; node_run bin/admin-users.js remove "$@" ;;
   unregister) shift; cmd_unregister "$@" ;;     # 让控制面忘掉某个租户的运行时
