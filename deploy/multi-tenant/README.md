@@ -400,7 +400,6 @@ bin/mt.sh restore backups/dsh-mt-xxx.tar.gz
 - 恢复**不会删除**现有数据：先整体挪到 `restore-aside-<时间戳>/`，确认无误后再手动删。
 - 内存密钥（`state/session.key`）也在归档里，恢复后原有浏览器会话继续有效。
 
-
 ## 4. 用户怎么访问
 
 1. 打开 `http://<主机IP>:8090/`；
@@ -485,10 +484,10 @@ bin/mt.sh model        # 渲染 + 应用到所有租户 + 重启
 ## 8. 安全边界与已知限制
 
 - **控制面是唯一的对外入口，但不再是宿主 root 等价物**：它只监听公开端口、按注册表代理，**不挂 Docker socket、不读容器日志**。需要宿主级权限的是**节点代理**（它要发现本机容器并读它们的启动 token），而节点代理不对外提供任何用户入口。
-- **/__mt/health 只答 loopback**：它会列出全部租户与用户名，因此外部访问返回 404；in/mt.sh status/smoke/accept 都在本机跑，不受影响。
+- **/__mt/health 只答 loopback**：它会列出全部租户与用户名，因此外部访问返回 404；bin/mt.sh status/smoke/accept 都在本机跑，不受影响。
 - **租户之间不共享任何进程状态**：不共享 cookie 密钥、不共享会话、不共享凭据、不共享文件系统。
 - **租户内部的 agent 拥有其容器的完全权限**（可 `rm -rf /` 于容器内、可访问网络）。这是形态 C 的设计：容器即隔离边界；`DSH_PERMISSION_MODE=danger-full-access` 是宿主内核不支持 DSH 文件沙箱时的必然选择。
-- **没有 TLS**：如需 HTTPS，在网关前面再加一层 TLS 终结（nginx/Caddy），或给网关加证书。
+- **默认 HTTPS（自签 CA）**：公开端口用 `bin/mt.sh cert` 签发的自签证书；如需浏览器受信任的证书，可在网关前面再加一层 TLS 终结（nginx/Caddy），或给网关换证书。
 - **没有租户自助管理**：新增租户由运维执行 `bin/mt.sh add`。
 - **配额是容器级的**（内存/CPU/PID），磁盘配额需要宿主的 project quota 或独立卷。
 - **默认不共享模型凭据**：每个租户在 `.env` 里独立配置；留空则租户启动后无可用模型。
