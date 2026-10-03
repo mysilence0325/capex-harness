@@ -97,25 +97,43 @@ groups:
           summary: '有租户在指标里出现但不在注册表里'
           description: '可能是刚删除的租户还没从抓取里消失（短暂正常），持续 15 分钟则检查 tenants.json 与控制面是否重载。'
 
+  # 部署所在主机本身的状态，来自 node_exporter（不是租户容器内部）。
+  # /home/dsh-mt 所在分区写满会让租户会话与备份一起失败。
+  # 节点代理两项：控制面为空时代理只运维、不注册租户，且这是静默降级；
+  # 连不上代理时控制台的运维按钮会失败，但租户不受影响。
   - name: dsh-multitenant-host
     rules:
-      # 宿主层面的两条，依赖 node_exporter（本机监控栈已有）。
-      # 部署在 /home/dsh-mt，根分区很小（现网 50G），磁盘先满是这台机器最可能的故障。
-      - alert: DshDeployDiskFillingUp
-        expr: |
-          predict_linear(node_filesystem_avail_bytes{mountpoint="/home"}[6h], 86400) < 5 * 1024 * 1024 * 1024
-        for: 1h
-        labels:
-          severity: warning
-        annotations:
-          summary: '部署所在分区预计 24 小时内剩余不足 5GB'
-          description: '按最近 6 小时的增长速度推算。/home 存放租户数据、镜像与备份。清理办法见管理员手册 §6「磁盘快满」。'
+    - alert: DshDeployDiskFillingUp
+      expr: 'predict_linear(node_filesystem_avail_bytes{mountpoint="/home"}[6h], 86400) < 5 * 1024 * 1024 * 1024
 
-      - alert: DshDeployDiskCritical
-        expr: node_filesystem_avail_bytes{mountpoint="/home"} < 2 * 1024 * 1024 * 1024
-        for: 10m
-        labels:
-          severity: critical
-        annotations:
-          summary: '部署所在分区剩余不足 2GB'
-          description: '磁盘写满会让租户会话与备份失败。立即清理：日志轮转产物、旧备份、无用的镜像层。'
+        '
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: 部署所在分区预计 24 小时内剩余不足 5GB
+        description: 按最近 6 小时的增长速度推算。/home 存放租户数据、镜像与备份。清理办法见管理员手册 §6「磁盘快满」。
+    - alert: DshDeployDiskCritical
+      expr: node_filesystem_avail_bytes{mountpoint="/home"} < 2 * 1024 * 1024 * 1024
+      for: 10m
+      labels:
+        severity: critical
+      annotations:
+        summary: 部署所在分区剩余不足 2GB
+        description: 磁盘写满会让租户会话与备份失败。立即清理：日志轮转产物、旧备份、无用的镜像层。
+    - alert: DshNodeAgentNotRegistering
+      expr: mt_agent_control_plane_configured == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: 节点 {{ $labels.node }} 上的代理不注册租户
+        description: 该节点的代理没有配置控制面地址（MT_CONTROL_PLANE），因此只提供运维能力、不做租户发现与注册。这件事是静默的：控制台正常、节点显示在线，直到某个租户重启（启动 token 会轮换）之后，统一入口才开始一直返回 303。恢复方式：在 .env 里补上 MT_CONTROL_PLANE 与 MT_CONTROL_PLANE_CA，执行 bin/mt.sh render 后重建节点代理。
+    - alert: DshNodeAgentDown
+      expr: mt_agent_up == 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: 控制面连不上节点 {{ $labels.node }} 上的代理
+        description: 控制面无法通过节点代理执行宿主运维操作（升级、备份、恢复、会话清理）。租户仍在运行，但控制台里的运维按钮会失败。检查该节点上的 mt-node-agent 容器与网络连通性。

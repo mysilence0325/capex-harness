@@ -137,7 +137,8 @@ fi
   sed -n "/^  - name: ${JOB}/,\$p" "$ROOT/alerts/mt-alerts.yml"
 } > "$TMP/managed.yml"
 
-WANT="$(grep -c '^      - alert:' "$TMP/managed.yml" || true)"
+# 计数必须与缩进无关：托管段里的分组可能由 YAML 库生成，缩进与手写的不同。
+WANT="$(grep -cE '^[[:space:]]+- alert:' "$TMP/managed.yml" || true)"
 if [ "${WANT:-0}" -lt 1 ]; then
   echo "    ✗ 从 $ROOT/alerts/mt-alerts.yml 里抽不出规则（分组名或缩进不对），线上文件未改动" >&2
   exit 1
