@@ -8,6 +8,7 @@ WORKDIR /app
 COPY server.js /app/server.js
 COPY admin.js /app/admin.js
 COPY admin-page.js /app/admin-page.js
+COPY mfa.js /app/mfa.js
 COPY throttle.js /app/throttle.js
 COPY rotate.js /app/rotate.js
 COPY metrics.js /app/metrics.js

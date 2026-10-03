@@ -42,6 +42,7 @@ const {
   AdminConsole, hashPassword, verifyPassword, ID_PATTERN, USER_PATTERN,
   COOKIE: ADMIN_COOKIE, MAX_FAILURES, LOCKOUT_MS, SESSION_MS,
 } = require('./admin.js')
+const mfa = require('./mfa.js')
 // Aliased: this file already has a loginPage, the tenant sign-in page.
 const { loginPage: adminLoginPage, consolePage: adminConsolePage, statusTag } = require('./admin-page.js')
 
@@ -1694,6 +1695,28 @@ async function handleAdmin(req, res, url) {
       send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
         adminLoginPage({ error: '用户名或密码不正确', configured: admin.hasAdmin() }))
       return
+    }
+    // Second factor, when this administrator has one.
+    //
+    // Here rather than after the cookie: a session that has been issued is a session
+    // somebody can use, and the password alone must not be enough to get one.
+    if (admin.mfaActive(stored.name)) {
+      const code = String(form.get('code') ?? '').trim()
+      const byCode = code !== '' && mfa.verifyTotp(admin.mfaSecret(stored.name), code)
+      const byRecovery = !byCode && code !== '' && admin.consumeRecovery(stored.name, mfa.hashRecoveryCode(code))
+      if (!byCode && !byRecovery) {
+        admin.audit({
+          action: 'login-mfa', tenant: '-', user: stored.name, result: 'rejected',
+          note: code === '' ? '未提供验证码' : '验证码不正确',
+        })
+        send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+          adminLoginPage({ error: '验证码不正确（或已用过的恢复码）', configured: admin.hasAdmin() }))
+        return
+      }
+      admin.audit({
+        action: 'login-mfa', tenant: '-', user: stored.name, result: 'ok',
+        note: byRecovery ? '恢复码' : '验证码',
+      })
     }
     admin.bucketFor(remote).count = 0
     admin.audit({ action: 'login', tenant: '-', user: stored.name, role: stored.role, result: 'ok', source: remote })

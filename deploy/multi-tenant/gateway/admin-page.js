@@ -96,6 +96,7 @@ ${setup}
 <form method="post" action="login" class="card">
   <input name="user" placeholder="管理员用户名" value="admin" autocomplete="username" autofocus>
   <input name="password" type="password" placeholder="密码" autocomplete="current-password">
+      <input id="login-code" placeholder="验证码（开启 MFA 后必填）" size="18" inputmode="numeric" autocomplete="one-time-code">
   <button class="primary" type="submit">登录</button>
 </form>
 </div>`)

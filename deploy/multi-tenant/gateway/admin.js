@@ -159,6 +159,10 @@ class AdminConsole {
           passwordHash: entry.passwordHash,
           role: entry.role === 'viewer' ? 'viewer' : 'admin',
           createdAt: entry.createdAt,
+          // Kept even though nothing here reads it: every write path goes
+          // read -> change one entry -> write, so a field dropped here is a field
+          // erased by the next password change or administrator addition.
+          mfa: entry.mfa,
         }))
     }
     if (typeof parsed?.user === 'string' && parsed.user !== '') {
@@ -191,6 +195,96 @@ class AdminConsole {
       `${JSON.stringify({ version: 2, users, updatedAt: new Date().toISOString() }, null, 2)}\n`,
       { mode: 0o600 },
     )
+  }
+
+  /**
+   * Store a secret awaiting its first code. Not yet a factor: an administrator who
+   * never confirms has gained nothing, and a mistyped secret locks nobody out.
+   *
+   * @param name - the administrator.
+   * @param secret - base32 secret.
+   * @returns whether the administrator exists.
+   */
+  setMfaPending(name, secret) {
+    const users = this.readAdmins()
+    const at = users.findIndex((entry) => entry.name === name)
+    if (at < 0) return false
+    users[at] = { ...users[at], mfa: { secret, pending: true, recovery: [] } }
+    this.writeAdmins(users)
+    return true
+  }
+
+  /**
+   * Turn a pending secret into an active factor.
+   * @param name - the administrator.
+   * @param recoveryHashes - hashed recovery codes.
+   * @returns whether there was a pending secret.
+   */
+  confirmMfa(name, recoveryHashes) {
+    const users = this.readAdmins()
+    const at = users.findIndex((entry) => entry.name === name)
+    if (at < 0) return false
+    const secret = users[at].mfa?.secret
+    if (typeof secret !== 'string' || secret === '') return false
+    users[at] = { ...users[at], mfa: { secret, pending: false, recovery: recoveryHashes } }
+    this.writeAdmins(users)
+    return true
+  }
+
+  /**
+   * Whether this administrator must present a code.
+   * @param name - the administrator.
+   * @returns whether an active secret is stored.
+   */
+  mfaActive(name) {
+    const mfa = this.adminByName(name)?.mfa
+    return typeof mfa?.secret === 'string' && mfa.secret !== '' && mfa.pending !== true
+  }
+
+  /** @returns the stored secret, or undefined. */
+  mfaSecret(name) {
+    return this.adminByName(name)?.mfa?.secret
+  }
+
+  /** @returns the hashed recovery codes. */
+  mfaRecovery(name) {
+    const list = this.adminByName(name)?.mfa?.recovery
+    return Array.isArray(list) ? list : []
+  }
+
+  /**
+   * Spend one recovery code.
+   * @param name - the administrator.
+   * @param hash - the hash to spend.
+   * @returns whether it was there to spend. Removed either way it matches, so a code
+   * cannot be replayed even if two requests race.
+   */
+  consumeRecovery(name, hash) {
+    const users = this.readAdmins()
+    const at = users.findIndex((entry) => entry.name === name)
+    if (at < 0) return false
+    const list = Array.isArray(users[at].mfa?.recovery) ? users[at].mfa.recovery : []
+    const left = list.filter((entry) => entry !== hash)
+    if (left.length === list.length) return false
+    users[at] = { ...users[at], mfa: { ...users[at].mfa, recovery: left } }
+    this.writeAdmins(users)
+    return true
+  }
+
+  /**
+   * Remove the factor entirely.
+   * @param name - the administrator.
+   * @returns whether the administrator exists.
+   */
+  clearMfa(name) {
+    const users = this.readAdmins()
+    const at = users.findIndex((entry) => entry.name === name)
+    if (at < 0) return false
+    const copy = { ...users[at] }
+    delete copy.mfa
+    users[at] = copy
+    this.writeAdmins(users)
+    return true
   }
 
   /**
