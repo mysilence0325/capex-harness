@@ -105,6 +105,11 @@ echo "运行时镜像  : $(docker inspect "mt-dsh-$FIRST_TENANT" --format '{{.Co
   done
   echo
   echo "包含内容: tenants/ state/ tenants.json .env"
+  # .env 的键清单。restore 会用归档里的 .env 覆盖当前配置且不提示，事后很难看出
+  # 少了什么；有了这份清单，doctor 能直接点名。只记键、不记值。
+  echo "环境键      : $(grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' .env 2>/dev/null || echo 0) 个"
+  echo "环境键清单  :"
+  grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env 2>/dev/null | sed 's/=$//' | sort | sed 's/^/  - /'
   echo "未包含  : image-overlay/（可由源码重建）、backups/、logs/"
   if [ -n "$REMOTE_TENANTS" ]; then
     echo "          以及别节点上的租户数据（见上）"

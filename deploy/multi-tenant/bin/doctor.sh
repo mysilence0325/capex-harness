@@ -428,5 +428,35 @@ else
   bad "MT_CONTROL_PLANE 为空：节点代理不会注册租户，租户重启后统一入口会一直返回 303"
 fi
 
+# 配置漂移：拿最近一次备份里记下的 .env 键清单，和当前 .env 比对。
+# restore 会用归档里的 .env 覆盖当前配置，而且不提示——真正咬人的是键整个消失
+# （MT_CONTROL_PLANE 丢过一次，表现为节点代理静默降级、租户重启后入口一直 303）。
+LATEST_ARCHIVE="$(ls -t backups/dsh-mt-*.tar.gz 2>/dev/null | head -1)"
+if [ -n "$LATEST_ARCHIVE" ]; then
+  DRIFT_TMP="$(mktemp -d)"
+  if tar -xzf "$LATEST_ARCHIVE" -C "$DRIFT_TMP" MANIFEST.txt 2>/dev/null; then
+    # 备份时的键（MANIFEST 里 "  - KEY" 形式）
+    sed -n '/^环境键清单  :/,/^[^ ]/p' "$DRIFT_TMP/MANIFEST.txt" 2>/dev/null \
+      | grep -oE '^  - [A-Za-z_][A-Za-z0-9_]*' | sed 's/^  - //' | sort -u > "$DRIFT_TMP/then.txt"
+    grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env 2>/dev/null | sed 's/=$//' | sort -u > "$DRIFT_TMP/now.txt"
+    MISSING="$(comm -23 "$DRIFT_TMP/then.txt" "$DRIFT_TMP/now.txt" | tr '\n' ' ')"
+    ADDED="$(comm -13 "$DRIFT_TMP/then.txt" "$DRIFT_TMP/now.txt" | tr '\n' ' ')"
+    if [ -n "${MISSING// /}" ]; then
+      bad "配置漂移：$(basename "$LATEST_ARCHIVE") 里有的这些键现在没了 → $MISSING（多半是 restore 用归档覆盖了 .env，恢复后要补回并 render）"
+    elif [ -n "${ADDED// /}" ]; then
+      warn "备份之后新增的配置键: $ADDED（记得在下一次备份前确认它们是对的）"
+    else
+      ok "配置键与最近一次备份一致（$(wc -l < "$DRIFT_TMP/now.txt" | tr -d ' ') 个）"
+    fi
+    # 没有清单的老归档：说清楚，而不是假装检查过
+    [ -s "$DRIFT_TMP/then.txt" ] || warn "最近一次备份的 MANIFEST 里没有键清单（老版本备份），无法比对配置漂移"
+  else
+    warn "读不出最近一次备份的 MANIFEST，跳过配置漂移检查"
+  fi
+  rm -rf "$DRIFT_TMP"
+else
+  warn "还没有备份，无法比对配置漂移"
+fi
+
 printf '\n\033[36m== 结论 ==\033[0m\n  %s 项通过, %s 项警告, %s 项失败\n' "$OK" "$WARN" "$BAD"
 [ "$BAD" -eq 0 ] || exit 1
