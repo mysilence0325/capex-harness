@@ -26,6 +26,7 @@ const { Throttle } = require('./throttle.js')
 const { appendRotated, rotatedFiles } = require('./rotate.js')
 const { render: renderMetrics } = require('./metrics.js')
 const { update: updateRegistry } = require('./tenant-lock.js')
+const keys = require('./keys.js')
 
 /** When this process started, for the uptime gauge. */
 const PROCESS_STARTED_AT = Date.now()
@@ -165,6 +166,29 @@ const sessionSecret = (() => {
  * any container that can reach the gateway could claim a tenant and intercept
  * its traffic.
  */
+/**
+ * Whether a presented key matches one expected key, in constant time.
+ *
+ * Exists so a purpose can accept both its own key and the legacy shared one without
+ * two comparison sites, each of which would need the same care about timing.
+ *
+ * @param expected - the key this purpose accepts.
+ * @param presented - the key from the request, if any.
+ * @returns whether it matches.
+ */
+function accepts(expected, presented) {
+  return typeof expected === 'string' && expected !== '' && typeof presented === 'string'
+    && timingSafeEqualString(presented, expected)
+}
+
+/**
+ * Per-purpose keys: reading metrics, registering runtimes, running maintenance.
+ *
+ * Read once at startup. Before `state/keys.json` exists every purpose falls back to
+ * the legacy registry key, so this cannot break a running deployment.
+ */
+const KEYS = keys.readKeys(STATE_DIR)
+
 const registryKey = (() => {
   const file = path.join(STATE_DIR, 'registry.key')
   if (fs.existsSync(file)) {
@@ -856,7 +880,7 @@ function handleRegister(req, res) {
   // An empty configured key must never authenticate: timingSafeEqual over two
   // empty buffers is true, which would let anyone who can reach the port claim a
   // tenant.
-  if (registryKey === '' || typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey)) {
+  if (!accepts(KEYS.register, presented) && !accepts(KEYS.legacy, presented)) {
     audit({ tenant: '-', user: '-', status: 401, note: 'registry-key-rejected', url: req.url })
     send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
     return
@@ -1652,7 +1676,7 @@ function handleRequest(req, res) {
     const presented = typeof header === 'string' && header !== '' ? header : bearer
     const remote = req.socket.remoteAddress ?? ''
     const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
-    if (!loopback && (presented === '' || !timingSafeEqualString(presented, registryKey))) {
+    if (!loopback && !accepts(KEYS.metrics, presented) && !accepts(KEYS.legacy, presented)) {
       send(res, 401, { 'content-type': 'text/plain; charset=utf-8' }, 'bad registry key\n')
       return
     }
@@ -1698,7 +1722,7 @@ function handleRequest(req, res) {
     // control plane stays the single owner of which tenants exist and where.
     // Password hashes are stripped: a node needs a tenant's placement and ports
     // to build its container, never its credentials.
-    if (typeof req.headers['x-mt-registry-key'] !== 'string' || !timingSafeEqualString(req.headers['x-mt-registry-key'], registryKey)) {
+    if (typeof req.headers['x-mt-registry-key'] !== 'string' || !accepts(KEYS.register, req.headers['x-mt-registry-key']) && !accepts(KEYS.legacy, req.headers['x-mt-registry-key'])) {
       send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
       return
     }
@@ -1714,7 +1738,7 @@ function handleRequest(req, res) {
     const presented = req.headers['x-mt-registry-key']
     const remote = req.socket.remoteAddress ?? ''
     const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
-    if (!loopback && (typeof presented !== 'string' || !timingSafeEqualString(presented, registryKey))) {
+    if (!loopback && !accepts(KEYS.register, presented) && !accepts(KEYS.legacy, presented)) {
       send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
       return
     }

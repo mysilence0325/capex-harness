@@ -84,7 +84,16 @@ echo "    /tmp/dsh-prom-*.bak.$STAMP"
 
 echo
 echo "==> 2. 令牌（放进已挂载的目录，容器内为 /prometheus/dsh.token）"
-tr -d '\r\n' < state/registry.key > "$PROM_DATA/dsh.token"
+# 交给 Prometheus 的是**只读的指标密钥**，不是那把能注册和运维的注册密钥。
+# 接监控时最容易把 token 交出去，而一个抓取用的 token 不该能重启所有租户。
+if [ -f state/keys.json ]; then
+  METRICS_KEY="$(grep -o '"metrics": *"[^"]*"' state/keys.json | head -1 | sed 's/.*: *"//; s/"$//')"
+  echo "    使用 state/keys.json 里的 metrics 密钥（只读）"
+else
+  METRICS_KEY="$(tr -d '\r\n' < state/registry.key)"
+  echo "    还没有 state/keys.json，暂用 registry.key；执行 bin/mt.sh keys 后重跑本脚本即可换成只读密钥"
+fi
+printf '%s' "$METRICS_KEY" > "$PROM_DATA/dsh.token"
 chmod 644 "$PROM_DATA/dsh.token"
 echo "    $(wc -c < "$PROM_DATA/dsh.token") 字节"
 

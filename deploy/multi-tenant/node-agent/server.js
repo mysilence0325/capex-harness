@@ -41,6 +41,21 @@ const NODE_NAME = process.env.MT_NODE_NAME ?? 'node'
 const NODE_ADDRESS = process.env.MT_NODE_ADDRESS ?? ''
 const CONTROL_PLANE = (process.env.MT_CONTROL_PLANE ?? '').replace(/\/+$/u, '')
 const KEY_FILE = process.env.MT_REGISTRY_KEY_FILE ?? '/key/registry.key'
+// 两把密钥，两个方向：
+//   opsKey      入站 /ops —— 会改东西（升级、备份、清理），泄露的代价最大。
+//   registerKey 出站注册 —— 只声明"这个租户在哪里"。
+// 未配置各自文件时都回退到注册密钥，所以拆分不会中断已有的节点。
+const readKey = (envName, fallback) => {
+  const file = process.env[envName] ?? fallback
+  try {
+    return require('node:fs').readFileSync(file, 'utf8').trim()
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error(`mt-node-agent: cannot read ${file}: ${error.message}`)
+    return ''
+  }
+}
+const registerKey = readKey('MT_REGISTER_KEY_FILE', process.env.MT_REGISTRY_KEY_FILE ?? '')
+const opsKey = readKey('MT_OPS_KEY_FILE', process.env.MT_REGISTRY_KEY_FILE ?? '')
 const CA_FILE = process.env.MT_CONTROL_PLANE_CA ?? ''
 const DOCKER_SOCKET = process.env.MT_DOCKER_SOCKET ?? '/var/run/docker.sock'
 const NETWORK = process.env.MT_NETWORK ?? 'mt-net'
@@ -286,7 +301,7 @@ function syncRegistry() {
       port: url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port),
       method: 'GET',
       path: url.pathname,
-      headers: { 'x-mt-registry-key': registryKey },
+      headers: { 'x-mt-registry-key': (registerKey !== '' ? registerKey : registryKey) },
       ca,
       agent: false,
       timeout: 15_000,
@@ -413,7 +428,7 @@ function register(tenant, target, token, nodeAddress) {
       port: url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port),
       method: 'POST',
       path: url.pathname,
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-mt-registry-key': registryKey },
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-mt-registry-key': (registerKey !== '' ? registerKey : registryKey) },
       ca,
       agent: false,
       timeout: 10_000,
@@ -787,7 +802,9 @@ function busyWith() {
 /** Whether a request carries this agent's registry key. */
 function authorized(req) {
   const presented = req.headers['x-mt-registry-key']
-  return typeof presented === 'string' && presented !== '' && presented === registryKey
+  if (typeof presented !== 'string' || presented === '') return false
+  // 运维 key 优先；未配置时回退到注册密钥。
+  return presented === (opsKey !== '' ? opsKey : registryKey)
 }
 
 /**
