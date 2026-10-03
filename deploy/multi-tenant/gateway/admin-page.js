@@ -799,6 +799,8 @@ async function load() {
   const data = await response.json()
   snapshot = data
   render()
+  // 顺手把两步验证的状态读出来，否则卡片会一直停在「读取中…」。
+  mfaStatus()
 }
 
 // The whole list is kept and filtered here rather than re-fetched: status comes

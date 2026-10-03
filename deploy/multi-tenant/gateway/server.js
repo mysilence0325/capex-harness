@@ -1257,6 +1257,28 @@ let EDGE_ORIGIN
  * @param body - the parsed request body.
  * @returns an answer the page renders.
  */
+/**
+ * Read a time bound from a request.
+ *
+ * @param value - ISO string or epoch milliseconds, or undefined for no bound.
+ * @param field - the request field name, for the error message.
+ * @returns milliseconds, undefined for no bound, or a string describing why it is unusable.
+ */
+function parseInstant(value, field) {
+  if (value === undefined || value === null || value === '') return undefined
+  const raw = String(value).trim()
+  // 全是数字就按毫秒时间戳理解，并且【必须】像毫秒时间戳。
+  // 不能让 2026 落到 Date.parse —— 它会解成 2026-01-01，静默变成另一个意思。
+  if (/^[0-9]+$/.test(raw)) {
+    const asNumber = Number(raw)
+    if (asNumber > 1e11) return asNumber
+    return `${field} 看起来是毫秒时间戳但不是（${raw}）；要年份请写完整时间，例如 2026-01-01T00:00:00Z`
+  }
+  const parsed = Date.parse(raw)
+  if (Number.isNaN(parsed)) return `${field} 不是可识别的时间（用 ISO 时间或毫秒时间戳）`
+  return parsed
+}
+
 async function adminAction(body, actor) {
   const action = typeof body?.action === 'string' ? body.action : ''
   const id = typeof body?.tenant === 'string' ? body.tenant : ''
@@ -1654,16 +1676,37 @@ async function adminAction(body, actor) {
         .some((value) => typeof value === 'string' && value.toLowerCase().includes(needle)))
     }
 
-    // Newest first, across both logs, and only as far back as the caller asked for.
+    // Time range. Accepts an ISO timestamp or epoch milliseconds; anything unparsable is
+    // refused rather than ignored, because silently dropping a filter answers a different
+    // question than the one asked - the mistake this whole block is careful about.
+    const since = parseInstant(body?.since, 'since')
+    if (typeof since === 'string') return { ok: false, error: since }
+    const until = parseInstant(body?.until, 'until')
+    if (typeof until === 'string') return { ok: false, error: until }
+    if (since !== undefined) {
+      filtered = filtered.filter((entry) => Number(new Date(String(entry.ts ?? 0))) >= since)
+    }
+    if (until !== undefined) {
+      filtered = filtered.filter((entry) => Number(new Date(String(entry.ts ?? 0))) <= until)
+    }
+
+    // Newest first, across both logs.
     filtered.sort((a, b) => String(b.ts ?? '').localeCompare(String(a.ts ?? '')))
-    const kept = filtered.slice(0, limit)
+
+    // Paging. The caller gets `matched` either way, so an empty page can say whether it
+    // is past the end or whether nothing matched at all.
+    const offset = Number.isInteger(body?.offset) && body.offset > 0 ? body.offset : 0
+    const kept = filtered.slice(offset, offset + limit)
     return {
       ok: true,
       entries: kept,
-      truncated: filtered.length > kept.length,
+      truncated: filtered.length > offset + kept.length,
       matched: filtered.length,
       total: entries.length,
+      tenantCount: seen.length,
       tenants: seen,
+      offset,
+      limit,
     }
   }
 
