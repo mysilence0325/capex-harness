@@ -1547,30 +1547,62 @@ async function adminAction(body, actor) {
   if (action === 'ops-history') {
     const limit = Number.isInteger(body?.limit) && body.limit > 0 && body.limit <= 500 ? body.limit : 100
     const entries = []
-    // Newest first, and only as far back as it takes to fill the request: the
-    // rotated generations are read newest-first for the same reason.
-    const files = rotatedFiles(path.join(LOG_DIR, 'admin.jsonl')).reverse()
-    for (const file of files) {
-      let lines
-      try {
-        lines = fs.readFileSync(file, 'utf8').split('\n')
-      } catch (error) {
-        if (error.code !== 'ENOENT') console.error(`mt-gateway: cannot read ${file}: ${error.message}`)
-        continue
-      }
-      for (let at = lines.length - 1; at >= 0; at -= 1) {
-        const line = lines[at].trim()
-        if (line === '') continue
+    // Two logs, because there are two writers. The console's own actions are audited
+    // by the admin console; the gateway audits what it does on its own — sign-ins,
+    // tenant password changes, refused cross-tenant requests. Reading only the first
+    // hides everything a tenant's own users do, which is exactly what an operator
+    // looks for after someone reports a password change they did not make.
+    for (const [source, name] of [['console', 'admin.jsonl'], ['gateway', 'access.jsonl']]) {
+      for (const file of rotatedFiles(path.join(LOG_DIR, name))) {
+        let lines
         try {
-          entries.push(JSON.parse(line))
-        } catch {
-          // A torn last line from a write in progress: skip it rather than fail.
+          lines = fs.readFileSync(file, 'utf8').split('\n')
+        } catch (error) {
+          if (error.code !== 'ENOENT') console.error(`mt-gateway: cannot read ${file}: ${error.message}`)
+          continue
         }
-        if (entries.length >= limit) break
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (trimmed === '') continue
+          try {
+            entries.push({ ...JSON.parse(trimmed), source })
+          } catch {
+            // A torn line from a write in progress: skip it rather than fail.
+          }
+        }
       }
-      if (entries.length >= limit) break
     }
-    return { ok: true, entries, truncated: entries.length >= limit }
+    // What the operator can narrow by. Collected before filtering, so the picker keeps
+    // offering every tenant even when a filter is active.
+    const seen = [...new Set(entries.map((entry) => String(entry.tenant ?? '-')).filter((id) => id !== ''))].sort()
+
+    // Filtering happens here rather than in the page. The page only ever receives `limit`
+    // entries; narrowing inside that window would answer "did alpha do anything" with
+    // "nothing in the last hundred lines", which is a different and misleading claim.
+    const wantedTenant = typeof body?.tenantFilter === 'string' && body.tenantFilter !== '' ? body.tenantFilter : undefined
+    const needle = typeof body?.q === 'string' && body.q.trim() !== '' ? body.q.trim().toLowerCase() : undefined
+    let filtered = entries
+    if (wantedTenant !== undefined) {
+      filtered = filtered.filter((entry) => String(entry.tenant ?? '-') === wantedTenant)
+    }
+    if (needle !== undefined) {
+      // Search across the fields a person would recognise the event by, not the whole
+      // record: a raw JSON match would hit timestamps and source paths.
+      filtered = filtered.filter((entry) => [entry.action, entry.user, entry.tenant, entry.note, entry.result, entry.error]
+        .some((value) => typeof value === 'string' && value.toLowerCase().includes(needle)))
+    }
+
+    // Newest first, across both logs, and only as far back as the caller asked for.
+    filtered.sort((a, b) => String(b.ts ?? '').localeCompare(String(a.ts ?? '')))
+    const kept = filtered.slice(0, limit)
+    return {
+      ok: true,
+      entries: kept,
+      truncated: filtered.length > kept.length,
+      matched: filtered.length,
+      total: entries.length,
+      tenants: seen,
+    }
   }
 
   const tenant = tenants.get(id)

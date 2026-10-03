@@ -224,9 +224,13 @@ function consolePage({ user, role }) {
 
 <h2>操作历史</h2>
 <div class="card">
-  <div class="row" style="justify-content: space-between; align-items: center">
-    <span class="muted">谁在什么时候做了什么，来自控制面的审计日志</span>
-    <button onclick="loadHistory()">刷新（最近 100 条）</button>
+  <div class="row" style="justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">
+    <span class="muted">谁在什么时候做了什么。两份审计合在一起：控制台自己的操作，以及网关替租户用户做的事。</span>
+    <span class="row" style="gap: 8px; align-items: center">
+      <select id="hist-tenant" onchange="loadHistory()"><option value="">全部租户</option></select>
+      <input id="hist-q" placeholder="搜索（动作/用户/结果）" size="22" onkeydown="if (event.key === 'Enter') loadHistory()">
+      <button onclick="loadHistory()">查询</button>
+    </span>
   </div>
   <table id="history" style="margin-top: 10px">
     <thead><tr><th style="width: 180px">时间</th><th style="width: 120px">来源</th><th style="width: 160px">动作</th><th style="width: 150px">对象</th><th>结果</th></tr></thead>
@@ -499,15 +503,28 @@ async function tenantImport() {
 }
 
 async function loadHistory() {
-  const answer = await post('api/tenant', { action: 'ops-history', limit: 100 })
+  const picker = document.querySelector('#hist-tenant')
+  const tenantFilter = picker ? picker.value : ''
+  const q = (document.querySelector('#hist-q') || {}).value || ''
+  // 筛选交给服务端：这里只拿到 limit 条，在窗口内筛选会把"没有"和"不在最近一百条里"混为一谈。
+  const answer = await post('api/tenant', { action: 'ops-history', limit: 100, tenantFilter, q })
   const body = document.querySelector('#history tbody')
   if (!answer.ok) {
     body.innerHTML = '<tr><td colspan="5" class="muted">读取失败：' + escapeHtml(answer.error || '') + '</td></tr>'
     return
   }
+  // 下拉框选项来自服务端返回的租户清单，这样筛选中也会包含 '-'（未归属请求）。
+  if (picker !== null && picker.options.length <= 1 && Array.isArray(answer.tenants)) {
+    for (const id of answer.tenants) {
+      const option = document.createElement('option')
+      option.value = id
+      option.textContent = id === '-' ? '（未归属）' : id
+      picker.appendChild(option)
+    }
+  }
   const entries = answer.entries || []
   if (entries.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" class="muted">还没有记录</td></tr>'
+    body.innerHTML = '<tr><td colspan="5" class="muted">' + (answer.total === 0 ? '还没有记录' : '没有匹配的记录（共 ' + answer.total + ' 条）') + '</td></tr>'
     return
   }
   body.innerHTML = entries.map((entry) => {
