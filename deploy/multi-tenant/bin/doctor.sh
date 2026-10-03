@@ -391,5 +391,20 @@ else
     || warn "最近备份是 ${AGE_H} 小时前的 $(basename "$LAST")"
 fi
 
+# 备份打的是本机的 tenants/，别节点上的租户不在里面。这是警告而不是失败：
+# 多节点部署本来就该在每台机器上各备一次，但操作者必须知道"这份备份不完整"。
+# 否则出了事照它恢复，会以为那个租户本来就没数据。
+THIS_NODE_NAME="${MT_NODE_NAME:-local}"
+OFF_NODE=""
+for t in $TENANTS; do
+  n="$(NODE_OF "$t")"
+  [ -n "$n" ] && [ "$n" != "$THIS_NODE_NAME" ] && OFF_NODE="$OFF_NODE $t($n)"
+done
+if [ -n "$OFF_NODE" ]; then
+  warn "这些租户不在本机备份内（数据在别的节点上，需到那台机器执行 bin/mt.sh backup）:$OFF_NODE"
+else
+  ok "全部租户都由本机备份覆盖"
+fi
+
 printf '\n\033[36m== 结论 ==\033[0m\n  %s 项通过, %s 项警告, %s 项失败\n' "$OK" "$WARN" "$BAD"
 [ "$BAD" -eq 0 ] || exit 1
