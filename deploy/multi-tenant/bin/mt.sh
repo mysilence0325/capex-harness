@@ -591,6 +591,9 @@ cmd_add() {
 
   node_run bin/render.js >/dev/null
   ensure_egress_proxy
+  # 网络限速是运行时状态，容器一重建就没了；容器起好之后按 state/bandwidth.json 恢复。
+  # 失败只提示：限速不是可用性的前提，不该让 up 半途而废（可用 bandwidth show 查）。
+  bash bin/bandwidth.sh apply || echo "    !! 网络限速未恢复，执行 bin/mt.sh bandwidth apply 查看"
 
   local edge service
   edge="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.edgePort ?? ""))' "$id" 2>/dev/null | tr -d '\r')"

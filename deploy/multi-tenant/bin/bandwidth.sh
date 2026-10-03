@@ -16,7 +16,9 @@
 # 用法：
 #   bin/bandwidth.sh show [租户]                          # 看两个方向的规则与计数器
 #   bin/bandwidth.sh set <租户> <速率> [方向]             # 方向: --up(默认) --down --both
-#   bin/bandwidth.sh clear <租户>                         # 两个方向都移除
+#   bin/bandwidth.sh clear <租户>                         # 两个方向都移除（含意图）
+#   bin/bandwidth.sh apply                                # 按 state/bandwidth.json 重新应用
+#                                                          （bin/mt.sh up 会自动调用）
 #
 # 两个方向用的是不同的机制，这不是实现细节而是必须知道的：
 #   上行（容器发出）= root qdisc 上的 tbf，排队限速。
@@ -31,6 +33,87 @@ ARGV=("$@")
 COMMAND="${ARGV[0]:-show}"
 
 container_of() { printf '%s' "${PREFIX}dsh-$1"; }
+
+# 意图，而不只是当下那条规则：容器重建会丢掉规则，但"这个租户应该限到多少"必须留着，
+# 否则重建之后没人知道要恢复什么。set/clear 维护它，apply 按它重建规则。
+STATE_FILE="$PWD/state/bandwidth.json"
+
+state_read() {
+  [ -f "$STATE_FILE" ] || { printf '{}'; return; }
+  cat "$STATE_FILE"
+}
+
+state_write() {
+  local json="$1"
+  mkdir -p "$(dirname "$STATE_FILE")"
+  printf '%s\n' "$json" > "$STATE_FILE"
+  chmod 600 "$STATE_FILE" 2>/dev/null || true
+}
+
+# 用 python3 改 JSON：手写字符串拼接在带引号的值上很容易出错，而**宿主机上没有 node**
+#（这个脚本跑在宿主上）——用 node 会让意图文件根本写不出来，从而无从恢复。
+# 那台机器的 python3 是 3.6，所以这里不用 3.7+ 的写法。
+state_set() {
+  local tenant="$1" rate="$2" direction="$3"
+  python3 - "$STATE_FILE" "$tenant" "$rate" "$direction" <<'PY'
+import json
+import os
+import sys
+
+path, tenant, rate, direction = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except ValueError:
+        data = {}
+if rate == '':
+    data.pop(tenant, None)
+else:
+    data[tenant] = {'rate': rate, 'direction': direction}
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+os.chmod(path, 0o600)
+PY
+}
+
+# 从意图文件里取键（空格分隔）或某个键的一个字段。
+state_keys() {
+  python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    d = {}
+print(" ".join(sorted(d.keys())))' "$STATE_FILE" 2>/dev/null
+}
+
+state_field() {
+  python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    d = {}
+print((d.get(sys.argv[2]) or {}).get(sys.argv[3], ""))' "$STATE_FILE" "$1" "$2" 2>/dev/null
+}
+
+# 把一个租户的规则按给定方向落下去。set 与 apply 共用这一段。
+apply_rules() {
+  local tenant="$1" pid="$2" rate="$3" direction="$4"
+  if [ "$direction" = "up" ] || [ "$direction" = "both" ]; then
+    nsenter -t "$pid" -n tc qdisc replace dev eth0 root tbf rate "$rate" burst 32kbit latency 400ms || return 1
+  fi
+  if [ "$direction" = "down" ] || [ "$direction" = "both" ]; then
+    # 下行是进入容器的流量，root qdisc 管不到，要 ingress qdisc + police（丢包式，TCP 会退避）。
+    nsenter -t "$pid" -n tc qdisc add dev eth0 handle ffff: ingress 2>/dev/null \
+      || nsenter -t "$pid" -n tc qdisc replace dev eth0 handle ffff: ingress 2>/dev/null || true
+    nsenter -t "$pid" -n tc filter del dev eth0 parent ffff: 2>/dev/null || true
+    nsenter -t "$pid" -n tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 \
+      police rate "$rate" burst 32k drop flowid :1 || return 1
+  fi
+  return 0
+}
 
 pid_of() {
   local name; name="$(container_of "$1")"
@@ -110,27 +193,37 @@ case "$COMMAND" in
     esac
     PID="$(pid_or_empty "$TENANT")"
     if [ -z "$PID" ]; then not_running "$TENANT"; exit 1; fi
-    # replace 而不是 add：重复执行不会报错，也不会叠加多条规则。
-    if [ "$DIRECTION" = "up" ] || [ "$DIRECTION" = "both" ]; then
-      nsenter -t "$PID" -n tc qdisc replace dev eth0 root tbf rate "$RATE" burst 32kbit latency 400ms || {
-        echo "上行设置失败" >&2; exit 1
-      }
-    fi
-    if [ "$DIRECTION" = "down" ] || [ "$DIRECTION" = "both" ]; then
-      # 下行是进入容器的流量，root qdisc 管不到，要 ingress qdisc + police。
-      # police 是丢包式的（不是排队），所以 TCP 会自己退避 —— 这也是它有效的原因。
-      nsenter -t "$PID" -n tc qdisc add dev eth0 handle ffff: ingress 2>/dev/null \
-        || nsenter -t "$PID" -n tc qdisc replace dev eth0 handle ffff: ingress 2>/dev/null \
-        || true
-      nsenter -t "$PID" -n tc filter del dev eth0 parent ffff: 2>/dev/null || true
-      nsenter -t "$PID" -n tc filter add dev eth0 parent ffff: protocol ip u32 match u32 0 0 \
-        police rate "$RATE" burst 32k drop flowid :1 || {
-        echo "下行设置失败" >&2; exit 1
-      }
-    fi
-    echo "已为租户 $TENANT 设置限速 $RATE（方向: $DIRECTION）"
+    apply_rules "$TENANT" "$PID" "$RATE" "$DIRECTION" || { echo "设置失败" >&2; exit 1; }
+    # 记下意图：容器重建后 apply 靠它把规则恢复回来。
+    state_set "$TENANT" "$RATE" "$DIRECTION"
+    echo "已为租户 $TENANT 设置限速 $RATE（方向: $DIRECTION，已记入 state/bandwidth.json）"
     show_one "$TENANT"
     echo "  提醒：容器重建后这条规则会消失，需要重新执行。"
+    ;;
+
+  apply)
+    # 按 state/bandwidth.json 重新应用。bin/mt.sh up 在容器起好之后调用它 ——
+    # 规则是运行时状态，容器一重建就没了，这一步是恢复它们的唯一时机。
+    DATA="$(state_read)"
+    if [ "$DATA" = "{}" ] || [ -z "$DATA" ]; then
+      echo "没有任何租户配置了限速（state/bandwidth.json 为空）"
+      exit 0
+    fi
+    for t in $(state_keys); do
+      RATE="$(state_field "$t" rate)"
+      DIR="$(state_field "$t" direction)"
+      [ -z "$DIR" ] && DIR=up
+      PID="$(pid_or_empty "$t")"
+      if [ -z "$PID" ]; then
+        echo "  $t: 容器未运行，跳过（它起来之后需要再跑一次 apply）"
+        continue
+      fi
+      if apply_rules "$t" "$PID" "$RATE" "$DIR"; then
+        echo "  $t: 已恢复限速 $RATE（$DIR）"
+      else
+        echo "  $t: 恢复失败" >&2
+      fi
+    done
     ;;
 
   clear)
@@ -142,10 +235,11 @@ case "$COMMAND" in
     nsenter -t "$PID" -n tc qdisc del dev eth0 root 2>/dev/null && removed=1
     nsenter -t "$PID" -n tc filter del dev eth0 parent ffff: 2>/dev/null && removed=1
     nsenter -t "$PID" -n tc qdisc del dev eth0 ingress 2>/dev/null && removed=1
+    state_set "$TENANT" "" ""
     if [ "$removed" = "1" ]; then
-      echo "已移除租户 $TENANT 的网络限制（上行与下行都清）"
+      echo "已移除租户 $TENANT 的网络限制（上行与下行都清，意图也已删除）"
     else
-      echo "租户 $TENANT 本来就没有限制"
+      echo "租户 $TENANT 本来就没有限制（意图已删除）"
     fi
     show_one "$TENANT"
     ;;
