@@ -273,8 +273,15 @@ class AdminConsole {
    * @returns nothing.
    */
   setPassword(password, user = 'admin') {
-    const file = ADMIN_FILE(this.options.stateDir)
-    fs.writeFileSync(file, `${JSON.stringify({ user, passwordHash: hashPassword(password), updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 })
+    // Goes through the same path as everything else that changes a password.
+    //
+    // It used to write one record over the whole file, which silently downgraded the
+    // multi-administrator form to a single account - anyone calling it to reset one
+    // password would delete the others, viewers included. Nothing called it, but the
+    // shape was a loaded gun, and MFA is about to add fields to these same records.
+    // For a single-administrator file the result is the same as before.
+    const hash = hashPassword(password)
+    if (!this.setAdminPassword(user, hash)) this.addAdmin(user, hash, 'admin')
   }
 
   /** @returns whether an administrator password has been set at all. */
