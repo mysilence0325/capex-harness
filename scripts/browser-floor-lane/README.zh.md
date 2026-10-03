@@ -65,7 +65,7 @@ npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\c
 | `--fail-on-log-errors` | `DSH_FLOOR_FAIL_ON_LOG_ERRORS=1` | 关闭；参见下面的控制台检查 |
 | `--smoke` | 无 | 关闭；对着 `smoke/fixture.html` 运行 |
 
-驱动自己挑选 Session：它按顺序点击侧栏的行，直到某一行渲染出至少两个回合标记，因为回合导航轨道只为多回合 Session 渲染；随后它会恢复原先选中的视图标签页。
+驱动自己挑选 Session：它按顺序点击侧栏的行，直到某一行渲染出至少两个回合标记，因为回合导航轨道只为多回合 Session 渲染；随后它会恢复原先选中的视图标签页。两轮视口读取之后，它会打开右侧边栏、选择工作区文件入口并打开 `AGENTS.md`，这正是预览检查所读取的手势。
 
 输出分三处：stdout 上的 JSON 报告、stderr 上的一行摘要，以及 `--report` 与 `--shots` 里的三张截图。退出码为 `0` 表示所有检查通过，`1` 表示某项检查失败或某项事实读不到，`2` 表示用法或启动失败。
 
@@ -82,7 +82,14 @@ npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\c
 | `layout.trajectory-pane` | trajectory 面板自身的宽度、它的标记，以及紧凑列所折叠的类型标签 | 窄视口下面板不超过 620px、带标记，且标签为 `opacity: 0`；宽视口下不带标记且为 `opacity: 1` |
 | `scroll.conversation-scroller` | 对话滚动区的计算 `overflow-y` 与为滚动条预留的空间 | 计算值为 `scroll`，即本下限对 `scrollbar-gutter` 的替代；预留宽度会被报告出来 |
 | `css.no-container-queries` | 每个已挂载的文档级样式表里的每条规则 | 没有任何 `@container` 规则被挂载，这是本下限无法渲染的特性 |
+| `preview.workspace-file` | 工作区文件面板打开的 `AGENTS.md` 文档容器 | 其 `data-textpreview-state` 为 `text`，且渲染文本带有该文档自己的开篇文字，说明文件资源服务应答了这个地址 |
 | `console.errors` | 本次运行的控制台错误与异常，以及浏览器记录的错误级日志条目 | 页面没有记录控制台错误、也没有抛异常。错误级日志条目（请求失败）会写进报告，且只有在 `--fail-on-log-errors` 下才判定失败：与下限无关的路由返回 404，说明不了下限的任何事情 |
+
+### 工作区文件预览
+
+该检查打开某个 Session 的右侧边栏、工作区文件面板，并在其中打开 `AGENTS.md`，然后读取预览容器自身的状态。它之所以在这里，是因为没有任何 Node 端用例能证明这个事实：预览的地址是 `dsh-resource://file/…` URL，其协议键从地址字符串读出，而 Chromium 90 的 URL 解析器对非特殊 scheme 读不出 host——`hostname` 保持为空，其余部分落进 opaque path——而当前 Chromium、Node 与 Electron 引擎读到的是 `file`。该推导的归属地是 [resources.ts](../../packages/client/resources/src/client/resources.ts)；本通道就是下限引擎回答它的地方。
+
+检查所要求的文字是检出目录里 `AGENTS.md` 的开篇行，在运行通道时读取，而不是固定在旁边，因此对文档的修改不会留下过期的期望；通道指向的服务器提供的正是同一个工作区。面板通过客户端为自身行为渲染的标记抵达——头部的展开控件、引导页的 `files` 入口、文件行的路径——因此同一套手势适用于任何语言。
 
 ### 改动文件卡片的 404
 
@@ -94,7 +101,7 @@ npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\c
 
 ## 它看不见什么
 
-- 它只在一个 Session 已渲染的 DOM 上、以两种视口宽度读取。工作区列表、设置、对话框与预览 Worker 都不在其中；Worker 是独立 realm，而通道只读页面 realm。
+- 它只在一个 Session 已渲染的 DOM 上、以两种视口宽度读取，外加工作区文件面板打开的那一个文档预览。工作区列表、设置、对话框与预览 Worker 都不在其中；Worker 是独立 realm，而通道只读页面 realm。
 - 它扫描已挂载的文档级样式表，内联与链接的都包括。shadow root 自己的样式表不在遍历范围内，跨源样式表按读不到计数，而不是被读取。
 - 输入控件行自身的宽度由字体度量决定，因此 `--narrow-width` 必须留在该区间内：当该行宽到无法带标记时，检查会带着实测宽度失败，而不会悄悄通过。
 - Session 没有挂载的界面会报告为 `absent`，而读不到的事实会判定本次运行失败。回合轨道需要至少两个回合，trajectory 面板需要一个带轨迹的 Session。
@@ -112,7 +119,7 @@ CI 在它的位置上守住三件事，全部无需密钥，且都在产物一�
 | 文件 | 作用 |
 |---|---|
 | `drive.ts` | 选项、浏览器生命周期、DevTools 连接、Session 选择与报告 |
-| `steps.ts` | 各项检查、两轮视口读取，以及它们需要的页面操作 |
+| `steps.ts` | 各项检查、两轮视口读取、工作区文件手势，以及它们需要的页面操作 |
 | `probe.js` | 驱动在页面里求值的源码：必须能被下限引擎解析，且不得调用下限所安装的 API |
 | `smoke/fixture.html` | 通道自带的夹具页，用于没有服务器的运行 |
 

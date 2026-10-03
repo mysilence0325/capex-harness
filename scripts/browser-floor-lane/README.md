@@ -65,7 +65,7 @@ npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\c
 | `--fail-on-log-errors` | `DSH_FLOOR_FAIL_ON_LOG_ERRORS=1` | off; see the console check below |
 | `--smoke` | none | off; runs against `smoke/fixture.html` |
 
-The driver picks the Session itself: it clicks the sidebar rows in order until one renders at least two turn marks, because the turn rail renders only for a multi-turn Session, and it restores the view tab it found afterwards.
+The driver picks the Session itself: it clicks the sidebar rows in order until one renders at least two turn marks, because the turn rail renders only for a multi-turn Session, and it restores the view tab it found afterwards. After the viewport passes it opens the right Sidebar, picks the workspace-files entry, and opens `AGENTS.md`, which is the gesture the preview check reads.
 
 Output goes to three places: the JSON report on stdout, one summary line on stderr, and `--report` plus three screenshots in `--shots`. The exit code is `0` when every check passed, `1` when a check failed or a fact was unreadable, and `2` on a usage or startup failure.
 
@@ -82,7 +82,14 @@ Output goes to three places: the JSON report on stdout, one summary line on stde
 | `layout.trajectory-pane` | the trajectory pane's own width, its marker, and the kind label the compact columns collapse | at the narrow viewport the pane is at or below 620px, marked, with the label at `opacity: 0`; at the wide viewport it is unmarked with `opacity: 1` |
 | `scroll.conversation-scroller` | the conversation scroller's computed `overflow-y` and the space reserved for its scrollbar | it computes `scroll`, the floor's replacement for `scrollbar-gutter`; the reserved width is reported |
 | `css.no-container-queries` | every rule in every mounted document-level stylesheet | no `@container` rule is mounted, the feature the floor cannot render |
+| `preview.workspace-file` | the document container the workspace-files pane opened at `AGENTS.md` | its `data-textpreview-state` is `text` and its rendered text carries the document's own opening prose, so the file resource service answered the address |
 | `console.errors` | the run's console errors and exceptions, plus the browser's error-level log entries | the page logged no console error and threw no exception. Error-level log entries (a failed request) are recorded in the report and fail the run only under `--fail-on-log-errors`, because a route outside the floor answering 404 says nothing about the floor |
+
+### The workspace-file preview
+
+This check opens a Session's right Sidebar, the workspace-files pane, and `AGENTS.md` in it, then reads the preview container's own state. It is here because no Node-run case can prove this fact: the preview's address is a `dsh-resource://file/…` URL whose protocol key is read from the address string, and Chromium 90's URL parser reads no host for a non-special scheme — `hostname` stays empty and the remainder lands in the opaque path — where current Chromium, Node, and the Electron engine read `file`. [resources.ts](../../packages/client/resources/src/client/resources.ts) owns that derivation; this lane is where the engine under the floor answers it.
+
+The prose the check requires is the opening line of the checkout's own `AGENTS.md`, read as the lane runs rather than pinned beside it, so an edit to the document cannot leave a stale expectation behind; the server the lane points at serves that same workspace. The pane is reached through the markers the client renders for its own behaviour — the header's expand control, the guide's `files` entry, the file row's path — so one gesture serves every locale.
 
 ### The changed-files 404s
 
@@ -94,7 +101,7 @@ The report labels what it recognizes. `events.logErrorLabels` holds one record p
 
 ## What it cannot see
 
-- It reads one Session's rendered DOM at two viewport widths. The workspace list, settings, dialogs, and the preview Workers are not exercised; a Worker is a realm of its own, and the lane reads only the page realm.
+- It reads one Session's rendered DOM at two viewport widths, plus the one document preview the workspace-files pane opened. The workspace list, settings, dialogs, and the preview Workers are not exercised; a Worker is a realm of its own, and the lane reads only the page realm.
 - It scans the mounted document-level stylesheets, inline and linked alike. A shadow root's own sheets are outside the walk, and a cross-origin sheet is counted as unreadable rather than read.
 - Font metrics decide the composer row's own width, so `--narrow-width` has to stay inside the band: the check fails with the measured width when the row is too wide to be marked, rather than passing quietly.
 - Surfaces a Session does not mount report as `absent`, and an absent fact fails the run. The turn rail needs two turns; the trajectory pane needs a Session with a trajectory.
@@ -112,6 +119,6 @@ CI holds three things in its place, all keyless and all on the artifact side. Th
 | File | Role |
 |---|---|
 | `drive.ts` | Flags, browser lifecycle, DevTools connection, Session selection, the report |
-| `steps.ts` | The checks, the viewport passes, and the page operations they need |
+| `steps.ts` | The checks, the viewport passes, the workspace-file gesture, and the page operations they need |
 | `probe.js` | Page source the driver evaluates: it must stay parseable by the floor engine and must not call the APIs the floor installs |
 | `smoke/fixture.html` | The lane's own fixture page, for a run without a server |

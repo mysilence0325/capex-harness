@@ -28,9 +28,18 @@ const TRAJECTORY_PANE_WIDTH = 620
 /** Kind-label opacity the trajectory pane's compact columns compute, and the full one. */
 const KIND_LABEL_NARROW_OPACITY = '0'
 const KIND_LABEL_WIDE_OPACITY = '1'
+/** Workspace file the preview check opens, listed at the Session's workspace root. */
+const PREVIEW_FILE_NAME = 'AGENTS.md'
+/** How long one gesture of that check waits for the client to answer it. */
+const PREVIEW_TIMEOUT_MS = 15_000
+/** Characters of the open document's own prose the rendered preview must carry. */
+const PREVIEW_MARKER_LENGTH = 48
 
 /** Page-side probe, evaluated with the floor's API list as its argument. */
 const PROBE_SOURCE = readFileSync(new URL('./probe.js', import.meta.url), 'utf8')
+
+/** The lane's checkout, which a Session's workspace root resolves to on the server it is pointed at. */
+const CHECKOUT_ROOT = new URL('../../', import.meta.url)
 
 /** Where one check landed. Status 'absent' fails a run: the lane could not read the fact. */
 export type CheckStatus = 'pass' | 'fail' | 'absent' | 'not-applicable'
@@ -125,6 +134,12 @@ export interface StepOptions {
    * which does not load the client and cannot install the shell's compat entry.
    */
   readonly floorApisApplicable: boolean
+  /**
+   * Whether the served client's Session surface applies. False on the lane's own
+   * smoke fixture, which renders no Session, so the workspace-files check reports
+   * itself as not applicable rather than opening a sidebar that is not there.
+   */
+  readonly sessionUiApplicable: boolean
 }
 
 /**
@@ -241,6 +256,156 @@ export function restoreViewTabExpression(label: string): string {
   ].join('\n')
 }
 
+/** One mounted document preview as the probe read it. */
+interface PreviewReading {
+  /** The container's own state: `text` once a document is rendered, `loading` before it, `unsupported` for a type this preview refuses. */
+  readonly state: string | null
+  /** The `dsh-resource://` address the preview was opened at. */
+  readonly url: string | null
+  /** Id of the renderer that claimed the address. */
+  readonly renderer: string | null
+  /** Id of the Sidebar tab whose body holds the preview. */
+  readonly tab: string | null
+  /** Whether the tab showing it is the selected one, rather than a hidden sibling. */
+  readonly shown: boolean
+  /** Whether the preview has mounted its document body. */
+  readonly body: boolean
+  /** Characters of rendered text, before the probe's cap. */
+  readonly textLength: number | null
+  /** The rendered text, capped by the probe. */
+  readonly text: string
+}
+
+/** What opening the workspace file reported. */
+interface FileOpenAttempt {
+  /** Whether the pane was reached and the file's own tab became the selected one. */
+  readonly opened: boolean
+  /** Sidebar tab id whose body the gesture read the preview in. */
+  readonly tab: string | null
+  /** Why the gesture stopped, when it did not open. */
+  readonly reason: string | null
+}
+
+/**
+ * Open the Session's workspace-files pane and one file in it.
+ *
+ * Every step reads a marker the client renders for its own behaviour rather than
+ * localized copy, so one gesture serves every locale: the header's expand
+ * control, the guide's `files` entry (or the strip's add control that asks for a
+ * guide), the file row's path, and the tab the row selects, whose chip carries
+ * the file's own name. The wait ends when that tab's preview text carries the
+ * document's opening prose, so a gesture that opened the pane reports `opened`
+ * only once the document is on screen; what the preview then shows is the probe's
+ * reading, taken after this returns.
+ * @param fileName - basename of the file to open.
+ * @param marker - prose the rendered document must carry; an absent marker stops the wait at the mounted container.
+ * @returns the expression the driver evaluates.
+ */
+function openWorkspaceFileExpression(fileName: string, marker: string | undefined): string {
+  const suffix = JSON.stringify(`/${fileName}`)
+  const suffixLength = fileName.length + 1
+  const noRow = JSON.stringify(`the workspace-files pane lists no ${fileName}`)
+  const noPreview = JSON.stringify(`the workspace-files pane selected no tab named ${fileName} with a document preview in it`)
+  return [
+    '(async () => {',
+    '  const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))',
+    '  const until = async (read) => {',
+    '    const deadline = Date.now() + ' + String(PREVIEW_TIMEOUT_MS),
+    '    for (;;) {',
+    '      const found = read()',
+    '      if (found !== null && found !== undefined) return found',
+    '      if (Date.now() >= deadline) return null',
+    '      await wait(250)',
+    '    }',
+    '  }',
+    '  const report = (payload) => JSON.stringify(payload)',
+    '  const endsWithFile = (path) => path.slice(-' + String(suffixLength) + ') === ' + suffix,
+    '  const fileRow = () => {',
+    '    const rows = document.querySelectorAll(\'[data-files-entry="file"]\')',
+    '    for (let index = 0; index < rows.length; index += 1) {',
+    '      if (endsWithFile(rows[index].getAttribute(\'data-files-path\') || \'\')) return rows[index]',
+    '    }',
+    '    return null',
+    '  }',
+    '  const shownPreviews = () => Array.prototype.slice.call(document.querySelectorAll(\'[data-textpreview-state]\'))',
+    '    .filter((node) => node.closest(\'[hidden]\') === null)',
+    '  const seen = shownPreviews()',
+    '  const selectedTabNamed = () => {',
+    '    const chips = document.querySelectorAll(\'[data-dockkit-tab][aria-selected="true"]\')',
+    '    for (let index = 0; index < chips.length; index += 1) {',
+    '      if ((chips[index].textContent || \'\').trim() === ' + JSON.stringify(fileName) + ') return true',
+    '    }',
+    '    return false',
+    '  }',
+    '  const previewFor = () => {',
+    '    const nodes = shownPreviews()',
+    '    for (let index = 0; index < nodes.length; index += 1) {',
+    '      if (seen.indexOf(nodes[index]) === -1) return nodes[index]',
+    '    }',
+    '    for (let index = nodes.length - 1; index >= 0; index -= 1) {',
+    '      if (endsWithFile(nodes[index].getAttribute(\'data-textpreview-url\') || \'\')) return nodes[index]',
+    '    }',
+    '    return nodes.length === 0 ? null : nodes[nodes.length - 1]',
+    '  }',
+    '  const marker = ' + (marker === undefined ? 'null' : JSON.stringify(marker)),
+    '  const renderedDocument = () => {',
+    '    const node = previewFor()',
+    '    if (node === null || marker === null) return node',
+    '    const body = node.querySelector(\'[data-textpreview-body]\')',
+    '    if (body === null) return null',
+    '    return (body.textContent || \'\').indexOf(marker) === -1 ? null : node',
+    '  }',
+    '  const files = () => document.querySelector(\'[data-files-state]\')',
+    '  if (document.querySelector(\'[data-sidebar-right-open]\') === null) {',
+    '    const expand = document.querySelector(\'[data-sidebar-right-expand]\')',
+    '    if (expand === null) return report({ opened: false, reason: \'no right-sidebar expand control is mounted\' })',
+    '    expand.click()',
+    '    if (await until(() => document.querySelector(\'[data-sidebar-right-open]\')) === null) {',
+    '      return report({ opened: false, reason: \'the right sidebar did not open\' })',
+    '    }',
+    '  }',
+    '  if (files() === null) {',
+    '    const entry = () => document.querySelector(\'[data-sidebar-right-guide-entry="files"]\')',
+    '    if (entry() === null) {',
+    '      const add = document.querySelector(\'[data-dockkit-add-tab]\')',
+    '      if (add === null) return report({ opened: false, reason: \'the right sidebar offers no way to the workspace files\' })',
+    '      add.click()',
+    '    }',
+    '    const picked = await until(entry)',
+    '    if (picked === null) return report({ opened: false, reason: \'no workspace-files entry appeared in the right sidebar\' })',
+    '    picked.click()',
+    '    if (await until(files) === null) return report({ opened: false, reason: \'the workspace-files pane did not mount\' })',
+    '  }',
+    '  const row = await until(fileRow)',
+    '  if (row === null) return report({ opened: false, reason: ' + noRow + ' })',
+    '  const open = row.querySelector(\'button\')',
+    '  if (open === null) return report({ opened: false, reason: \'the file row carries no open control\' })',
+    '  open.click()',
+    '  const mounted = await until(() => selectedTabNamed() ? previewFor() : null)',
+    '  if (mounted === null) return report({ opened: false, tab: null, reason: ' + noPreview + ' })',
+    '  await until(renderedDocument)',
+    '  const node = previewFor()',
+    '  const host = (node === null ? mounted : node).closest(\'[data-sidebar-right-tab]\')',
+    '  return report({ opened: true, tab: host === null ? null : host.getAttribute(\'data-sidebar-right-tab\'), reason: null })',
+    '})()',
+  ].join('\n')
+}
+
+/**
+ * Read what the file-opening gesture reported.
+ * @param value - the page's return value.
+ * @returns the attempt, reading an answer it cannot parse as a gesture that never opened.
+ */
+function fileOpenAttempt(value: unknown): FileOpenAttempt {
+  const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : null
+  if (!isJsonObject(parsed)) return { opened: false, tab: null, reason: 'the page did not report the file-opening gesture' }
+  return {
+    opened: parsed.opened === true,
+    tab: textAt(parsed, 'tab'),
+    reason: textAt(parsed, 'reason'),
+  }
+}
+
 /** One probe payload with the sections the checks read. */
 interface PageReading {
   readonly payload: Record<string, unknown>
@@ -249,7 +414,33 @@ interface PageReading {
   readonly rail: Record<string, unknown> | null
   readonly trajectory: Record<string, unknown> | null
   readonly scroller: Record<string, unknown> | null
+  readonly previews: PreviewReading[]
   readonly containerQueries: Record<string, unknown> | null
+}
+
+/**
+ * Read the previews the probe found.
+ * @param payload - the probe's parsed report.
+ * @returns one reading per mounted preview, in document order.
+ */
+function previewReadings(payload: Record<string, unknown>): PreviewReading[] {
+  const raw = payload.previews
+  if (!Array.isArray(raw)) return []
+  const readings: PreviewReading[] = []
+  for (const entry of raw) {
+    if (!isJsonObject(entry)) continue
+    readings.push({
+      state: textAt(entry, 'state'),
+      url: textAt(entry, 'url'),
+      renderer: textAt(entry, 'renderer'),
+      tab: textAt(entry, 'tab'),
+      shown: booleanAt(entry, 'shown') === true,
+      body: booleanAt(entry, 'body') === true,
+      textLength: numberAt(entry, 'textLength'),
+      text: textAt(entry, 'text') ?? '',
+    })
+  }
+  return readings
 }
 
 /**
@@ -270,6 +461,7 @@ async function readPage(page: StepPage): Promise<PageReading> {
     rail: objectAt(parsed, 'rail'),
     trajectory: objectAt(parsed, 'trajectory'),
     scroller: objectAt(parsed, 'scroller'),
+    previews: previewReadings(parsed),
     containerQueries: objectAt(parsed, 'containerQueries'),
   }
 }
@@ -722,6 +914,114 @@ function containerQueryCheck(reading: PageReading): CheckOutcome {
   }
 }
 
+/**
+ * The opening prose of the document the preview check opens.
+ *
+ * Read from the lane's checkout rather than copied beside it, so editing the
+ * document cannot leave a stale expectation behind; the server the lane points
+ * at serves that same workspace. Markdown syntax is stripped the way the
+ * renderer strips it — link targets and the inline-code and emphasis marks —
+ * leaving the words the preview's own text has to carry.
+ * @returns the prose run, or undefined when the checkout has no such document or nothing to read from it.
+ */
+function documentMarker(): string | undefined {
+  let document: string
+  try {
+    document = readFileSync(new URL(PREVIEW_FILE_NAME, CHECKOUT_ROOT), 'utf8')
+  } catch {
+    // A checkout without the document this check opens cannot state what its preview must render.
+    return undefined
+  }
+  const line = document.split('\n').find(candidate => candidate.trim() !== '' && !candidate.trimStart().startsWith('#'))
+  if (line === undefined) return undefined
+  const prose = line.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[`*_]/g, '').trim()
+  return prose === '' ? undefined : prose.slice(0, PREVIEW_MARKER_LENGTH)
+}
+
+/**
+ * Whether the Session's workspace-files pane renders the document it opened.
+ *
+ * The Chromium 90 URL parser reads no host for a `dsh-resource://file/…`
+ * address, so a preview opened at one is stamped with no protocol, no provider
+ * ever runs, and the pane says the file resource service is unavailable instead
+ * of reading the file. What is read here is the preview's own container: its
+ * `data-textpreview-state` is `text` only once a document was rendered, and the
+ * rendered text has to carry the opened document's own words. A preview that
+ * never arrived reports `absent`, because the lane could not read the fact.
+ * @param reading - probe payload carrying the mounted previews.
+ * @param attempt - what opening the file in the pane reported.
+ * @param marker - prose of the opened document, absent when the lane cannot read it.
+ * @returns the check outcome.
+ */
+function previewCheck(reading: PageReading, attempt: FileOpenAttempt, marker: string | undefined): CheckOutcome {
+  // The tab id is the gesture's own identity for the body it clicked open; an
+  // address match is the fallback for a run whose tab was re-created between
+  // the two page evaluations. A preview that never reached `text` carries no
+  // address at all, which is why the tab id comes first.
+  const preview = reading.previews.find(candidate => candidate.tab !== null && candidate.tab === attempt.tab)
+    ?? [...reading.previews].reverse().find(candidate => candidate.url !== null && candidate.url.endsWith(`/${PREVIEW_FILE_NAME}`))
+  const evidence = {
+    opened: attempt.opened,
+    reason: attempt.reason,
+    tab: attempt.tab,
+    marker: marker ?? null,
+    previews: reading.previews.map(entry => ({
+      state: entry.state, url: entry.url, renderer: entry.renderer, tab: entry.tab, shown: entry.shown,
+      body: entry.body, textLength: entry.textLength,
+    })),
+    text: preview === undefined ? null : preview.text.slice(0, 200),
+  }
+  if (!attempt.opened) {
+    return {
+      id: 'preview.workspace-file',
+      status: 'absent',
+      detail: 'the lane could not open ' + PREVIEW_FILE_NAME + ' in the workspace-files pane: ' + (attempt.reason ?? 'the page reported no reason'),
+      evidence,
+    }
+  }
+  if (preview === undefined) {
+    return {
+      id: 'preview.workspace-file',
+      status: 'absent',
+      detail: 'the document preview of ' + PREVIEW_FILE_NAME + ' is not in the page after opening it',
+      evidence,
+    }
+  }
+  if (preview.state !== 'text') {
+    return {
+      id: 'preview.workspace-file',
+      status: 'fail',
+      detail: 'the preview opened at the file states data-textpreview-state=' + String(preview.state)
+        + ' and renders "' + preview.text.slice(0, 120) + '" instead of the document, so the file resource service never answered',
+      evidence,
+    }
+  }
+  if (marker === undefined) {
+    return {
+      id: 'preview.workspace-file',
+      status: 'fail',
+      detail: 'the preview rendered a document, but the lane cannot read ' + PREVIEW_FILE_NAME + ' from its own checkout to state what that document must carry',
+      evidence,
+    }
+  }
+  if (!preview.text.includes(marker)) {
+    return {
+      id: 'preview.workspace-file',
+      status: 'fail',
+      detail: 'the preview rendered ' + String(preview.textLength) + ' characters whose first ' + String(preview.text.length)
+        + ' do not carry the opening prose of ' + PREVIEW_FILE_NAME + ' ("' + marker + '")',
+      evidence,
+    }
+  }
+  return {
+    id: 'preview.workspace-file',
+    status: 'pass',
+    detail: 'the workspace-files pane opened ' + PREVIEW_FILE_NAME + ' and its preview rendered the document through the '
+      + String(preview.renderer) + ' renderer: ' + String(preview.textLength) + ' characters, opening with "' + marker + '"',
+    evidence,
+  }
+}
+
 /** URL path every changed-files request starts with, summary and diff alike. */
 const CHANGES_PATH_PREFIX = '/api/changes.'
 /** Status a refused request states, and the one the changed-files handler answers once the summary is gone. */
@@ -832,7 +1132,9 @@ function consoleErrorCheck(events: StepEvents, failOnLogErrors: boolean): CheckO
  *
  * The chat view is read at both viewport widths first, because the turn rail
  * and the conversation scroller belong to it; the trajectory view is then
- * activated and read on both sides of its own breakpoint.
+ * activated and read on both sides of its own breakpoint; the workspace-files
+ * preview is opened last, because it widens the right Sidebar over the
+ * conversation the earlier readings measured.
  * @param page - page operations.
  * @param options - the run's fixed inputs.
  * @returns one outcome per check, in report order.
@@ -878,6 +1180,18 @@ export async function runSteps(page: StepPage, options: StepOptions): Promise<Ch
   const trajectoryNarrow = await readPage(page)
   outcomes.push(trajectoryPaneCheck(trajectoryNarrow, 'narrow', activationRecord))
   await page.shot('03-trajectory.png')
+
+  if (options.sessionUiApplicable) {
+    const marker = documentMarker()
+    const attempt = fileOpenAttempt(await page.evaluate(openWorkspaceFileExpression(PREVIEW_FILE_NAME, marker)))
+    outcomes.push(previewCheck(await readPage(page), attempt, marker))
+  } else {
+    outcomes.push({
+      id: 'preview.workspace-file',
+      status: 'not-applicable',
+      detail: 'the lane is reading its own smoke fixture, which renders no Session and no workspace-files pane',
+    })
+  }
 
   const selectedLabel = textAt(activationRecord, 'selectedLabel')
   if (selectedLabel !== null && selectedLabel !== '') await page.evaluate(restoreViewTabExpression(selectedLabel))

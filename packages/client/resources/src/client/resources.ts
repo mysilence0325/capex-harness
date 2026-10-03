@@ -46,25 +46,26 @@ interface ResourceRecord {
 export const RESOURCE_SCHEME = 'dsh-resource'
 
 /**
- * The protocol key of one address: the host of a `dsh-resource://` URL, as the
- * URL parser reads it (lower-cased). Any other string — another scheme, or one
- * the URL parser rejects — names no protocol and is treated like an address
- * whose protocol has no provider.
+ * The protocol key of one address: the host of a `dsh-resource://` address
+ * between `://` and the first `/`, `?`, or `#`, lower-cased. Any other string —
+ * another scheme, or an address whose host segment is empty — names no protocol
+ * and is treated like an address whose protocol has no provider.
+ *
+ * The host is read from the string rather than from `new URL`, because a
+ * non-special scheme's host parsing is engine-dependent: Chromium 90 reads no
+ * host for `dsh-resource://file/…`, reports `hostname === ''`, and leaves the
+ * whole remainder in the opaque path, so a URL-based read calls every such
+ * address protocol-less on that engine.
  * @param address - the full address.
  * @returns the protocol key, or `undefined` when the address is not a resource address.
  */
 export function protocolOf(address: string): string | undefined {
-  let parsed: URL
-  try {
-    parsed = new URL(address)
-  } catch {
-    // The URL parser rejects strings without a scheme (`/a/b.txt`, `''`);
-    // nothing else throws here, and an unparseable address is simply not ours.
-    return undefined
-  }
-  if (parsed.protocol !== `${RESOURCE_SCHEME}:`) return undefined
-  // A non-special scheme's host is opaque to the URL parser and keeps its case.
-  return parsed.hostname === '' ? undefined : parsed.hostname.toLowerCase()
+  const prefix = `${RESOURCE_SCHEME}://`
+  if (address.slice(0, prefix.length).toLowerCase() !== prefix) return undefined
+  const rest = address.slice(prefix.length)
+  const end = rest.search(/[/?#]/)
+  const protocol = end === -1 ? rest : rest.slice(0, end)
+  return protocol === '' ? undefined : protocol.toLowerCase()
 }
 
 function idle(status: 'none' | 'loading'): ResourceSnapshot<unknown> {

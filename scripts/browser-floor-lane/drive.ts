@@ -585,6 +585,7 @@ async function main(argv: readonly string[]): Promise<number> {
       events: session.events,
       failOnLogErrors: options.failOnLogErrors,
       floorApisApplicable: options.mode === 'server',
+      sessionUiApplicable: options.mode === 'server',
     })
     const summary = summarize(outcomes)
     const report = {

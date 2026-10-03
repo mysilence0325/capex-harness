@@ -9,6 +9,9 @@
  */
 ((floorApis) => {
   const NATIVE_SOURCE = /\{\s*\[native code\]\s*\}/
+  // A rendered document is far longer than the fact the preview check reads
+  // from it, so the payload carries a capped prefix.
+  const PREVIEW_TEXT_LIMIT = 4000
   const css = (element, property) => element === null ? null : getComputedStyle(element).getPropertyValue(property)
   const contentWidth = (element) => {
     if (element === null) return null
@@ -108,6 +111,28 @@
     composerOverlay: shell !== null && shell.hasAttribute('data-composer-overlay'),
   }
 
+  // Every mounted document preview states what it is showing, and the tab that
+  // holds it: the lane reads the one its own click opened. A preview that never
+  // reached a document carries no body, so its own status text is what gets read.
+  const previews = []
+  const previewNodes = document.querySelectorAll('[data-textpreview-state]')
+  for (let index = 0; index < previewNodes.length; index += 1) {
+    const node = previewNodes[index]
+    const body = node.querySelector('[data-textpreview-body]')
+    const text = (body === null ? node : body).textContent || ''
+    const host = node.closest('[data-sidebar-right-tab]')
+    previews.push({
+      state: node.getAttribute('data-textpreview-state'),
+      url: node.getAttribute('data-textpreview-url'),
+      renderer: node.getAttribute('data-document-preview'),
+      tab: host === null ? null : host.getAttribute('data-sidebar-right-tab'),
+      shown: node.closest('[hidden]') === null,
+      body: body !== null,
+      textLength: text.length,
+      text: text.slice(0, PREVIEW_TEXT_LIMIT),
+    })
+  }
+
   // Container queries are read from the mounted stylesheets, where a
   // reintroduced @container would land. A shadow root's own sheets are outside
   // this walk, and a cross-origin sheet reports through unreadable.
@@ -157,6 +182,7 @@
     rail: rail,
     trajectory: trajectory,
     scroller: scroller,
+    previews: previews,
     containerQueries: {
       stylesheets: sources.length,
       readable: readable,
