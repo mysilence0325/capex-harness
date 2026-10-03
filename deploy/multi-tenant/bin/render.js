@@ -672,6 +672,10 @@ ${isControlPlane ? `  backup:
     environment:
       MT_BACKUP_INTERVAL_SECONDS: \${MT_BACKUP_INTERVAL_SECONDS:-86400}
       MT_BACKUP_KEEP: \${MT_BACKUP_KEEP:-7}
+      # Session retention, read by bin/retention-loop.sh. Empty keeps sessions
+      # forever; a number makes the loop pack older ones into backups/ and remove
+      # them, before each backup.
+      MT_SESSION_RETENTION_DAYS: \${MT_SESSION_RETENTION_DAYS:-}
       TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
     volumes:
@@ -681,7 +685,7 @@ ${loggingBlock()}
       - /usr/bin/docker:/usr/bin/docker:ro
     # Double dollar is compose's escape for a single literal one, so the loop
     # reads both settings from its own environment rather than from this file.
-    entrypoint: ["bash", "-c", "while true; do /project/bin/backup.sh --keep $$MT_BACKUP_KEEP || echo 'backup failed, will retry'; sleep $$MT_BACKUP_INTERVAL_SECONDS; done"]
+    entrypoint: ["bash", "/project/bin/retention-loop.sh"]
 
   node-agent:
     # The console's lifecycle and maintenance operations have nowhere to run: the
