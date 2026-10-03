@@ -24,29 +24,98 @@ TENANTS_DIR="${MT_QUOTA_TENANTS:-$PWD/tenants}"
 # 必须记下来 —— 指标与告警靠它工作，启用之后也靠它恢复。
 QUOTA_FILE="$PWD/state/quota.json"
 
-quota_intent_set() {
-  python3 - "$QUOTA_FILE" "$1" "$2" <<'PY'
-import json
-import os
-import sys
+# JSON 读改：这个脚本既可能在宿主上跑（有 python3、没有 node），也可能在节点代理
+# 容器里跑（有 node、没有 python3）。实测过一次：代理里跑 quota set 直接报
+# "python3: command not found"，规则设上了但意图没记下来。
+json_tool() {
+  if command -v node >/dev/null 2>&1; then printf 'node'; return 0; fi
+  if command -v python3 >/dev/null 2>&1; then printf 'python3'; return 0; fi
+  printf ''
+}
 
-path, tenant, size = sys.argv[1], sys.argv[2], sys.argv[3]
+# json_edit <文件> <键> <值> —— 值为空则删除该键
+# json_edit <文件> <键> <字段> <值> [<字段> <值> …] —— 只写传入的字段。
+# 不写死字段名：带宽要记 rate 与 direction，配额只记 size，写死会把 direction 丢掉。
+json_edit() {
+  local file="$1" key="$2"; shift 2
+  local tool; tool="$(json_tool)"
+  case "$tool" in
+    node)
+      node -e '
+const fs = require("node:fs");
+const [file, key, ...pairs] = process.argv.slice(1);
+let data = {};
+try { data = JSON.parse(fs.readFileSync(file, "utf8")) } catch { data = {} }
+if (pairs.length === 0) delete data[key];
+else { const entry = data[key] || {}; for (let i = 0; i < pairs.length; i += 2) entry[pairs[i]] = pairs[i + 1]; data[key] = entry; }
+fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+' "$file" "$key" "$@" || return 1
+      ;;
+    python3)
+      python3 - "$file" "$key" "$@" <<'PY' || return 1
+import json, os, sys
+path, key = sys.argv[1], sys.argv[2]
+pairs = sys.argv[3:]
 data = {}
-if os.path.exists(path):
-    try:
-        with open(path, encoding='utf-8') as f:
-            data = json.load(f)
-    except ValueError:
-        data = {}
-if size == '':
-    data.pop(tenant, None)
+try:
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+if not pairs:
+    data.pop(key, None)
 else:
-    data[tenant] = {'size': size}
+    entry = data.get(key) or {}
+    for i in range(0, len(pairs), 2):
+        entry[pairs[i]] = pairs[i + 1]
+    data[key] = entry
 with open(path, 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write('\n')
 os.chmod(path, 0o600)
 PY
+      ;;
+    *)
+      echo "这台机器上既没有 node 也没有 python3，无法记录意图" >&2
+      return 1
+      ;;
+  esac
+}
+
+# json_keys <文件>
+json_keys() {
+  local file="$1" tool
+  [ -f "$file" ] || return 0
+  tool="$(json_tool)"
+  case "$tool" in
+    node) node -e 'try{const d=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));console.log(Object.keys(d).join(" "))}catch{}' "$file" ;;
+    python3) python3 -c 'import json,sys
+try:
+    print(" ".join(json.load(open(sys.argv[1], encoding="utf-8")).keys()))
+except Exception:
+    pass' "$file" ;;
+  esac
+}
+
+# json_field <文件> <键> <字段>
+json_field() {
+  local file="$1" key="$2" field="$3" tool
+  [ -f "$file" ] || return 0
+  tool="$(json_tool)"
+  case "$tool" in
+    node) node -e 'try{const d=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));console.log((d[process.argv[2]]||{})[process.argv[3]]||"")}catch{}' "$file" "$key" "$field" ;;
+    python3) python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    d = {}
+print((d.get(sys.argv[2]) or {}).get(sys.argv[3], ""))' "$file" "$key" "$field" ;;
+  esac
+}
+
+
+quota_intent_set() {
+  if [ -z "${2:-}" ]; then json_edit "$QUOTA_FILE" "$1"; else json_edit "$QUOTA_FILE" "$1" size "$2"; fi
 }
 MOUNT_POINT="${MT_QUOTA_MOUNT:-$(df -T "$TENANTS_DIR" 2>/dev/null | awk 'NR==2 {print $NF}')}"
 # project id 由租户名决定：同一个租户每次算出来都一样，不依赖顺序，删了再加也对得上。
