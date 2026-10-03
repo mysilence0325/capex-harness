@@ -84,6 +84,14 @@ npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\c
 | `css.no-container-queries` | 每个已挂载的文档级样式表里的每条规则 | 没有任何 `@container` 规则被挂载，这是本下限无法渲染的特性 |
 | `console.errors` | 本次运行的控制台错误与异常，以及浏览器记录的错误级日志条目 | 页面没有记录控制台错误、也没有抛异常。错误级日志条目（请求失败）会写进报告，且只有在 `--fail-on-log-errors` 下才判定失败：与下限无关的路由返回 404，说明不了下限的任何事情 |
 
+### 改动文件卡片的 404
+
+当某个 Session 的轮次早于录制进程的活跃窗口时，一次运行会记录若干条错误级日志条目：`GET /api/changes.summary?sessionId=…&seq=…` 回答 `404`。所有者已按设计接受这些条目：改动文件卡片是只在活跃轮次存在的产物，因此 Host 一旦不再持有该轮次的摘要，就会以 `404` 回答 `Change summary unavailable.`；读取更早的 Session 就是在请求已经不存在的摘要。该路由已挂载，这个回答来自它注册的处理器，即 [present-open.ts](../../packages/client/ui-deliverables/src/present-open.ts) 里的 `handleChangesSummary`；产品行为没有变化，其归属说明见[交付物包 README](../../packages/client/ui-deliverables/README.zh.md)。
+
+三种回答共用这个状态码，只有正文能区分它们：`not found` 是分发器回答没有匹配到路由，`Change summary unavailable.`（`/api/changes.diff` 为 `Change comparison unavailable.`）是该处理器拒绝一份它已不再持有的摘要，而正文为空且没有 `content-type` 则是 SPA 回退。控制台日志条目只带状态码和 URL、不带正文，因此通道仅凭日志无法区分这三者。
+
+报告会给它认出的条目加上标注。`events.logErrorLabels` 为每条路径以 `/api/changes.` 开头、且日志文本写明 `404` 的错误级日志条目保存一条记录：它在 `events.logErrors` 中的下标、路径、状态码、标注 `handler's own expired-summary answer`，以及一条说明，指出这个读法依据的是 URL 家族与状态码，而不是对响应的查看。`events.logErrors` 中其他条目保持原样，标注也不决定任何判定：控制台错误与异常仍然判定运行失败，错误级日志条目仍然只在 `--fail-on-log-errors` 下判定失败。
+
 ## 它看不见什么
 
 - 它只在一个 Session 已渲染的 DOM 上、以两种视口宽度读取。工作区列表、设置、对话框与预览 Worker 都不在其中；Worker 是独立 realm，而通道只读页面 realm。

@@ -82,6 +82,22 @@ export interface StepEvents {
   readonly exceptions: string[]
   /** Error-level entries the browser logged, including failed requests. */
   readonly logErrors: string[]
+  /** The changed-files card's own expired-summary 404s among those entries, in the order they were logged. */
+  readonly logErrorLabels: LogErrorLabel[]
+}
+
+/** One error-level log entry the lane reads as the changed-files card's expired-summary 404. */
+export interface LogErrorLabel {
+  /** Zero-based position in the report's `events.logErrors`. */
+  readonly index: number
+  /** Request path the entry's URL carries, without its query. */
+  readonly path: string
+  /** Status the browser's own log text states. */
+  readonly status: number
+  /** One line naming the answer the lane reads the entry as. */
+  readonly label: string
+  /** Why that reading is a heuristic on the log text rather than a look at the response. */
+  readonly note: string
 }
 
 /** Inputs one run fixes before the steps read the page. */
@@ -706,6 +722,53 @@ function containerQueryCheck(reading: PageReading): CheckOutcome {
   }
 }
 
+/** URL path every changed-files request starts with, summary and diff alike. */
+const CHANGES_PATH_PREFIX = '/api/changes.'
+/** Status a refused request states, and the one the changed-files handler answers once the summary is gone. */
+const LOG_STATUS_PATTERN = /status of (\d{3})/
+const EXPIRED_SUMMARY_STATUS = 404
+/** One line naming the answer the lane reads a recognized entry as. */
+const EXPIRED_SUMMARY_LABEL = 'handler\'s own expired-summary answer'
+/** Why that reading is a heuristic, carried beside every label so the report states its own limit. */
+const EXPIRED_SUMMARY_NOTE = 'Heuristic on the URL family and on the status the browser\'s log text states, because the entry carries no response body: the dispatcher answers 404 with the body "not found" and the SPA fallback with an empty body, so only the body separates the three. What the label asserts is that /api/changes.* is mounted and refused a summary the recording process no longer holds, the changed-files card being a live-turn artifact, rather than that no route served the request.'
+
+/**
+ * Read the path of one request URL, without its query or fragment.
+ * @param url - the URL the log entry names.
+ * @returns the path, or null when the entry names something that is not a URL.
+ */
+function requestPath(url: string): string | null {
+  try {
+    return new URL(url).pathname
+  } catch {
+    // A log entry can name a value that is not a URL at all; it is not one of these requests.
+    return null
+  }
+}
+
+/**
+ * Read one error-level log entry as the changed-files card's own expired-summary 404.
+ *
+ * The reading is a heuristic on the request's URL family and on the status the
+ * browser's log text states, because the entry carries no response body: the
+ * dispatcher's "not found" and the SPA fallback share the status, and only the
+ * body separates the three answers. The label asserts the shape a live page's
+ * own /api/changes.summary and /api/changes.diff requests take once the
+ * recording process no longer holds that turn's summary, and it never decides a
+ * verdict.
+ * @param text - the entry's text, which states the status.
+ * @param url - the request URL the entry names.
+ * @param index - the entry's position in the report's `events.logErrors`.
+ * @returns the label, or null when the entry is not one of these 404s.
+ */
+export function expiredSummaryLabel(text: string, url: string, index: number): LogErrorLabel | null {
+  const status = Number(LOG_STATUS_PATTERN.exec(text)?.[1] ?? '')
+  if (status !== EXPIRED_SUMMARY_STATUS) return null
+  const path = requestPath(url)
+  if (path === null || !path.startsWith(CHANGES_PATH_PREFIX)) return null
+  return { index, path, status, label: EXPIRED_SUMMARY_LABEL, note: EXPIRED_SUMMARY_NOTE }
+}
+
 /**
  * Whether the page logged no error and threw no exception.
  *
@@ -713,7 +776,9 @@ function containerQueryCheck(reading: PageReading): CheckOutcome {
  * (the browser's own record of a failed request) fail it only when the caller
  * asked for that, because a route outside the floor answering 404 says nothing
  * about the floor and would otherwise hold the lane red indefinitely. They stay
- * in the evidence and in the report's event list either way.
+ * in the evidence and in the report's event list either way, and the ones the
+ * lane reads as the changed-files card's own expired-summary 404 are labelled
+ * there without changing any verdict.
  * @param events - the run's captured events.
  * @param failOnLogErrors - whether an error-level log entry fails the run.
  * @returns the check outcome.
@@ -722,17 +787,22 @@ function consoleErrorCheck(events: StepEvents, failOnLogErrors: boolean): CheckO
   const consoleErrors = events.consoleErrors
   const exceptions = events.exceptions
   const logErrors = events.logErrors
+  const labels = events.logErrorLabels
   const evidence = {
     consoleErrors: consoleErrors.length,
     exceptions: exceptions.length,
     logErrors: logErrors.length,
+    labelledLogErrors: labels.length,
     firstLogError: logErrors[0] ?? null,
     first: consoleErrors[0] ?? exceptions[0] ?? null,
   }
   const logged = String(logErrors.length) + ' error-level log entry(ies)'
+  const labelled = labels.length === 0
+    ? ''
+    : ', ' + String(labels.length) + ' of them labelled as the ' + EXPIRED_SUMMARY_LABEL
   const recorded = logErrors.length === 0
     ? 'and reported no error-level log entry'
-    : '; ' + logged + ' are recorded in the report: ' + String(evidence.firstLogError)
+    : '; ' + logged + ' are recorded in the report' + labelled + ': ' + String(evidence.firstLogError)
   if (consoleErrors.length === 0 && exceptions.length === 0 && (logErrors.length === 0 || !failOnLogErrors)) {
     return {
       id: 'console.errors',

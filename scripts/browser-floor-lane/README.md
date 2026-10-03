@@ -84,6 +84,14 @@ Output goes to three places: the JSON report on stdout, one summary line on stde
 | `css.no-container-queries` | every rule in every mounted document-level stylesheet | no `@container` rule is mounted, the feature the floor cannot render |
 | `console.errors` | the run's console errors and exceptions, plus the browser's error-level log entries | the page logged no console error and threw no exception. Error-level log entries (a failed request) are recorded in the report and fail the run only under `--fail-on-log-errors`, because a route outside the floor answering 404 says nothing about the floor |
 
+### The changed-files 404s
+
+A run against a Session older than the recording process's live turns records error-level log entries for `GET /api/changes.summary?sessionId=…&seq=…` answered `404`. The owner accepted them as designed: the changed-files card is a live-turn artifact, so the Host answers `404` with `Change summary unavailable.` once it no longer holds the turn's summary, and reading an older Session asks for summaries that are gone. The route is mounted and the answer comes from its registered handler, `handleChangesSummary` in [present-open.ts](../../packages/client/ui-deliverables/src/present-open.ts); the product behaviour is unchanged and [the deliverables README](../../packages/client/ui-deliverables/README.md) owns it.
+
+Three answers share the status, and only the body separates them: `not found` is the dispatcher answering with no route matched, `Change summary unavailable.` (or `Change comparison unavailable.` for `/api/changes.diff`) is that handler refusing a summary it no longer holds, and an empty body with no `content-type` is the SPA fallback. A console log entry carries the status and the URL but not the body, so the lane cannot tell those three apart from the log alone.
+
+The report labels what it recognizes. `events.logErrorLabels` holds one record per error-level log entry whose path starts with `/api/changes.` and whose log text states `404`: its index in `events.logErrors`, the path, the status, the label `handler's own expired-summary answer`, and a note stating that the reading is a heuristic on the URL family and the status rather than a look at the response. Every other entry in `events.logErrors` stays as it was, and the label decides nothing: console errors and exceptions still gate the run, and error-level log entries still gate it only under `--fail-on-log-errors`.
+
 ## What it cannot see
 
 - It reads one Session's rendered DOM at two viewport widths. The workspace list, settings, dialogs, and the preview Workers are not exercised; a Worker is a realm of its own, and the lane reads only the page realm.

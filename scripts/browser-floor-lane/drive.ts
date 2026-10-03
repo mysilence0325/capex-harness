@@ -19,7 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
-import { isJsonObject, runSteps } from './steps.ts'
+import { expiredSummaryLabel, isJsonObject, runSteps } from './steps.ts'
 import type { CheckOutcome, StepEvents, StepPage } from './steps.ts'
 
 /** Chromium release the floor names, and the default the engine check enforces. */
@@ -329,7 +329,7 @@ async function connect(port: number, timeoutMs: number, shots: string): Promise<
     socket.addEventListener('open', () => { settle() })
     socket.addEventListener('error', () => { fail(new Error('the DevTools socket refused the connection')) })
   })
-  const events: StepEvents = { consoleErrors: [], exceptions: [], logErrors: [] }
+  const events: StepEvents = { consoleErrors: [], exceptions: [], logErrors: [], logErrorLabels: [] }
   const pending = new Map<number, (frame: Record<string, unknown>) => void>()
   let nextId = 1
   const record = (bucket: string[], text: string): void => {
@@ -368,7 +368,15 @@ async function connect(port: number, timeoutMs: number, shots: string): Promise<
     if (method === 'Log.entryAdded' && params !== null) {
       const entry = isJsonObject(params.entry) ? params.entry : null
       if (entry !== null && entry.level === 'error') {
-        record(events.logErrors, asText(entry.text, 'log error') + ' ' + asText(entry.url, '(no url)'))
+        const text = asText(entry.text, 'log error')
+        const url = asText(entry.url, '(no url)')
+        const index = events.logErrors.length
+        record(events.logErrors, text + ' ' + url)
+        // Only a recorded entry can be labelled: the report holds at most EVENT_LIMIT of them.
+        if (index < events.logErrors.length) {
+          const label = expiredSummaryLabel(text, url, index)
+          if (label !== null) events.logErrorLabels.push(label)
+        }
       }
     }
   })
