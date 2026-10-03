@@ -1131,9 +1131,21 @@ let EDGE_ORIGIN
  * @param body - the parsed request body.
  * @returns an answer the page renders.
  */
-async function adminAction(body) {
+async function adminAction(body, actor) {
   const action = typeof body?.action === 'string' ? body.action : ''
   const id = typeof body?.tenant === 'string' ? body.tenant : ''
+
+  // Roles, enforced here rather than in the page. The console hides what a viewer
+  // cannot do, but hiding a button is not a permission — this is. A viewer may look
+  // (state, history, disk report, backup list, current configuration) and may not
+  // change anything, including starting an operation that changes something.
+  const role = admin.roleOf(actor)
+  const readOnly = action === 'ops-history'
+    || (action === 'ops' && ['disk-report', 'backup-list', 'config-get'].includes(String(body?.op ?? '')))
+  if (role !== 'admin' && !readOnly) {
+    admin.audit({ action, tenant: id === '' ? '-' : id, user: actor, role, result: 'refused-viewer' })
+    return { ok: false, error: `${String(actor)} 是只读账号（viewer），不能执行「${action}」。需要管理员权限。` }
+  }
 
   if (action === 'add') {
     if (!ID_PATTERN.test(id)) return { ok: false, error: '租户 id 只能用小写字母、数字和短横线，且以字母开头' }
@@ -1287,7 +1299,7 @@ async function adminAction(body) {
   if (action === 'own-passwd') {
     const current = typeof body?.currentPassword === 'string' ? body.currentPassword : ''
     const next = typeof body?.newPassword === 'string' ? body.newPassword : ''
-    const record = admin.readAdmin()
+    const record = admin.adminByName(actor)
     if (record === undefined) return { ok: false, error: '还没有设置管理员密码，先执行 bin/mt.sh admin-passwd' }
     // The current password is required: a stolen console session must not be
     // enough to take the account over.
@@ -1300,7 +1312,7 @@ async function adminAction(body) {
     }
     if (next === current) return { ok: false, error: '新密码和当前密码一样' }
     try {
-      admin.writeAdmin(record.user, hashPassword(next))
+      admin.setAdminPassword(actor, hashPassword(next))
       admin.rotateSessionKey()
     } catch (error) {
       admin.audit({ action: 'own-passwd', tenant: '-', result: 'failed', error: error.message })
@@ -1311,7 +1323,7 @@ async function adminAction(body) {
     // sessions keep the old key's cookies and stop verifying.
     return {
       ok: true,
-      session: admin.mintSession(),
+      session: admin.mintSession(actor),
       message: '密码已修改。其它已登录的管理员会话已失效，当前会话保持登录。',
     }
   }
@@ -1506,7 +1518,7 @@ async function handleAdmin(req, res, url) {
       return
     }
     send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-      adminConsolePage({ user: session }))
+      adminConsolePage({ user: session, role: admin.roleOf(session) }))
     return
   }
 
@@ -1519,9 +1531,10 @@ async function handleAdmin(req, res, url) {
       return
     }
     const form = await readForm(req).catch(() => new URLSearchParams())
-    const stored = admin.readAdmin()
+    // 按名字找人：现在可以有多个管理员，角色也不同。
+    const wanted = String(form.get('user') ?? '')
+    const stored = admin.adminByName(wanted)
     const ok = stored !== undefined
-      && String(form.get('user') ?? '') === stored.user
       && verifyPassword(String(form.get('password') ?? ''), stored.passwordHash)
     if (!ok) {
       const bucket = admin.bucketFor(remote)
@@ -1536,10 +1549,10 @@ async function handleAdmin(req, res, url) {
       return
     }
     admin.bucketFor(remote).count = 0
-    admin.audit({ action: 'login', tenant: '-', user: stored.user, result: 'ok', source: remote })
+    admin.audit({ action: 'login', tenant: '-', user: stored.name, role: stored.role, result: 'ok', source: remote })
     send(res, 303, {
       location: `${PREFIX}/admin`,
-      'set-cookie': adminCookieHeader(admin.mintSession(), encrypted, Math.floor(SESSION_MS / 1000)),
+      'set-cookie': adminCookieHeader(admin.mintSession(stored.name), encrypted, Math.floor(SESSION_MS / 1000)),
       'cache-control': 'no-store',
     }, '')
     return
@@ -1577,7 +1590,7 @@ async function handleAdmin(req, res, url) {
       send(res, 400, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: body.__error }))
       return
     }
-    const answer = await adminAction(body)
+    const answer = await adminAction(body, session)
     const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
     // A password change rotates the signing key, so every cookie minted with the
     // old one stops verifying — including this request's. The action hands back a

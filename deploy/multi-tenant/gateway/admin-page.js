@@ -117,12 +117,12 @@ function statusTag(entry) {
  * @param options.user - the signed-in administrator.
  * @returns the HTML.
  */
-function consolePage({ user }) {
+function consolePage({ user, role }) {
   return shell('DSH 多租户管理控制台', `<div class="wrap">
 <div class="row" style="justify-content: space-between">
   <div>
     <h1>DSH 多租户管理控制台</h1>
-    <p class="sub">管理员 ${escapeHtml(user)} · 数据来自控制面实时状态</p>
+    <p class="sub">${role === 'admin' ? '管理员' : '只读账号'} ${escapeHtml(user)} · 数据来自控制面实时状态${role === 'admin' ? '' : '（只读账号只能查看，运维操作会被拒绝）'}</p>
   </div>
   <form method="post" action="logout"><button type="submit">退出</button></form>
 </div>

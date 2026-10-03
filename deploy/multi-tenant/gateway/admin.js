@@ -131,6 +131,108 @@ class AdminConsole {
   }
 
   /**
+   * Every administrator, in the shape that supports more than one.
+   *
+   * The file started as a single record (`{user, passwordHash}`) and that shape is
+   * still read: an upgrade must not lock the existing administrator out of the
+   * console. A record with no role is treated as an administrator, because that is
+   * what it was before roles existed.
+   *
+   * @returns the administrator records, oldest first.
+   */
+  readAdmins() {
+    const file = ADMIN_FILE(this.options.stateDir)
+    if (!fs.existsSync(file)) return []
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch (error) {
+      console.error(`mt-gateway: ${file} is not readable JSON: ${error.message}`)
+      return []
+    }
+    if (Array.isArray(parsed?.users)) {
+      return parsed.users
+        .filter((entry) => typeof entry?.name === 'string' && entry.name !== '')
+        .map((entry) => ({
+          name: entry.name,
+          passwordHash: entry.passwordHash,
+          role: entry.role === 'viewer' ? 'viewer' : 'admin',
+          createdAt: entry.createdAt,
+        }))
+    }
+    if (typeof parsed?.user === 'string' && parsed.user !== '') {
+      return [{ name: parsed.user, passwordHash: parsed.passwordHash, role: 'admin', createdAt: parsed.updatedAt }]
+    }
+    return []
+  }
+
+  /** One administrator by name, or undefined. */
+  adminByName(name) {
+    return this.readAdmins().find((entry) => entry.name === name)
+  }
+
+  /** What one administrator may do; unknown names get the least. */
+  roleOf(name) {
+    return this.adminByName(name)?.role ?? 'viewer'
+  }
+
+  /**
+   * Write the administrator records back, in place.
+   *
+   * In place rather than by rename: the file is bind-mounted into this container and
+   * read by a standby control plane, both of which hold the inode.
+   */
+  writeAdmins(users) {
+    const file = ADMIN_FILE(this.options.stateDir)
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({ version: 2, users, updatedAt: new Date().toISOString() }, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+  }
+
+  /**
+   * Set one administrator's password, leaving the others alone.
+   *
+   * The command line used to write the whole file, which with more than one
+   * administrator would delete the rest — so it goes through here now.
+   *
+   * @param name - the administrator.
+   * @param passwordHash - the `scrypt$…` value to store.
+   * @returns whether the administrator exists.
+   */
+  setAdminPassword(name, passwordHash) {
+    const users = this.readAdmins()
+    const at = users.findIndex((entry) => entry.name === name)
+    if (at < 0) return false
+    users[at] = { ...users[at], passwordHash }
+    this.writeAdmins(users)
+    return true
+  }
+
+  /** Add one administrator, or replace the password of an existing one. */
+  addAdmin(name, passwordHash, role) {
+    const users = this.readAdmins()
+    const at = users.findIndex((entry) => entry.name === name)
+    if (at < 0) users.push({ name, passwordHash, role, createdAt: new Date().toISOString() })
+    else users[at] = { ...users[at], passwordHash, role }
+    this.writeAdmins(users)
+  }
+
+  /** Remove one administrator. Refuses to remove the last one. */
+  removeAdmin(name) {
+    const users = this.readAdmins()
+    const left = users.filter((entry) => entry.name !== name)
+    if (left.length === users.length) return 'missing'
+    if (left.length === 0) return 'last'
+    // Someone has to be able to administer it; leaving only viewers locks everyone out.
+    if (!left.some((entry) => entry.role === 'admin')) return 'last-admin'
+    this.writeAdmins(left)
+    return 'removed'
+  }
+
+  /**
    * Withdraw every administrator session by replacing the signing key.
    *
    * Unlike a tenant password change there is no epoch to bump: the login carries
@@ -206,8 +308,10 @@ class AdminConsole {
   }
 
   /** Mint a session value carrying its own expiry and signature. */
-  mintSession() {
-    const payload = String(Date.now() + SESSION_MS)
+  mintSession(name) {
+    // 名字签在载荷里：cookie 里只有过期时间的话，服务端就无从知道是哪个管理员，
+    // 而角色是按人算的——早先的实现只能去猜一个名字，多用户下就成了"人人都是 admin"。
+    const payload = `${String(Date.now() + SESSION_MS)}|${name}`
     const signature = crypto.createHmac('sha256', this.sessionSecret).update(payload).digest('hex')
     return `${payload}.${signature}`
   }
@@ -223,9 +327,12 @@ class AdminConsole {
     const payload = value.slice(0, at)
     const expected = crypto.createHmac('sha256', this.sessionSecret).update(payload).digest('hex')
     if (!safeEqual(expected, value.slice(at + 1))) return undefined
-    const expires = Number(payload)
+    const [expiry, name] = payload.split('|')
+    const expires = Number(expiry)
     if (!Number.isFinite(expires) || expires < Date.now()) return undefined
-    return this.readAdmin()?.user ?? 'admin'
+    if (typeof name !== 'string' || name === '') return undefined
+    // 这个人必须还存在：删掉一个管理员就等于吊销他的会话。
+    return this.adminByName(name) === undefined ? undefined : name
   }
 
   /** Read a JSON body with a size ceiling. */
