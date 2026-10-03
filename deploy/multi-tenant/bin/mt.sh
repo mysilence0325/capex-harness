@@ -667,7 +667,17 @@ case "${1:-}" in
   accept)  shift; cmd_accept "$@" ;;
   doctor)  bash bin/doctor.sh ;;
   isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
-  register)   shift; cmd_register "$@" ;;       # 向控制面注册租户运行时（地址 + 启动 token）
+  register)
+    # 不带租户 = 注册全部。以前是打印用法然后退出 0 —— 看起来像成功，
+    # 实际什么都没做。我在恢复步骤里正是这么用的，结果注册表留在了已经停掉的
+    # 第二个节点上，四个租户全部不可用。一个会在成功时什么也不做的命令，
+    # 在出故障的时候最危险，所以让它做那件显然该做的事。
+    if [ "$#" -le 1 ]; then
+      register_all_tenants
+    else
+      shift; cmd_register "$@"
+    fi
+    ;;
   admin-passwd) shift; cmd_admin_passwd "$@" ;; # 设置管理控制台的管理员密码（同时吊销已登录会话）
   admin-kick) shift; node_run bin/admin-kick.js ;;    # 只吊销所有管理员会话，不改密码
   admin-users) shift; node_run bin/admin-users.js "$@" ;;  # 管理员与角色：list/add/passwd/remove
