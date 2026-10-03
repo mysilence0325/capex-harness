@@ -428,6 +428,41 @@ else
   bad "MT_CONTROL_PLANE 为空：节点代理不会注册租户，租户重启后统一入口会一直返回 303"
 fi
 
+# .env 里已删租户的残留键。
+#
+# 不能简单地看 MT_<前缀>_：MT_CONTROL_PLANE、MT_BACKUP_KEEP、MT_EDGE_PORT 这些功能键
+# 都会命中那个形状。实测过：天真写法把 13 个功能键误报成"残留租户"，
+# 而一个每次都喊狼来了的检查，结局是被忽略。
+#
+# 所以后缀是【推导】出来的：当前租户的键用过哪些后缀，那些后缀就是租户后缀。
+# render 以后加了新字段，这里自动跟上，不用改。
+STALE_TMP="$(mktemp -d)"
+python3 - "$STALE_TMP" <<'PY' >/dev/null 2>&1 || true
+import json, re, sys
+out = sys.argv[1]
+ids = {t['id'] for t in json.load(open('tenants.json'))['tenants']}
+entries = []
+for line in open('.env', encoding='utf-8'):
+    m = re.match(r'^MT_([A-Z0-9_]+?)_([A-Z0-9_]+)=', line)
+    if m:
+        entries.append((m.group(1).lower().replace('_', '-'), m.group(2), line.split('=')[0]))
+# 当前租户用过的后缀，才算法租户后缀
+suffixes = {suf for prefix, suf, _ in entries if prefix in ids}
+stale = sorted({prefix for prefix, suf, _ in entries if suf in suffixes and prefix not in ids})
+keys = sorted(k for prefix, suf, k in entries if suf in suffixes and prefix not in ids)
+open(f'{out}/stale.txt', 'w').write(' '.join(stale))
+open(f'{out}/keys.txt', 'w').write('\n'.join(keys))
+open(f'{out}/suffixes.txt', 'w').write(' '.join(sorted(suffixes)))
+PY
+STALE="$(cat "$STALE_TMP/stale.txt" 2>/dev/null)"
+SUFFIXES="$(cat "$STALE_TMP/suffixes.txt" 2>/dev/null)"
+if [ -n "${STALE// /}" ]; then
+  bad ".env 里有已删租户的残留键 → $STALE（租户后缀: $SUFFIXES；删掉这些行，然后 render 一次）"
+else
+  ok ".env 里没有已删租户的残留键（租户后缀: ${SUFFIXES:-推导不出}）"
+fi
+rm -rf "$STALE_TMP"
+
 # 配置漂移：拿最近一次备份里记下的 .env 键清单，和当前 .env 比对。
 # restore 会用归档里的 .env 覆盖当前配置，而且不提示——真正咬人的是键整个消失
 # （MT_CONTROL_PLANE 丢过一次，表现为节点代理静默降级、租户重启后入口一直 303）。
