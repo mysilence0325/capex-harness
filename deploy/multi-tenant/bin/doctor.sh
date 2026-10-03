@@ -406,5 +406,14 @@ else
   ok "全部租户都由本机备份覆盖"
 fi
 
+# 会话保留策略：设了就会自动清理，没设就一直长。两种都行，但操作者要知道是哪种。
+RETENTION="$(grep '^MT_SESSION_RETENTION_DAYS=' .env 2>/dev/null | cut -d= -f2- | tr -d '"')"
+if [ -n "$RETENTION" ]; then
+  # 说清楚是"打算保留多少"，而不是"系统会替你清理"——清理目前仍要手工执行。
+  ok "会话保留策略记为 ${RETENTION} 天（清理目前需手工执行 bin/mt.sh disk prune-sessions）"
+else
+  warn "没有设置 MT_SESSION_RETENTION_DAYS，也没有自动清理：会话会一直增长，磁盘会慢慢满"
+fi
+
 printf '\n\033[36m== 结论 ==\033[0m\n  %s 项通过, %s 项警告, %s 项失败\n' "$OK" "$WARN" "$BAD"
 [ "$BAD" -eq 0 ] || exit 1
