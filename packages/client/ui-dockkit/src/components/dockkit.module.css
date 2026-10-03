@@ -554,6 +554,15 @@
   border: 0.5px solid var(--dsw-alias-border-l2);
 }
 
+/* A menu holding no item — an extras component that renders nothing — hides
+   rather than drops: React cannot know what an extras node renders, so the
+   menu publishes the fact as `data-dockkit-menu-empty`, the way the
+   conversation header mirrors its own tab strip. The `:has()` selector that
+   read it directly is one Chromium 90 drops whole. */
+.menu[data-dockkit-menu-empty] {
+  display: none;
+}
+
 
 .menuItem {
   padding: 4px 7px;

@@ -43,12 +43,19 @@ function PurposeCard({ purpose, checked, t, onToggle }: {
 }) {
   const previous = useRef(checked)
   const [entering, setEntering] = useState(false)
+  const [focusedWithin, setFocusedWithin] = useState(false)
   useLayoutEffect(() => {
     setEntering(checked && !previous.current)
     previous.current = checked
   }, [checked])
   const titleKey = purpose === 'office' ? 'onboardingOffice' : 'onboardingDevelopment'
-  return <div className={`${css.card} ${checked ? css.selected : ''} ${purpose === 'office' ? css.officeCard : ''}`}>
+  // The card's only focusable control is its checkbox, so the ring stylesheet
+  // reads this mark instead of :has(:focus-visible), which Chromium 90 drops;
+  // the document's input modality keeps a pointer click on the label silent.
+  return <div className={`${css.card} ${checked ? css.selected : ''} ${purpose === 'office' ? css.officeCard : ''}`}
+    data-focus-within={focusedWithin || undefined}
+    onFocus={() => { setFocusedWithin(true) }}
+    onBlur={() => { setFocusedWithin(false) }}>
     <div className={css.cardTop}>
       {checked ? <span className={`${css.fileIcons} ${entering ? css.iconsEntering : ''}`} aria-hidden="true">
         {(purpose === 'office' ? ['word', 'ppt', 'excel', 'pdf', 'image'] as const : ['typescript', 'javascript', 'sql', 'python', 'cpp'] as const)

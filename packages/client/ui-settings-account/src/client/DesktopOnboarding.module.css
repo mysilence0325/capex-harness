@@ -198,7 +198,10 @@
   from { --dsh-onboarding-border-angle: 90deg; }
   to { --dsh-onboarding-border-angle: 450deg; }
 }
-.card:focus-visible, html:not([data-input-modality='pointer']) .card:has(:focus-visible) { outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); outline-offset: 5px; }
+/* The purpose card publishes data-focus-within while a control inside it holds
+   focus (OnboardingPurposeStep.tsx); the modality guard keeps a pointer-initiated
+   focus silent, which JavaScript cannot read from :focus-visible. */
+.card:focus-visible, html:not([data-input-modality='pointer']) .card[data-focus-within] { outline: 2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); outline-offset: 5px; }
 .card[aria-disabled='true'] { cursor: wait; }
 .cardTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; height: 40px; margin-bottom: 12px; }
 .cardCheckbox { position: static; }

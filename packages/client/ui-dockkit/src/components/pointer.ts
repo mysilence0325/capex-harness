@@ -8,6 +8,16 @@
  */
 import { useEffect, useRef } from 'react'
 
+/**
+ * Document mark published while at least one gesture holds the pointer. A
+ * stylesheet reads it where the per-element `data-dockkit-pointer` marker
+ * would need :has(); Chromium 90 drops that selector whole.
+ */
+const POINTER_ACTIVE_ATTRIBUTE = 'data-dockkit-pointer-active'
+
+/** Gestures currently holding a pointer, across every docking component. */
+let activeGestures = 0
+
 /** The three window listeners one gesture installs. */
 export interface PointerFollowers {
   readonly move: (event: PointerEvent) => void
@@ -30,7 +40,9 @@ export function capturePointer(element: HTMLElement, pointerId: number): void {
  * Only that pointer's events count: a second finger or a pen beside the mouse
  * neither moves nor ends the gesture. The listeners remove themselves before
  * `up` or `cancel` runs; the returned callback ends the gesture early, for an
- * unmount or a superseding press.
+ * unmount or a superseding press. While any gesture lives, the document element
+ * carries `data-dockkit-pointer-active`, which a stylesheet reads where :has()
+ * over the element mark would be needed.
  * @param element - the element the gesture started on.
  * @param pointerId - the pointer to capture and follow.
  * @param followers - listeners for move, release, and cancel.
@@ -40,8 +52,12 @@ export function followPointer(element: HTMLElement, pointerId: number, followers
   capturePointer(element, pointerId)
   const controller = new AbortController()
   const { signal } = controller
+  activeGestures += 1
+  document.documentElement.setAttribute(POINTER_ACTIVE_ATTRIBUTE, '')
   element.dataset.dockkitPointer = String(pointerId)
   signal.addEventListener('abort', () => {
+    activeGestures -= 1
+    if (activeGestures === 0) document.documentElement.removeAttribute(POINTER_ACTIVE_ATTRIBUTE)
     if (element.dataset.dockkitPointer === String(pointerId)) delete element.dataset.dockkitPointer
   }, { once: true })
   const own = (event: PointerEvent): boolean => event.pointerId === pointerId

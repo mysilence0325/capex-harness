@@ -196,8 +196,12 @@
   -webkit-app-region: no-drag;
 }
 
-/* Native guest input must not consume a docking gesture's window events. */
-:global(html:has([data-dockkit-pointer])) .webview {
+/* Native guest input must not consume a docking gesture's window events:
+   ui-dockkit's followPointer publishes data-dockkit-pointer-active on the
+   document element for as long as a gesture holds the pointer
+   (packages/client/ui-dockkit/src/components/pointer.ts), which the engines
+   that cannot evaluate :has() read where the gesture's own element mark sat. */
+:global(html[data-dockkit-pointer-active]) .webview {
   pointer-events: none;
 }
 

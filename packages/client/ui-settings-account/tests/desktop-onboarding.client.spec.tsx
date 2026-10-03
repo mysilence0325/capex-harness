@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { DesktopOnboarding } from '../src/client/DesktopOnboarding.tsx'
+import css from '../src/client/DesktopOnboarding.module.css'
 import type { DesktopOnboardingProps, DesktopOnboardingState } from '../src/client/onboarding-contract.ts'
 import { en, zh } from '../src/client/locales.ts'
 
@@ -368,4 +371,37 @@ it('reports closing the skip-settings popup', () => {
   b.track.mockClear()
   fireEvent.click(screen.getByRole('button', { name: zh.close }))
   expect(b.track).toHaveBeenCalledExactlyOnceWith('onboarding_popup_click', { popup_name: 'skip_setting', button_name: 'close' })
+})
+it('publishes keyboard focus inside a purpose card and clears it on blur', () => {
+  mount('purpose')
+  const office = screen.getByRole<HTMLInputElement>('checkbox', { name: zh.onboardingOffice })
+  const card = office.closest(`.${css.card}`)
+  if (card === null) throw new Error('the purpose card no longer wraps its checkbox')
+  expect(card.hasAttribute('data-focus-within')).toBe(false)
+  act(() => { office.focus() })
+  expect(card.hasAttribute('data-focus-within')).toBe(true)
+  act(() => { office.blur() })
+  expect(card.hasAttribute('data-focus-within')).toBe(false)
+})
+
+it('rings the card from that mark only while the document is off pointer modality', () => {
+  // Chromium 90 drops :has(), so the second selector reads the card's own mark;
+  // the modality guard is what keeps a pointer click on the label silent, and
+  // the first selector stays as it was for the card's own focus.
+  const sheet = readFileSync(resolve(import.meta.dirname, '../src/client/DesktopOnboarding.module.css'), 'utf8')
+  expect(sheet).toContain(".card:focus-visible, html:not([data-input-modality='pointer']) .card[data-focus-within] {")
+})
+
+it('leaves a pointer-initiated focus to the document modality guard', () => {
+  mount('purpose')
+  const office = screen.getByRole<HTMLInputElement>('checkbox', { name: zh.onboardingOffice })
+  const card = office.closest(`.${css.card}`)
+  if (card === null) throw new Error('the purpose card no longer wraps its checkbox')
+  // A press on the label focuses the checkbox; ui-primitives publishes pointer
+  // modality, so the ring rule's guard drops the card's mark.
+  window.dispatchEvent(new Event('pointerdown'))
+  act(() => { office.focus() })
+  expect(card.hasAttribute('data-focus-within')).toBe(true)
+  expect(document.documentElement.getAttribute('data-input-modality')).toBe('pointer')
+  document.documentElement.removeAttribute('data-input-modality')
 })

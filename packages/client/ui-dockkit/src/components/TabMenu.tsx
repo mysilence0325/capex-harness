@@ -2,8 +2,11 @@
  * The per-tab context menu, opened by a secondary press on the chip. It carries
  * the close gesture and whatever the embedder appends; the copy and float
  * gestures have no menu item — copying is an embedder API, floating is a drag
- * released clear of the surface. A menu that would hold no item at all renders
- * no popup, so a secondary press on a chip with nothing to offer shows nothing.
+ * released clear of the surface. A menu holding no item never shows: with
+ * nothing from its own props the component renders no popup at all, and when
+ * the embedder's extras render none either it carries `data-dockkit-menu-empty`
+ * for the stylesheet to hide. Whether an extras node holds an item is a DOM
+ * fact no render can know, so the marker follows the menu's own mutations.
  * Presentational — it renders what its props supply and dismisses itself on
  * outside presses or an unmodified Escape, returning menu focus to its tab.
  *
@@ -24,6 +27,12 @@ import css from './dockkit.module.css'
 
 /** Gap between the opening control and the menu, and the viewport margin kept clear. */
 const MENU_GAP = 4
+
+/** The roles a menu row may take: the content a menu is worth showing for. */
+const MENU_ITEM_ROLES = '[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]'
+
+/** Attribute the menu carries while it holds no item; the stylesheet hides on it. */
+const MENU_EMPTY_ATTRIBUTE = 'data-dockkit-menu-empty'
 
 /** What the menu offers, where it anchors, and how it closes. */
 export interface TabMenuProps {
@@ -61,6 +70,22 @@ export function TabMenu({ labels, anchor, onClose, onDismiss, extras }: TabMenuP
     if (self.current === null) return
     setPosition(placeMenu(anchor, self.current))
   }, [anchor, hasItems])
+
+  // Whether the extras hold an item is a DOM fact no render can know, so the
+  // menu states it as its own attribute the way the conversation header mirrors
+  // its tab strip: :has() reads the fact directly, and Chromium 90 drops that
+  // selector whole. The extras are the embedder's own components, free to fill
+  // the menu without this one rendering again, so the menu's own mutations
+  // carry the update.
+  useLayoutEffect(() => {
+    const menu = self.current
+    if (menu === null) return undefined
+    const sync = (): void => { menu.toggleAttribute(MENU_EMPTY_ATTRIBUTE, menu.querySelector(MENU_ITEM_ROLES) === null) }
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(menu, { childList: true, subtree: true, attributes: true, attributeFilter: ['role'] })
+    return () => { observer.disconnect() }
+  }, [hasItems])
 
   useEffect(() => {
     const menu = self.current

@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { DockIntents } from '../src/contract/adapter.ts'
 import type { PaneId, TabId } from '../src/contract/types.ts'
@@ -69,6 +70,18 @@ function renderSurface(
       {...renderTabMenuItems === undefined ? {} : { renderTabMenuItems }}
     />,
   )
+}
+
+/**
+ * Bind the real stylesheet's menu rules to a rendered menu's generated classes.
+ * Vitest stubs CSS Modules, so the module's own class names never reach the DOM.
+ */
+function bindMenuStyles(menu: HTMLElement): void {
+  const style = document.createElement('style')
+  style.textContent = readFileSync(resolve(import.meta.dirname, '../src/components/dockkit.module.css'), 'utf8')
+    .replaceAll(/\.menu(?![A-Za-z0-9_-])/g, `.${[...menu.classList].join('.')}`)
+  document.head.append(style)
+  onTestFinished(() => { style.remove() })
 }
 
 const box = (x: number, y: number, width: number, height: number): DOMRect =>
@@ -808,15 +821,32 @@ describe('DockSurface', () => {
     fireEvent.contextMenu(screen.getByRole('tab'))
     const menu = document.querySelector<HTMLElement>('[data-dockkit-tab-menu]')
     if (menu === null) throw new Error('expected the extras component menu')
-    // Vitest stubs CSS Modules; bind the real stylesheet's menu selector to its generated class.
-    const style = document.createElement('style')
-    style.textContent = readFileSync(resolve(import.meta.dirname, '../src/components/dockkit.module.css'), 'utf8')
-      .replaceAll(/\.menu(?=[:\s{])/g, `.${[...menu.classList].join('.')}`)
-    document.head.append(style)
-    onTestFinished(() => { style.remove() })
+    bindMenuStyles(menu)
     expect(menu.querySelectorAll('[role^="menuitem"]')).toHaveLength(0)
+    expect(menu.getAttribute('data-dockkit-menu-empty')).not.toBeNull()
     expect(getComputedStyle(menu).display).toBe('none')
     expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('shows a marked menu again once the extras render an item', async () => {
+    let fill: (() => void) | undefined
+    const LateExtras = () => {
+      const [ready, setReady] = useState(false)
+      fill = () => { setReady(true) }
+      return ready ? <button type="button" role="menuitem">late item</button> : null
+    }
+    renderSurface(seededController(), spyIntents(), true, () => <LateExtras />, { canCloseTab: () => false })
+    fireEvent.contextMenu(screen.getByRole('tab'))
+    const menu = document.querySelector<HTMLElement>('[data-dockkit-tab-menu]')
+    if (menu === null) throw new Error('expected the extras component menu')
+    bindMenuStyles(menu)
+    expect(getComputedStyle(menu).display).toBe('none')
+    // The extras are the embedder's own component: it fills the menu without
+    // the kit rendering again, so the marker follows the menu's mutations.
+    await act(async () => { fill?.() })
+    expect(menu.hasAttribute('data-dockkit-menu-empty')).toBe(false)
+    expect(getComputedStyle(menu).display).toBe('flex')
+    expect(screen.getByRole('menuitem', { name: 'late item' })).toBeDefined()
   })
 
   it('toggles the menu closed on a second secondary press, and dismisses it on a press anywhere else', () => {
