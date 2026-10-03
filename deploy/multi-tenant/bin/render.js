@@ -313,6 +313,22 @@ const bridgeName = () => (envValues.get('MT_BRIDGE_NAME') ?? process.env.MT_BRID
  * further down this file, and a constant here would read it before it exists.
  */
 const hostRoot = () => (envValues.get('MT_HOST_PROJECT_DIR') ?? process.env.MT_HOST_PROJECT_DIR ?? ROOT).trim()
+
+/**
+ * Tenants running under the stricter seccomp profile, from MT_SECCOMP_TENANTS.
+ *
+ * Lazy on purpose: as a constant it would read envValues before that is initialised,
+ * and the crash that produces looks like "the render did not run".
+ *
+ * Per tenant rather than one global switch, so a deployment can put a single tenant
+ * on the profile, watch it work, and widen from there.
+ */
+const seccompTenants = () => new Set(
+  (envValues.get('MT_SECCOMP_TENANTS') ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id !== ''),
+)
 const networkSubnet = () => (envValues.get('MT_NETWORK_SUBNET') ?? process.env.MT_NETWORK_SUBNET ?? '').trim()
 /**
  * Prefix for the container names this host creates.
@@ -571,6 +587,12 @@ function tenantService(tenant) {
 
   return `  ${tenant.service ?? `dsh-${tenant.id}`}:
     image: \${DSH_IMAGE:-dsh-web:0.2.0-rc.2}
+${seccompTenants().has(tenant.id) ? `
+    # 追加的系统调用拒绝见 security/seccomp-tenant.json。路径必须是宿主路径：
+    # 解析它的是宿主上的 Docker 守护进程，不是这个渲染容器。
+    security_opt:
+      - seccomp=${hostRoot()}/security/seccomp-tenant.json
+` : ''}
     container_name: ${NAME_PREFIX}dsh-${tenant.id}
     restart: unless-stopped
     networks: [${networkOf(tenant)}]

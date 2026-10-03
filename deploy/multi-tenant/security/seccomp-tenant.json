@@ -1,0 +1,38 @@
+{
+  "comment": "DSH 租户容器的 seccomp 策略：在 Docker 默认策略之上追加拒绝。用法见 security/README.md。",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "archMap": [
+    {
+      "comment": "只声明 x86_64，不声明 32 位兼容子架构。声明 subArchitectures 会让 glibc 走 32 位路径去设置线程本地存储的 %fs 基址，结果每个进程都以 'cannot set up thread-local storage' 起不来。",
+      "architecture": "SCMP_ARCH_X86_64"
+    }
+  ],
+  "syscalls": [
+    {
+      "comment": "追加拒绝：这些是内核模块、内核密钥环、固件与引导相关的系统调用，容器里的 Node 进程不需要它们，而且它们只在容器已经拿到高权限时才有意义——所以拒绝它们是零成本的。刻意不包含 mount/personality/NUMA 系列/name_to_handle_at/setns/perf_event_open：那些运行库或容器入口可能真的会用到，上一版把它们一起拒掉，把租户拒崩了。",
+      "names": [
+        "acct",
+        "add_key",
+        "delete_module",
+        "finit_module",
+        "get_kernel_syms",
+        "init_module",
+        "kexec_file_load",
+        "kexec_load",
+        "lookup_dcookie",
+        "nfsservctl",
+        "query_module",
+        "quotactl",
+        "reboot",
+        "request_key",
+        "swapoff",
+        "swapon",
+        "sysfs",
+        "ustat",
+        "vm86",
+        "vm86old"
+      ],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}
