@@ -672,6 +672,7 @@ case "${1:-}" in
   admin-kick) shift; node_run bin/admin-kick.js ;;    # 只吊销所有管理员会话，不改密码
   admin-users) shift; node_run bin/admin-users.js "$@" ;;  # 管理员与角色：list/add/passwd/remove
   alert-sink) shift; bash bin/alert-sink.sh "$@" ;;              # 告警接收器：up/wire/test/status
+  quota)   shift; bash bin/quota.sh "$@" ;;                     # 每租户磁盘配额：show/set/clear/check
   bandwidth) shift; bash bin/bandwidth.sh "$@" ;;                # 租户网络限速：show/set/clear
   keys)    shift; node_run bin/keys.js "$@" ;;                     # 生成/查看分用途密钥
   usage)   shift; node_run bin/usage.js "$@" ;;                  # 每租户模型用量（不带费率）
