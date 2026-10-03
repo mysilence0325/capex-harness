@@ -23,7 +23,7 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { Throttle } = require('./throttle.js')
-const { appendRotated } = require('./rotate.js')
+const { appendRotated, rotatedFiles } = require('./rotate.js')
 const { render: renderMetrics } = require('./metrics.js')
 const { update: updateRegistry } = require('./tenant-lock.js')
 
@@ -1104,11 +1104,15 @@ async function adminState() {
     for (const row of mine) if (typeof row.agent === 'string') { agentUrl = row.agent; break }
     if (agentUrl === undefined && node === (process.env.MT_NODE_NAME ?? 'local') && NODE_AGENT_URL !== '') agentUrl = NODE_AGENT_URL
     let agent = 'none'
+    let busy
     if (agentUrl !== undefined) {
       const health = await admin.callHealth(agentUrl)
       agent = health.ok === true ? 'up' : 'down'
+      // What that agent is running right now, so the console can say why a button
+      // will refuse rather than leaving the operator to guess.
+      busy = health.busy === null || health.busy === undefined ? undefined : health.busy.op
     }
-    return { node, tenants: mine.length, ready: mine.filter((row) => row.ready === true).length, agent, agentUrl }
+    return { node, tenants: mine.length, ready: mine.filter((row) => row.ready === true).length, agent, agentUrl, busy }
   }))
 
   return { tenants: rows, nodes, edgePort: EDGE_PORT, origin }
@@ -1407,6 +1411,39 @@ async function adminAction(body) {
       return { ok: false, error: result.error ?? `节点返回 ${String(answer.status)}`, output: result.output }
     }
     return { ok: true, output: result.output ?? '', op, node }
+  }
+
+  // What has been done to this deployment lately, read from the audit log the
+  // control plane already writes. Read-only, and answered here rather than by a
+  // node agent: the log is mounted into this container, and an operator looking up
+  // what happened should not depend on an agent being reachable.
+  if (action === 'ops-history') {
+    const limit = Number.isInteger(body?.limit) && body.limit > 0 && body.limit <= 500 ? body.limit : 100
+    const entries = []
+    // Newest first, and only as far back as it takes to fill the request: the
+    // rotated generations are read newest-first for the same reason.
+    const files = rotatedFiles(path.join(LOG_DIR, 'admin.jsonl')).reverse()
+    for (const file of files) {
+      let lines
+      try {
+        lines = fs.readFileSync(file, 'utf8').split('\n')
+      } catch (error) {
+        if (error.code !== 'ENOENT') console.error(`mt-gateway: cannot read ${file}: ${error.message}`)
+        continue
+      }
+      for (let at = lines.length - 1; at >= 0; at -= 1) {
+        const line = lines[at].trim()
+        if (line === '') continue
+        try {
+          entries.push(JSON.parse(line))
+        } catch {
+          // A torn last line from a write in progress: skip it rather than fail.
+        }
+        if (entries.length >= limit) break
+      }
+      if (entries.length >= limit) break
+    }
+    return { ok: true, entries, truncated: entries.length >= limit }
   }
 
   const tenant = tenants.get(id)

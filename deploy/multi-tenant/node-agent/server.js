@@ -668,6 +668,28 @@ function runOp(name, params) {
       return
     }
 
+    // One mutating operation at a time, decided here rather than by whoever called:
+    // the agent is the only place that knows what is actually running.
+    let marker
+    if (MUTATING_OPS.has(name)) {
+      const busy = busyWith()
+      if (busy !== undefined) {
+        const seconds = Number.isFinite(busy.startedAt) ? Math.round((Date.now() - busy.startedAt) / 1000) : undefined
+        resolve({
+          status: 409,
+          body: {
+            ok: false,
+            busy: true,
+            error: `正在执行 ${String(busy.op)}${seconds === undefined ? '' : `（已 ${String(seconds)} 秒）`}，请等它结束再执行 ${name}`,
+          },
+        })
+        return
+      }
+      marker = { op: name, pid: process.pid, startedAt: Date.now() }
+      running = marker
+      writeMarker(marker)
+    }
+
     // No shell: argv is passed straight to the script, so a parameter can never
     // become a second command however it is written.
     const child = spawn('bash', [path.join(PROJECT_DIR, op.script), ...argv], {
@@ -692,6 +714,12 @@ function runOp(name, params) {
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      // Release the mutex here rather than at every exit path: this fires for a
+      // clean exit, a failure and the timeout kill alike.
+      if (marker !== undefined) {
+        running = undefined
+        writeMarker(undefined)
+      }
       const ok = code === 0
       console.log(`mt-node-agent: op ${name} ${ok ? 'ok' : `exit ${String(code)}`}`)
       resolve({
@@ -700,6 +728,60 @@ function runOp(name, params) {
       })
     })
   })
+}
+
+/**
+ * Operations that change something, and therefore may not run at the same time.
+ *
+ * Two administrators pressing upgrade and prune inside the same minute is not a
+ * hypothetical: both walk the tenant set, and one recreating containers while the
+ * other pauses them to archive is how a backup ends up half a rebuild. Read-only
+ * operations are deliberately absent — an operator must be able to read a disk
+ * report while an upgrade is running.
+ */
+const MUTATING_OPS = new Set(['disk-prune-images', 'disk-prune-sessions', 'backup', 'restore', 'upgrade'])
+
+/** The mutating operation currently running, if any. */
+let running
+
+const runMarker = () => path.join(PROJECT_DIR === '' ? '.' : PROJECT_DIR, 'state/ops-running.json')
+
+function readMarker() {
+  try {
+    return JSON.parse(fs.readFileSync(runMarker(), 'utf8'))
+  } catch (error) {
+    // No marker, or one that cannot be read: either way nothing is known to be
+    // running, which is the state that lets work proceed.
+    if (error.code !== 'ENOENT') console.error(`mt-node-agent: unreadable operation marker: ${error.message}`)
+    return undefined
+  }
+}
+
+function writeMarker(value) {
+  try {
+    if (value === undefined) fs.rmSync(runMarker(), { force: true })
+    else fs.writeFileSync(runMarker(), `${JSON.stringify(value)}\n`, { mode: 0o600 })
+  } catch (error) {
+    console.error(`mt-node-agent: cannot write the operation marker: ${error.message}`)
+  }
+}
+
+/**
+ * What mutating operation is in flight, if any.
+ *
+ * Kept in memory and mirrored to a file: a child process outlives this agent's
+ * restart, so the marker is what stops a second one from starting on top of it, and
+ * what lets the agent say what was interrupted rather than pretending nothing was.
+ */
+function busyWith() {
+  if (running !== undefined) return running
+  const marker = readMarker()
+  if (marker === undefined) return undefined
+  if (Number.isInteger(marker.pid) && marker.pid !== process.pid && !fs.existsSync(`/proc/${String(marker.pid)}`)) {
+    writeMarker(undefined)
+    return undefined
+  }
+  return marker
 }
 
 /** Whether a request carries this agent's registry key. */
@@ -825,7 +907,7 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/health') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ ok: true, node: NODE_NAME, address: nodeAddress, docker: dockerAvailable, provision: PROJECT_DIR !== '', tenants: [...reported.keys()] }))
+    res.end(JSON.stringify({ ok: true, node: NODE_NAME, address: nodeAddress, docker: dockerAvailable, provision: PROJECT_DIR !== '', tenants: [...reported.keys()], busy: busyWith() ?? null }))
     return
   }
 

@@ -207,6 +207,18 @@ function consolePage({ user }) {
 </div>
 <pre id="ops-out" style="display: none; max-height: 340px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: #0b1020; color: #d6e2ff; padding: 12px; border-radius: 8px"></pre>
 
+<h2>操作历史</h2>
+<div class="card">
+  <div class="row" style="justify-content: space-between; align-items: center">
+    <span class="muted">谁在什么时候做了什么，来自控制面的审计日志</span>
+    <button onclick="loadHistory()">刷新（最近 100 条）</button>
+  </div>
+  <table id="history" style="margin-top: 10px">
+    <thead><tr><th style="width: 180px">时间</th><th style="width: 160px">动作</th><th style="width: 150px">对象</th><th>结果</th></tr></thead>
+    <tbody><tr><td colspan="4" class="muted">点上面按钮加载</td></tr></tbody>
+  </table>
+</div>
+
 <h2>我的账号</h2>
 <div class="card">
   <div class="row">
@@ -437,6 +449,38 @@ async function saveEgressAllow() {
   await opsRun('config-set-egress-allow', '保存出口白名单', { value })
 }
 
+/**
+ * Show what has been done to this deployment.
+ *
+ * Read from the audit log rather than assembled in the browser: an operator looking
+ * up "who restarted that tenant" needs the record the control plane wrote, not what
+ * this tab happens to have seen.
+ */
+async function loadHistory() {
+  const answer = await post('api/tenant', { action: 'ops-history', limit: 100 })
+  const body = document.querySelector('#history tbody')
+  if (!answer.ok) {
+    body.innerHTML = '<tr><td colspan="4" class="muted">读取失败：' + escapeHtml(answer.error || '') + '</td></tr>'
+    return
+  }
+  const entries = answer.entries || []
+  if (entries.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="muted">还没有记录</td></tr>'
+    return
+  }
+  body.innerHTML = entries.map((entry) => {
+    const when = typeof entry.ts === 'string' ? entry.ts.replace('T', ' ').replace(/\..*$/u, '') : ''
+    const who = entry.user ? ' · ' + entry.user : ''
+    const what = entry.node ? '（节点 ' + entry.node + '）' : ''
+    const outcome = entry.error !== undefined ? '失败：' + entry.error
+      : entry.status !== undefined ? 'HTTP ' + entry.status
+        : entry.result !== undefined ? entry.result
+          : entry.note !== undefined ? entry.note : '—'
+    return '<tr><td class="muted">' + escapeHtml(when) + '</td><td>' + escapeHtml(entry.action || '?')
+      + '</td><td>' + escapeHtml(entry.tenant || '-') + what + '</td><td>' + escapeHtml(String(outcome)) + who + '</td></tr>'
+  }).join('')
+}
+
 const post = async (path, body) => {
   const response = await fetch(path, {
     method: 'POST',
@@ -564,8 +608,11 @@ function render() {
     const tag = entry.agent === 'up' ? '<span class="tag ok">在线</span>'
       : entry.agent === 'down' ? '<span class="tag bad">无响应</span>'
         : '<span class="tag muted">未配置</span>'
+    // An operation in flight is why a maintenance button will refuse, so it belongs
+    // where the operator is looking rather than only in the error they get later.
+    const doing = entry.busy ? '<br><span class="tag warn">正在 ' + escapeHtml(entry.busy) + '</span>' : ''
     return '<tr><td><b>' + entry.node + '</b></td><td>' + entry.tenants + '</td><td>'
-      + entry.ready + ' / ' + entry.tenants + '</td><td>' + tag + '</td></tr>'
+      + entry.ready + ' / ' + entry.tenants + '</td><td>' + tag + doing + '</td></tr>'
   })
   document.querySelector('#nodes tbody').innerHTML = nodeRows.length
     ? nodeRows.join('')
