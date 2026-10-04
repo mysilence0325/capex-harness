@@ -353,6 +353,134 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------- 历史：时间与翻页
+head_ "控制台历史的时间与翻页"
+if [ "$QUICK" = yes ] || [ -z "${ADMIN_PW:-}" ]; then
+  skip "历史的时间与翻页（--quick 或缺管理员口令）"
+else
+  HJAR="$(mktemp)"
+  curl -sS -o /dev/null -c "$HJAR" --data-urlencode "user=${ADMIN_USER:-admin}" --data-urlencode "password=$ADMIN_PW" \
+    http://127.0.0.1:8099/__mt/admin/login 2>/dev/null
+  hist() {
+    curl -sS -b "$HJAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+      -d "$1" http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null
+  }
+  # 时间运算一律交给容器里的 node：这台宿主上的 python3 是 3.6，没有
+  # datetime.fromisoformat。我因为这个空跑过两次断言，而且都读成了"服务器不一致"。
+  node_time() {
+    docker exec mt-gateway node -e "$1" "$2" "${3:-0}" 2>/dev/null | tr -d '\r'
+  }
+
+  hist '{"action":"ops-history","limit":200}' > /tmp/hist_all.json
+  if ! python3 -c 'import json,sys; sys.exit(0 if json.load(open("/tmp/hist_all.json")).get("entries") else 1)' 2>/dev/null; then
+    fail "历史接口没返回记录，后面的断言无从谈起"
+  else
+    BOUND="$(python3 -c '
+import json
+rows = json.load(open("/tmp/hist_all.json"))["entries"]
+print(sorted(r["ts"] for r in rows)[len(rows) // 2])')"
+    hist "{\"action\":\"ops-history\",\"limit\":200,\"since\":\"$BOUND\"}" > /tmp/hist_w.json
+    OUTSIDE="$(python3 -c '
+import json
+bound = open("/tmp/hist_bound.txt").read().strip()
+rows = json.load(open("/tmp/hist_w.json"))["entries"]
+print(sum(1 for r in rows if r["ts"] < bound))' 2>/dev/null || echo "?")"
+    printf '%s' "$BOUND" > /tmp/hist_bound.txt
+    OUTSIDE="$(python3 -c '
+import json
+bound = open("/tmp/hist_bound.txt").read().strip()
+rows = json.load(open("/tmp/hist_w.json"))["entries"]
+print(sum(1 for r in rows if r["ts"] < bound))')"
+    assert_eq "0" "$OUTSIDE" "时间范围：返回的每条都在窗口内"
+
+    # 游标翻页：用 node 算"最旧那条减 1 毫秒"
+    hist '{"action":"ops-history","limit":10}' > /tmp/hist_p1.json
+    OLD="$(python3 -c '
+import json
+rows = json.load(open("/tmp/hist_p1.json"))["entries"]
+print(sorted(r["ts"] for r in rows)[0])')"
+    CUR="$(node_time 'process.stdout.write(new Date(new Date(process.argv[1]).getTime()-1).toISOString())' "$OLD")"
+    if [ -z "$CUR" ]; then
+      fail "算不出游标（node 没产出东西）—— 这条断言会是空跑，所以直接算失败"
+    else
+      hist "{\"action\":\"ops-history\",\"limit\":10,\"until\":\"$CUR\"}" > /tmp/hist_p2.json
+      OVERLAP="$(python3 -c '
+import json
+a = [r["ts"] for r in json.load(open("/tmp/hist_p1.json"))["entries"]]
+b = [r["ts"] for r in json.load(open("/tmp/hist_p2.json"))["entries"]]
+print(len(set(a) & set(b)))')"
+      assert_eq "0" "$OVERLAP" "游标翻页：两页没有重叠"
+      EARLIER="$(python3 -c '
+import json
+a = [r["ts"] for r in json.load(open("/tmp/hist_p1.json"))["entries"]]
+b = [r["ts"] for r in json.load(open("/tmp/hist_p2.json"))["entries"]]
+print(1 if b and max(b) < min(a) else 0)')"
+      assert_eq "1" "$EARLIER" "第二页确实更早（不是把第一页又发了一遍）"
+    fi
+
+    # 坏时间必须被拒：被静默忽略的筛选，回答的是没人问过的问题
+    hist '{"action":"ops-history","since":"2026"}' > /tmp/hist_bad.json
+    grep -q '"ok":false' /tmp/hist_bad.json && pass "坏时间（2026）被拒绝" || fail "坏时间被接受了"
+  fi
+  rm -f "$HJAR" /tmp/hist_all.json /tmp/hist_w.json /tmp/hist_p1.json /tmp/hist_p2.json /tmp/hist_bad.json /tmp/hist_bound.txt
+fi
+
+# ---------------------------------------------------------------- MFA：控制台动作
+head_ "MFA 的控制台动作"
+if [ "$QUICK" = yes ]; then
+  skip "MFA 控制台动作（--quick 跳过）"
+else
+  MT2=mfaconsole
+  MPW="$(cred mfa password)"
+  if [ -z "$MPW" ]; then
+    skip "MFA 控制台动作（$CREDS 里缺 mfa.password）"
+  else
+    bin/mt.sh admin-add "$MT2" --role admin --password "$MPW" >/dev/null 2>&1
+    MJAR="$(mktemp)"
+    curl -sS -o /dev/null -c "$MJAR" --data-urlencode "user=$MT2" --data-urlencode "password=$MPW" \
+      http://127.0.0.1:8099/__mt/admin/login 2>/dev/null
+    mfaop() {
+      curl -sS -b "$MJAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+        -d "$1" http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null
+    }
+    mfa_login() {
+      curl -sS -o /dev/null -w '%{http_code}' --data-urlencode "user=$MT2" --data-urlencode "password=$MPW" \
+        ${1:+--data-urlencode "code=$1"} http://127.0.0.1:8099/__mt/admin/login
+    }
+
+    SETUP="$(mfaop '{"action":"mfa-setup"}')"
+    SECRET="$(printf '%s' "$SETUP" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("secret",""))' 2>/dev/null)"
+    [ -n "$SECRET" ] && pass "控制台 mfa-setup 给出密钥" || fail "控制台 mfa-setup 没给出密钥"
+
+    if [ -n "$SECRET" ]; then
+      mfaop '{"action":"mfa-confirm","code":"000000"}' > /tmp/mfa_bad.json
+      grep -q '"ok":false' /tmp/mfa_bad.json && pass "错误验证码不能激活" || fail "错误验证码竟然激活了"
+      CODE="$(node_time 'console.log(require("/app/mfa.js").totp(process.argv[1]))' "$SECRET")"
+      mfaop "{\"action\":\"mfa-confirm\",\"code\":\"$CODE\"}" > /tmp/mfa_ok.json
+      grep -q '"ok":true' /tmp/mfa_ok.json && pass "真实验证码激活成功" || fail "真实验证码没能激活"
+      grep -q 'recovery' /tmp/mfa_ok.json && pass "激活时返回恢复码" || fail "激活时没有恢复码"
+
+      # 这几条是核心：没跑成就不可能通过
+      assert_eq "401" "$(mfa_login '')" "控制台开启后：不带验证码登录被拒"
+      CODE2="$(node_time 'console.log(require("/app/mfa.js").totp(process.argv[1]))' "$SECRET")"
+      assert_eq "303" "$(mfa_login "$CODE2")" "控制台开启后：真实验证码登录成功"
+
+      CODE3="$(node_time 'console.log(require("/app/mfa.js").totp(process.argv[1]))' "$SECRET")"
+      mfaop "{\"action\":\"mfa-recovery\",\"code\":\"$CODE3\"}" > /tmp/mfa_rec.json
+      grep -q '"ok":true' /tmp/mfa_rec.json && pass "重新生成恢复码可用" || fail "重新生成恢复码不可用"
+
+      CODE4="$(node_time 'console.log(require("/app/mfa.js").totp(process.argv[1]))' "$SECRET")"
+      mfaop "{\"action\":\"mfa-disable\",\"code\":\"$CODE4\"}" > /tmp/mfa_off.json
+      grep -q '"ok":true' /tmp/mfa_off.json && pass "关闭两步验证可用" || fail "关闭两步验证不可用"
+      assert_eq "303" "$(mfa_login '')" "关闭后不带验证码可登录"
+    fi
+    rm -f "$MJAR" /tmp/mfa_bad.json /tmp/mfa_ok.json /tmp/mfa_rec.json /tmp/mfa_off.json
+    bin/mt.sh admin-mfa remove "$MT2" --yes >/dev/null 2>&1
+    bin/mt.sh admin-remove "$MT2" >/dev/null 2>&1
+    printf '%s' "$(bin/mt.sh admin-users 2>&1)" | grep -q "$MT2" && fail "测试管理员没清干净" || pass "测试管理员已清除"
+  fi
+fi
+
 # ---------------------------------------------------------------- 收尾
 head_ "结论"
 printf '  %s 项通过，%s 项失败，%s 项跳过\n' "$PASS" "$FAIL" "$SKIP"
