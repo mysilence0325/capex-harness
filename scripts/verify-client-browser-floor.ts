@@ -5,7 +5,12 @@
  * The two build paths lower their own input, so this gate exists for what they
  * do not compile: third-party scripts embedded as text (the PDF.js Worker, for
  * example) and artifacts a nested build produced. A payload is invisible to a
- * scan of the outer file, because it is a string literal there.
+ * scan of the outer file, because it is a string literal there, so a payload
+ * is parsed on its own and scanned twice: once for the whole-name API calls
+ * the outer file is scanned for, and once for receiver-blind calls to the
+ * post-floor member names {@link PAYLOAD_DENIED_MEMBERS} curates — the family
+ * no whole-name deny entry can name, because a library may define its own
+ * method of that name.
  *
  * [client-browser-floor.spec.ts](./client-browser-floor.spec.ts) asserts the
  * build inputs and their rewrites; this gate asserts the shipped bytes.
@@ -46,6 +51,9 @@ export const PAYLOAD_MIN_CHARACTERS = 8192
  * `bytes`, `randomUUID`) stays out. And no shipped artifact may already call the
  * API: a call behind a feature check is reported like any other, so such an
  * entry would fail this gate on third-party code rather than on a regression.
+ * A receiver-blind member name stays out of this list for the same reason and
+ * is scanned inside embedded payloads instead, as a review prompt: see
+ * {@link PAYLOAD_DENIED_MEMBERS}.
  */
 export const FLOOR_DENIED_APIS: readonly string[] = [
   // ECMAScript members Chromium 90 lacks.
@@ -70,6 +78,40 @@ export const FLOOR_DENIED_APIS: readonly string[] = [
   'Element.prototype.hidePopover',
   'Element.prototype.togglePopover',
   'Document.prototype.startViewTransition',
+]
+
+/**
+ * Member names a payload must not call on any receiver, in the notation a
+ * reviewer reads at the call site.
+ *
+ * Curated post-floor member names, deliberately few: each one is a name
+ * Chromium 90 lacks and a shipped payload plausibly calls. Built JavaScript
+ * carries no receiver type, so any object with a method of that name reads as
+ * a finding — a payload may legitimately define its own, a cryptography helper
+ * library's own toHex being the example this list was written beside. That is
+ * the rule's limit: the finding is a review prompt that says a receiver-blind
+ * call to a post-floor member name ships in a payload, and the reviewer
+ * confirms whether it reaches the platform member or the payload's own.
+ *
+ * A member {@link CLIENT_FLOOR_APIS} installs is dropped before scanning,
+ * because the shell installs it before any payload evaluates and the Worker
+ * preamble travels with every embedded Worker payload;
+ * {@link collectPayloadDeniedMembers} applies that filter, so the set names the
+ * family and the installer decides which of its members are still open.
+ */
+export const PAYLOAD_DENIED_MEMBERS: readonly string[] = [
+  'toHex',
+  'fromHex',
+  'toBase64',
+  'setFromBase64',
+  'setFromHex',
+  'bytes',
+  'withResolvers',
+  'groupBy',
+  'fromAsync',
+  'showPicker',
+  'checkVisibility',
+  'startViewTransition',
 ]
 
 /** One thing the floor cannot run, located where it ships. */
@@ -282,6 +324,53 @@ export function collectPayloads(source: ts.SourceFile): string[] {
   return payloads
 }
 
+/**
+ * Payload member names this gate reports, with the installer coverage skipped.
+ *
+ * A member the floor installs is legal in a payload, so reporting it would
+ * fail this gate on third-party code rather than on a regression. Membership
+ * follows the page installers, which the Worker list must be a subset of
+ * (asserted by client-browser-floor.spec.ts).
+ * @param candidates - curated member names; defaults to {@link PAYLOAD_DENIED_MEMBERS}.
+ * @param installed - names the shell installs; defaults to {@link CLIENT_FLOOR_APIS}.
+ * @returns Reportable member names, in candidate order.
+ */
+export function collectPayloadDeniedMembers(
+  candidates: readonly string[] = PAYLOAD_DENIED_MEMBERS,
+  installed: readonly string[] = CLIENT_FLOOR_APIS,
+): readonly string[] {
+  const covered = new Set(installed.map(api => api.split('.').at(-1) ?? api))
+  return candidates.filter(member => !covered.has(member))
+}
+
+/**
+ * Collect the receiver-blind post-floor calls one embedded payload makes.
+ *
+ * Only a call counts: a member the payload defines itself, a member read
+ * without a call, and a computed member (target['toHex']()) are all invisible
+ * here. A call through any receiver matches, because built JavaScript carries
+ * no receiver type, which is why {@link PAYLOAD_DENIED_MEMBERS} states the
+ * rule as a review prompt.
+ * @param source - Parsed payload JavaScript.
+ * @param members - member names to report; defaults to {@link collectPayloadDeniedMembers}.
+ * @returns Violations with their offsets inside the payload.
+ */
+export function collectPayloadMemberViolations(
+  source: ts.SourceFile,
+  members: readonly string[] = collectPayloadDeniedMembers(),
+): LocatedViolation[] {
+  const violations: LocatedViolation[] = []
+  for (const node of walk(source)) {
+    if (!ts.isCallExpression(node)) continue
+    const callee = node.expression
+    if (!ts.isPropertyAccessExpression(callee)) continue
+    const member = callee.name.text
+    if (!members.includes(member)) continue
+    violations.push({ construct: 'call to ' + member, position: locate(source, node) })
+  }
+  return violations
+}
+
 function parse(file: string, text: string): ts.SourceFile {
   return ts.createSourceFile(file, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
 }
@@ -291,12 +380,15 @@ function parse(file: string, text: string): ts.SourceFile {
  * @param file - Repository-relative artifact path.
  * @param text - Artifact contents.
  * @param denied - API names to report; defaults to {@link collectDeniedApis}.
+ * @param payloadMembers - payload member names to report; defaults to
+ * {@link collectPayloadDeniedMembers}.
  * @returns Violations with artifact positions.
  */
 export function collectArtifactViolations(
   file: string,
   text: string,
   denied: readonly string[] = collectDeniedApis(),
+  payloadMembers: readonly string[] = collectPayloadDeniedMembers(),
 ): FloorViolation[] {
   const violations: FloorViolation[] = []
   const record = (source: ts.SourceFile, located: LocatedViolation, inPayload: boolean): void => {
@@ -305,15 +397,32 @@ export function collectArtifactViolations(
       file, line: line + 1, column: character + 1, construct: located.construct, inPayload,
     })
   }
-  const collect = (source: ts.SourceFile, inPayload: boolean): void => {
-    for (const located of collectGrammarViolations(source)) record(source, located, inPayload)
-    for (const located of collectApiViolations(source, denied)) record(source, located, inPayload)
+  const collect = (source: ts.SourceFile, inPayload: boolean): Set<number> => {
+    const reported = new Set<number>()
+    for (const located of collectGrammarViolations(source)) {
+      record(source, located, inPayload)
+      reported.add(located.position)
+    }
+    for (const located of collectApiViolations(source, denied)) {
+      record(source, located, inPayload)
+      reported.add(located.position)
+    }
+    return reported
   }
   const source = parse(file, text)
   collect(source, false)
   for (const [index, payload] of collectPayloads(source).entries()) {
-    // Payload text has no file of its own: report it against the embedding artifact.
-    collect(parse(file + '#payload' + String(index + 1), payload), true)
+    // Payload text has no file of its own: report it against the embedding
+    // artifact, and name the payload a receiver-blind finding sits in.
+    const label = ' in payload ' + String(index + 1)
+    const payloadSource = parse(file + '#payload' + String(index + 1), payload)
+    const reported = collect(payloadSource, true)
+    for (const located of collectPayloadMemberViolations(payloadSource, payloadMembers)) {
+      // One call site is one finding: a call the whole-name scan already
+      // reported is not reported again under its member name.
+      if (reported.has(located.position)) continue
+      record(payloadSource, { construct: located.construct + label, position: located.position }, true)
+    }
   }
   return violations
 }

@@ -22,14 +22,38 @@ export const CLIENT_FLOOR_APIS: readonly string[] = [
   'AbortSignal.any',
   'AbortSignal.timeout',
   'AbortSignal.prototype.throwIfAborted',
-  // Third-party payloads reach these unguarded; pdf.js needs all six in the page
-  // realm and in its Worker.
+  // Third-party payloads reach these unguarded; pdf.js needs all of them in the
+  // page realm and in its Worker.
   'Iterator',
   'Promise.try',
   'URL.parse',
-  'Uint8Array.fromBase64',
   'RegExp.escape',
   'Response.prototype.bytes',
+  // The base64/hex proposal, reached by the PDF payloads: pdf.worker's
+  // PDFDocument.fingerprints calls toHex on both hashed byte ranges, the
+  // display half calls toBase64 on the font data it hands to FontFace and on
+  // the signature it saves, and Uint8Array.fromBase64 decodes the
+  // transfer-encoded bodies and saved signatures.
+  'Uint8Array.fromBase64',
+  'Uint8Array.prototype.toHex',
+  'Uint8Array.prototype.toBase64',
+  // The rest of what the PDF payloads reach unguarded. Both halves keep their
+  // caches in Maps and WeakMaps through the upsert proposal, sum font metrics
+  // and table lengths with Math.sumPrecise, and the Worker intersects two
+  // destination sets while it linearizes a document (pdf.worker.mjs:62944) and
+  // reads a canvas-rendered image back through Blob.prototype.bytes
+  // (pdf.worker.mjs:42180).
+  'Map.prototype.getOrInsert',
+  'Map.prototype.getOrInsertComputed',
+  'WeakMap.prototype.getOrInsert',
+  'WeakMap.prototype.getOrInsertComputed',
+  'Math.sumPrecise',
+  'Set.prototype.intersection',
+  'Blob.prototype.bytes',
+  // The Worker trims the font tables it hands the display with
+  // ArrayBuffer.prototype.transferToFixedLength (pdf.worker.mjs:21142), which
+  // no Chromium 90 realm has.
+  'ArrayBuffer.prototype.transferToFixedLength',
 ]
 
 /**
@@ -46,6 +70,21 @@ export const CLIENT_FLOOR_WORKER_APIS: readonly string[] = [
   'Promise.try',
   'URL.parse',
   'Uint8Array.fromBase64',
+  // The same proposal as the page realm, installed here because pdf.js ships
+  // both halves from one version: PDFDocument.fingerprints hashes both byte
+  // ranges and calls toHex inside the Worker.
+  'Uint8Array.prototype.toHex',
+  'Uint8Array.prototype.toBase64',
+  // The same collection, arithmetic, set, and blob members the Worker payload
+  // reaches unguarded while a document opens and renders.
+  'Map.prototype.getOrInsert',
+  'Map.prototype.getOrInsertComputed',
+  'WeakMap.prototype.getOrInsert',
+  'WeakMap.prototype.getOrInsertComputed',
+  'Math.sumPrecise',
+  'Set.prototype.intersection',
+  'Blob.prototype.bytes',
+  'ArrayBuffer.prototype.transferToFixedLength',
   'Object.hasOwn',
   'Array.prototype.at',
   'Array.prototype.findLast',
@@ -98,6 +137,109 @@ export const CLIENT_FLOOR_WORKER_PREAMBLE = `(function () {
     var bytes = new Uint8Array(binary.length);
     for (var index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
     return bytes;
+  });
+  var hexDigits = '0123456789abcdef';
+  define(Uint8Array.prototype, 'toHex', function toHex() {
+    var text = '';
+    for (var index = 0; index < this.length; index += 1) {
+      var byte = this[index];
+      text += hexDigits.charAt(byte >> 4) + hexDigits.charAt(byte & 15);
+    }
+    return text;
+  });
+  var base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var base64UrlAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  define(Uint8Array.prototype, 'toBase64', function toBase64(options) {
+    var alphabet = 'base64';
+    var omitPadding = false;
+    if (options !== undefined) {
+      if (options === null || (typeof options !== 'object' && typeof options !== 'function')) {
+        throw new TypeError('Uint8Array.prototype.toBase64 options must be an object');
+      }
+      if (options.alphabet !== undefined) {
+        alphabet = options.alphabet;
+        if (alphabet !== 'base64' && alphabet !== 'base64url') {
+          throw new TypeError("Uint8Array.prototype.toBase64 alphabet must be 'base64' or 'base64url'");
+        }
+      }
+      omitPadding = Boolean(options.omitPadding);
+    }
+    var table = alphabet === 'base64url' ? base64UrlAlphabet : base64Alphabet;
+    var text = '';
+    var index = 0;
+    for (; index + 2 < this.length; index += 3) {
+      var triple = (this[index] << 16) | (this[index + 1] << 8) | this[index + 2];
+      text += table.charAt((triple >> 18) & 63) + table.charAt((triple >> 12) & 63)
+        + table.charAt((triple >> 6) & 63) + table.charAt(triple & 63);
+    }
+    var remaining = this.length - index;
+    if (remaining === 1) {
+      text += table.charAt(this[index] >> 2) + table.charAt((this[index] & 3) << 4);
+      if (!omitPadding) text += '==';
+    } else if (remaining === 2) {
+      var pair = (this[index] << 8) | this[index + 1];
+      text += table.charAt(pair >> 10) + table.charAt((pair >> 4) & 63) + table.charAt((pair & 15) << 2);
+      if (!omitPadding) text += '=';
+    }
+    return text;
+  });
+  // Map and WeakMap upserts, which pdf.js keeps its stream, font, and
+  // annotation caches in. The computed form hands its callback the key it
+  // missed on, and the plain form inserts the value it was given.
+  function installUpserts(target) {
+    define(target.prototype, 'getOrInsert', function getOrInsert(key, value) {
+      if (this.has(key)) return this.get(key);
+      this.set(key, value);
+      return value;
+    });
+    define(target.prototype, 'getOrInsertComputed', function getOrInsertComputed(key, callback) {
+      if (this.has(key)) return this.get(key);
+      var value = callback(key);
+      this.set(key, value);
+      return value;
+    });
+  }
+  installUpserts(Map);
+  if (typeof WeakMap !== 'undefined') installUpserts(WeakMap);
+  define(Math, 'sumPrecise', function sumPrecise(values) {
+    var sum = 0;
+    var compensation = 0;
+    var iterate = values[Symbol.iterator]();
+    for (var step = iterate.next(); !step.done; step = iterate.next()) {
+      var value = step.value;
+      if (typeof value !== 'number') throw new TypeError('Math.sumPrecise expects an iterable of numbers');
+      var next = sum + value;
+      // Neumaier's term: this addition's rounding error, added back at the end.
+      compensation += Math.abs(sum) >= Math.abs(value) ? sum - next + value : value - next + sum;
+      sum = next;
+    }
+    return sum + compensation;
+  });
+  define(Set.prototype, 'intersection', function intersection(other) {
+    var result = new Set();
+    this.forEach(function (value) { if (other.has(value)) result.add(value); });
+    return result;
+  });
+  if (typeof Blob !== 'undefined') {
+    define(Blob.prototype, 'bytes', function bytes() {
+      return this.arrayBuffer().then(function (buffer) { return new Uint8Array(buffer); });
+    });
+  }
+  define(ArrayBuffer.prototype, 'transferToFixedLength', function transferToFixedLength(newLength) {
+    var source = new Uint8Array(this);
+    var length = newLength === undefined ? source.length : Math.trunc(Number(newLength));
+    if (!Number.isFinite(length) || length < 0) throw new RangeError('ArrayBuffer.prototype.transferToFixedLength length must be a non-negative integer');
+    var copy = new Uint8Array(length);
+    copy.set(source.subarray(0, Math.min(source.length, length)));
+    // The proposal detaches the source. This realm has no structuredClone to
+    // transfer through, so a port carries it instead.
+    if (typeof MessageChannel !== 'undefined') {
+      var channel = new MessageChannel();
+      channel.port1.postMessage(this, [this]);
+      channel.port1.close();
+      channel.port2.close();
+    }
+    return copy.buffer;
   });
   define(Object, 'hasOwn', function hasOwn(target, key) { return Object.prototype.hasOwnProperty.call(target, key); });
   var array = Array.prototype;
@@ -180,7 +322,6 @@ export const CLIENT_FLOOR_WORKER_PREAMBLE = `(function () {
   // U+0027 and U+0060 are the two other punctuators a quoted literal cannot spell.
   var otherPunctuators = ',-=<>#&!%:;@~' + String.fromCharCode(39, 96) + '"';
   var escapedWhitespace = ' \\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
-  var hexDigits = '0123456789abcdef';
   function encodeCodeUnit(unit) {
     var width = unit < 256 ? 2 : 4;
     var hex = '';

@@ -121,6 +121,33 @@
     const body = node.querySelector('[data-textpreview-body]')
     const text = (body === null ? node : body).textContent || ''
     const host = node.closest('[data-sidebar-right-tab]')
+    // A renderer that claimed the address is not a rendered document: the PDF
+    // body reports itself once its own bytes parsed, and its failure line is
+    // the only thing a reader gets when they did not.
+    const pdfBody = node.querySelector('[data-pdf-preview]')
+    const surface = node.querySelector('[data-document-zoom-surface]')
+    const alert = node.querySelector('[role="alert"]')
+    // A canvas element is not a painted page: every fourth pixel states whether
+    // the renderer put ink on it.
+    let ink = null
+    let canvasSize = null
+    const canvases = node.querySelectorAll('canvas')
+    for (let canvasIndex = 0; canvasIndex < canvases.length; canvasIndex += 1) {
+      const canvas = canvases[canvasIndex]
+      try {
+        const context = canvas.getContext('2d')
+        if (context === null || canvas.width === 0 || canvas.height === 0) continue
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+        let dark = 0
+        for (let pixel = 0; pixel + 3 < pixels.length; pixel += 16) {
+          if (pixels[pixel + 3] > 32 && (pixels[pixel] + pixels[pixel + 1] + pixels[pixel + 2]) / 3 < 200) dark += 1
+        }
+        ink = ink === null ? dark : Math.max(ink, dark)
+        canvasSize = String(canvas.width) + 'x' + String(canvas.height)
+      } catch (error) {
+        ink = null
+      }
+    }
     previews.push({
       state: node.getAttribute('data-textpreview-state'),
       url: node.getAttribute('data-textpreview-url'),
@@ -130,7 +157,48 @@
       body: body !== null,
       textLength: text.length,
       text: text.slice(0, PREVIEW_TEXT_LIMIT),
+      pdf: pdfBody !== null,
+      pdfPages: pdfBody === null ? 0 : pdfBody.childElementCount,
+      canvases: canvases.length,
+      ink: ink,
+      canvasSize: canvasSize,
+      surfaceHidden: surface === null ? null : surface.hasAttribute('hidden'),
+      alert: alert === null ? null : (alert.textContent || '').slice(0, 200),
     })
+  }
+
+  // The closing turn's file sections: the changed-files card, and the declared
+  // deliveries grid whose container states its own width. The newest card is
+  // the one this run's turn wrote, so the readings take the last of each.
+  const changedCards = document.querySelectorAll('[data-changed-files]')
+  const changedCard = changedCards.length === 0 ? null : changedCards[changedCards.length - 1]
+  const presentedRows = document.querySelectorAll('[data-presented-files-row]')
+  const presentedRow = presentedRows.length === 0 ? null : presentedRows[presentedRows.length - 1]
+  const presentedContainer = presentedRow === null ? null : presentedRow.parentElement
+  const deliverables = {
+    changedCards: changedCards.length,
+    changedVisible: changedCard !== null && changedCard.closest('[hidden]') === null,
+    changedText: changedCard === null ? null : (changedCard.innerText || changedCard.textContent || '').slice(0, 400),
+    presentedRows: presentedRows.length,
+    containerPresent: presentedContainer !== null,
+    containerNarrow: presentedContainer === null ? null : presentedContainer.hasAttribute('data-narrow'),
+    containerClass: presentedContainer === null ? null : String(presentedContainer.className),
+    columns: presentedRow === null ? null : css(presentedRow, 'grid-template-columns'),
+    columnsRows: presentedRow === null ? null : css(presentedRow, 'grid-template-rows'),
+    single: presentedRow === null ? null : presentedRow.getAttribute('data-single'),
+    cards: presentedRow === null ? 0 : presentedRow.childElementCount,
+    text: presentedRow === null ? null : (presentedRow.innerText || presentedRow.textContent || '').slice(0, 400),
+  }
+
+  // The experimental agent-team header action states its own collapse through
+  // the title row's data-tight, so the label's computed display is the fact.
+  const teamRoot = document.querySelector('[data-team-action]')
+  const teamLabel = teamRoot === null ? null : teamRoot.querySelector('[class*="_triggerLabel"]')
+  const teamTrigger = {
+    present: teamRoot !== null,
+    labelDisplay: teamLabel === null ? null : css(teamLabel, 'display'),
+    labelText: teamLabel === null ? null : (teamLabel.textContent || ''),
+    icons: teamRoot === null ? 0 : teamRoot.querySelectorAll('svg').length,
   }
 
   // Container queries are read from the mounted stylesheets, where a
@@ -183,6 +251,8 @@
     trajectory: trajectory,
     scroller: scroller,
     previews: previews,
+    deliverables: deliverables,
+    teamTrigger: teamTrigger,
     containerQueries: {
       stylesheets: sources.length,
       readable: readable,

@@ -7,8 +7,11 @@ import {
   collectBrowserArtifacts,
   collectDeniedApis,
   collectGrammarViolations,
+  collectPayloadDeniedMembers,
+  collectPayloadMemberViolations,
   collectPayloads,
   FLOOR_DENIED_APIS,
+  PAYLOAD_DENIED_MEMBERS,
   PAYLOAD_MIN_CHARACTERS,
 } from './verify-client-browser-floor.ts'
 
@@ -22,6 +25,13 @@ function constructs(text: string): string[] {
 
 function apiConstructs(text: string): string[] {
   return collectApiViolations(parse(text)).map(violation => violation.construct)
+}
+
+/** The constructs one payload long enough to be scanned reports. */
+function payloadConstructs(code: string): string[] {
+  const payload = code.padEnd(PAYLOAD_MIN_CHARACTERS, ' ')
+  return collectArtifactViolations('lib/client.pdf.js', `const source = ${JSON.stringify(payload)};`)
+    .map(violation => violation.construct)
 }
 
 describe('client browser floor grammar', () => {
@@ -140,6 +150,82 @@ describe('client browser floor payloads', () => {
     expect(violations).toHaveLength(1)
     expect(violations[0]?.inPayload).toBe(false)
     expect(violations[0]?.line).toBe(1)
+  })
+})
+
+
+describe('client browser floor payload members', () => {
+  it('reports a receiver-blind post-floor call inside a payload', () => {
+    const code = 'const decoded = hash.fromHex()'
+    const payload = code.padEnd(PAYLOAD_MIN_CHARACTERS, ' ')
+    const violations = collectArtifactViolations('lib/client.pdf.js', 'const source = ' + JSON.stringify(payload) + ';')
+    expect(violations).toHaveLength(1)
+    expect(violations[0]?.construct).toBe('call to fromHex in payload 1')
+    expect(violations[0]?.inPayload).toBe(true)
+    expect(violations[0]?.file).toBe('lib/client.pdf.js')
+    expect(violations[0]?.line).toBe(1)
+    expect(violations[0]?.column).toBe(code.indexOf('hash') + 1)
+  })
+
+  it('names the payload a finding sits in', () => {
+    const first = 'const a = 1'.padEnd(PAYLOAD_MIN_CHARACTERS, ' ')
+    const second = 'const b = value.fromHex()'.padEnd(PAYLOAD_MIN_CHARACTERS, ' ')
+    const artifact = 'const one = ' + JSON.stringify(first) + '; const two = ' + JSON.stringify(second) + ';'
+    const violations = collectArtifactViolations('lib/client.excel.js', artifact)
+    expect(violations.map(violation => violation.construct)).toEqual(['call to fromHex in payload 2'])
+    expect(violations[0]?.file).toBe('lib/client.excel.js')
+  })
+
+  it('reports an optional call like a plain one', () => {
+    expect(payloadConstructs('const decoded = range?.fromHex()')).toEqual(['call to fromHex in payload 1'])
+  })
+
+  it('needs a call, not a name', () => {
+    expect(payloadConstructs([
+      '// hash.toHex()',
+      'const named = "hash.toHex()"',
+      'const held = hash.toHex',
+      'const local = { toHex: () => "ab" }',
+      'const computed = target["toHex"]()',
+    ].join('\n'))).toEqual([])
+  })
+
+  it('leaves the members the installer covers alone', () => {
+    expect(payloadConstructs([
+      'async function read(response) { return (await response.bytes()).length }',
+      'const settled = Promise.withResolvers()',
+      'const hex = range.toHex()',
+    ].join('\n'))).toEqual([])
+  })
+
+  it('reports a member call through any receiver', () => {
+    expect(collectPayloadMemberViolations(parse('items.groupBy(pick)'), ['groupBy'])).toHaveLength(1)
+    expect(collectPayloadMemberViolations(parse('Object.groupBy(items, pick)'), ['groupBy'])).toHaveLength(1)
+    expect(collectPayloadMemberViolations(parse('showPicker()'), ['showPicker'])).toEqual([])
+  })
+
+  it('reports one finding per call site', () => {
+    // Object.groupBy is a whole-name deny entry and groupBy a curated member
+    // name, so the two scans reach the same call site; it is reported once.
+    expect(payloadConstructs('const grouped = Object.groupBy(items, pick)')).toEqual(['call to Object.groupBy'])
+  })
+
+  it('reports the curated members the floor does not install', () => {
+    expect(PAYLOAD_DENIED_MEMBERS).toContain('toHex')
+    expect(collectPayloadDeniedMembers()).toContain('showPicker')
+    expect(collectPayloadDeniedMembers()).toContain('fromHex')
+    // An installed member is legal in a payload: the floor provides it before
+    // the payload evaluates, so reporting it would fail on third-party code.
+    expect(collectPayloadDeniedMembers()).not.toContain('toHex')
+    expect(collectPayloadDeniedMembers()).not.toContain('toBase64')
+    expect(collectPayloadDeniedMembers()).not.toContain('bytes')
+    expect(collectPayloadDeniedMembers()).not.toContain('withResolvers')
+  })
+
+  it('drops a curated member the given installers cover', () => {
+    expect(collectPayloadDeniedMembers(['toHex'], [])).toEqual(['toHex'])
+    expect(collectPayloadDeniedMembers(['toHex'], ['Uint8Array.prototype.toHex'])).toEqual([])
+    expect(collectPayloadDeniedMembers(['showPicker'], ['Uint8Array.prototype.toHex'])).toEqual(['showPicker'])
   })
 })
 

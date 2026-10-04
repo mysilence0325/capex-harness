@@ -67,6 +67,46 @@ interface Uint8ArrayCompat {
   fromBase64?: (value: string) => Uint8Array
 }
 
+/** Prototype members of the base64/hex proposal Chromium 90 lacks. */
+interface Uint8ArrayEncodersCompat {
+  toHex?: (this: Uint8Array) => string
+  toBase64?: (this: Uint8Array, options?: unknown) => string
+}
+
+/** The options object `Uint8Array.prototype.toBase64` reads, as the proposal specifies it. */
+interface Uint8ArrayBase64Options {
+  /** Alphabet to encode with, validated against the proposal's two; the default is base64. */
+  alphabet?: unknown
+  /** Whether to leave the trailing = padding off, read with ToBoolean. */
+  omitPadding?: unknown
+}
+
+/** The Map and WeakMap upserts Chromium 90 lacks, as a view of either prototype. */
+interface CollectionUpsertCompat {
+  getOrInsert?: <K, V>(this: Map<K, V>, key: K, value: V) => V
+  getOrInsertComputed?: <K, V>(this: Map<K, V>, key: K, callback: (key: K) => V) => V
+}
+
+/** The `Math` static Chromium 90 lacks. */
+interface MathCompat {
+  sumPrecise?: (values: Iterable<number>) => number
+}
+
+/** The `Set` member Chromium 90 lacks. */
+interface SetCompat {
+  intersection?: <T>(this: Set<T>, other: ReadonlySet<T>) => Set<T>
+}
+
+/** The `Blob` member Chromium 90 lacks, reached through the canvas image path. */
+interface BlobCompat {
+  bytes?: () => Promise<Uint8Array>
+}
+
+/** The `ArrayBuffer` member Chromium 90 lacks, which the PDF Worker trims font tables with. */
+interface ArrayBufferTransferCompat {
+  transferToFixedLength?: (newLength?: number) => ArrayBuffer
+}
+
 /** The `RegExp` static Chromium 90 lacks. */
 interface RegExpCompat {
   escape?: (value: string) => string
@@ -396,6 +436,230 @@ function installUint8ArrayFromBase64(installedApis: string[]): void {
   installedApis.push('Uint8Array.fromBase64')
 }
 
+/** Lower-case hex digits `Uint8Array.prototype.toHex` encodes with. */
+const HEX_DIGITS = '0123456789abcdef'
+
+/** Standard base64 alphabet, the proposal's default. */
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/** URL-safe base64 alphabet, the proposal's base64url option. */
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+/**
+ * Install the base64/hex proposal's encoders, which pdf.js calls on its own
+ * byte ranges: PDFDocument.fingerprints calls toHex on the two hashed ranges,
+ * and the display half calls toBase64 on the font data it hands to FontFace
+ * and on the signature it saves.
+ *
+ * The options object is validated the way the proposal specifies it, because
+ * the installed member is a standard API untyped JavaScript calls.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installUint8ArrayEncoders(installedApis: string[]): void {
+  const prototype = Uint8Array.prototype as Uint8ArrayEncodersCompat
+  if (prototype.toHex === undefined) {
+    prototype.toHex = function toHex(this: Uint8Array): string {
+      let text = ''
+      for (const byte of this) text += HEX_DIGITS.charAt(byte >> 4) + HEX_DIGITS.charAt(byte & 15)
+      return text
+    }
+    installedApis.push('Uint8Array.prototype.toHex')
+  }
+  if (prototype.toBase64 === undefined) {
+    prototype.toBase64 = function toBase64(this: Uint8Array, options?: unknown): string {
+      let encoding: 'base64' | 'base64url' = 'base64'
+      let omitPadding = false
+      if (options !== undefined) {
+        if (options === null || typeof options !== 'object') {
+          throw new TypeError('Uint8Array.prototype.toBase64 options must be an object')
+        }
+        const requested = options as Uint8ArrayBase64Options
+        const alphabet = requested.alphabet
+        if (alphabet !== undefined) {
+          if (alphabet !== 'base64' && alphabet !== 'base64url') {
+            throw new TypeError('Uint8Array.prototype.toBase64 alphabet must be one of base64 or base64url')
+          }
+          encoding = alphabet
+        }
+        omitPadding = Boolean(requested.omitPadding)
+      }
+      const table = encoding === 'base64url' ? BASE64URL_ALPHABET : BASE64_ALPHABET
+      let text = ''
+      let index = 0
+      for (; index + 2 < this.length; index += 3) {
+        const first = this[index] as number
+        const second = this[index + 1] as number
+        const third = this[index + 2] as number
+        const triple = (first << 16) | (second << 8) | third
+        text += table.charAt((triple >> 18) & 63) + table.charAt((triple >> 12) & 63)
+          + table.charAt((triple >> 6) & 63) + table.charAt(triple & 63)
+      }
+      const remaining = this.length - index
+      if (remaining === 1) {
+        const single = this[index] as number
+        text += table.charAt(single >> 2) + table.charAt((single & 3) << 4)
+        if (!omitPadding) text += '=='
+      } else if (remaining === 2) {
+        const pair = ((this[index] as number) << 8) | (this[index + 1] as number)
+        text += table.charAt(pair >> 10) + table.charAt((pair >> 4) & 63) + table.charAt((pair & 15) << 2)
+        if (!omitPadding) text += '='
+      }
+      return text
+    }
+    installedApis.push('Uint8Array.prototype.toBase64')
+  }
+}
+
+/**
+ * Read a map entry, inserting the given value when the key is absent.
+ * @param key - key to look up.
+ * @param value - value to insert when the key is absent.
+ * @returns the existing or newly inserted value.
+ */
+function getOrInsert<K, V>(this: Map<K, V>, key: K, value: V): V {
+  const existing = this.get(key)
+  if (existing !== undefined || this.has(key)) return existing as V
+  this.set(key, value)
+  return value
+}
+
+/**
+ * Read a map entry, computing and inserting its value when the key is absent.
+ * @param key - key to look up, handed to the callback only when it is absent.
+ * @param callback - computes the value to insert.
+ * @returns the existing or newly inserted value.
+ */
+function getOrInsertComputed<K, V>(this: Map<K, V>, key: K, callback: (key: K) => V): V {
+  const existing = this.get(key)
+  if (existing !== undefined || this.has(key)) return existing as V
+  const computed = callback(key)
+  this.set(key, computed)
+  return computed
+}
+
+/**
+ * Install the Map and WeakMap upserts pdf.js keeps its stream, font, and
+ * annotation caches in.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installCollectionUpserts(installedApis: string[]): void {
+  const map = Map.prototype as CollectionUpsertCompat
+  if (map.getOrInsert === undefined) {
+    map.getOrInsert = getOrInsert
+    installedApis.push('Map.prototype.getOrInsert')
+  }
+  if (map.getOrInsertComputed === undefined) {
+    map.getOrInsertComputed = getOrInsertComputed
+    installedApis.push('Map.prototype.getOrInsertComputed')
+  }
+  const weakMap = WeakMap.prototype as CollectionUpsertCompat
+  if (weakMap.getOrInsert === undefined) {
+    weakMap.getOrInsert = getOrInsert
+    installedApis.push('WeakMap.prototype.getOrInsert')
+  }
+  if (weakMap.getOrInsertComputed === undefined) {
+    weakMap.getOrInsertComputed = getOrInsertComputed
+    installedApis.push('WeakMap.prototype.getOrInsertComputed')
+  }
+}
+
+/**
+ * Install `Math.sumPrecise`, which pdf.js sums font metrics and table lengths with.
+ *
+ * The specification requires a correctly rounded sum; Neumaier compensation
+ * keeps the running error and adds it back once, which is exact for the
+ * metric sums this client computes. The installed member is a standard API, so
+ * it keeps the specification TypeError for a value that is not a number.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installMathSumPrecise(installedApis: string[]): void {
+  const math = Math as MathCompat
+  if (math.sumPrecise !== undefined) return
+  math.sumPrecise = (values: Iterable<number>): number => {
+    let sum = 0
+    let compensation = 0
+    for (const value of values) {
+      if (typeof value !== 'number') throw new TypeError('Math.sumPrecise expects an iterable of numbers')
+      const next = sum + value
+      // Neumaier's term: this addition's rounding error, added back at the end.
+      compensation += Math.abs(sum) >= Math.abs(value) ? sum - next + value : value - next + sum
+      sum = next
+    }
+    return sum + compensation
+  }
+  installedApis.push('Math.sumPrecise')
+}
+
+/**
+ * Install `Set.prototype.intersection`, which the PDF Worker calls on the
+ * destination sets it linearizes.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installSetIntersection(installedApis: string[]): void {
+  const prototype = Set.prototype as SetCompat
+  if (prototype.intersection !== undefined) return
+  prototype.intersection = function intersection<T>(this: Set<T>, other: ReadonlySet<T>): Set<T> {
+    const result = new Set<T>()
+    for (const value of this) if (other.has(value)) result.add(value)
+    return result
+  }
+  installedApis.push('Set.prototype.intersection')
+}
+
+/**
+ * Install `Blob.prototype.bytes`, which the PDF Worker reads a
+ * canvas-rendered image back through.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installBlobBytes(installedApis: string[]): void {
+  const prototype = Blob.prototype as BlobCompat
+  if (prototype.bytes !== undefined) return
+  prototype.bytes = function bytes(this: Blob): Promise<Uint8Array> {
+    return this.arrayBuffer().then(buffer => new Uint8Array(buffer))
+  }
+  installedApis.push('Blob.prototype.bytes')
+}
+
+/**
+ * Detach an `ArrayBuffer` the way the transfer proposal does.
+ *
+ * Chromium 90 has no resizable buffers and no `structuredClone` in a Worker,
+ * so a message port is the one way to move the bytes out and leave the source
+ * detached.
+ * @param buffer - buffer to detach.
+ */
+function detachArrayBuffer(buffer: ArrayBuffer): void {
+  const channel = new MessageChannel()
+  channel.port1.postMessage(buffer, [buffer])
+  channel.port1.close()
+  channel.port2.close()
+}
+
+/**
+ * Install `ArrayBuffer.prototype.transferToFixedLength`, which the PDF Worker
+ * trims the font tables it hands the display with.
+ *
+ * The installed member is a standard API, so it keeps the specification
+ * RangeError for a length the static parameter type cannot exclude.
+ * @param installedApis - collector for the names this pass installs.
+ */
+function installArrayBufferTransfer(installedApis: string[]): void {
+  const prototype = ArrayBuffer.prototype as ArrayBufferTransferCompat
+  if (prototype.transferToFixedLength !== undefined) return
+  prototype.transferToFixedLength = function transferToFixedLength(this: ArrayBuffer, newLength?: number): ArrayBuffer {
+    const source = new Uint8Array(this)
+    const length = newLength === undefined ? source.length : Math.trunc(newLength)
+    if (!Number.isFinite(length) || length < 0) {
+      throw new RangeError('ArrayBuffer.prototype.transferToFixedLength length must be a non-negative integer')
+    }
+    const copy = new Uint8Array(length)
+    copy.set(source.subarray(0, Math.min(source.length, length)))
+    detachArrayBuffer(this)
+    return copy.buffer
+  }
+  installedApis.push('ArrayBuffer.prototype.transferToFixedLength')
+}
+
 /** Characters `RegExp.escape` prefixes with a reverse solidus. */
 const REGEXP_ESCAPED_SYNTAX = '^$\\.*+?()[]{}|/'
 
@@ -529,6 +793,12 @@ export function installBrowserCompat(): string[] {
   installPromiseTry(installedApis)
   installUrlParse(installedApis)
   installUint8ArrayFromBase64(installedApis)
+  installUint8ArrayEncoders(installedApis)
+  installCollectionUpserts(installedApis)
+  installMathSumPrecise(installedApis)
+  installSetIntersection(installedApis)
+  installBlobBytes(installedApis)
+  installArrayBufferTransfer(installedApis)
   installRegExpEscape(installedApis)
   installResponseBytes(installedApis)
   return installedApis

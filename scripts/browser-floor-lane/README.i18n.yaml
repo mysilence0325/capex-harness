@@ -3,8 +3,8 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write scripts/browser-floor-lane/README.md
 /chromium-90-browser-floor-lane:
-  en: 9a9f24e460800209
-  zh: a8fc319d2b2aed3a
+  en: f2623e28fbca3380
+  zh: a33addfaf8ba87c7
 /chromium-90-browser-floor-lane/why-it-lives-here:
   en: cef3b0acc28fce56
   zh: 30f6d6a2a6eb43ce
@@ -12,26 +12,32 @@
   en: bd75677f2bcbf4de
   zh: 7bfb0db384bfeee6
 /chromium-90-browser-floor-lane/start-a-server:
-  en: bb0d022c1faf56d7
-  zh: e7e9999381b19c65
+  en: 1ca6ad72f9d190c8
+  zh: 78411c0cdb34dee8
 /chromium-90-browser-floor-lane/run-the-lane:
-  en: ecbd81daf9e1431f
-  zh: f681e2ba67874482
+  en: 3761549f82589696
+  zh: fd08ca87ac65f6a7
 /chromium-90-browser-floor-lane/what-each-check-means:
-  en: 50ad2c3d58ecd8b4
-  zh: 76d77e4c6920cf30
+  en: 3ed492ffaaedc4bc
+  zh: d04729cece679661
 /chromium-90-browser-floor-lane/what-each-check-means/the-workspace-file-preview:
   en: e17c3eae959577b2
   zh: dd4762600e45eb8d
 /chromium-90-browser-floor-lane/what-each-check-means/the-changed-files-404s:
   en: 6f2c72a5088e4912
   zh: 04cd2c3d3ada6739
+/chromium-90-browser-floor-lane/what-each-check-means/the-keyed-real-model-checks:
+  en: c88c623e44eab965
+  zh: e76345b1407bee93
+/chromium-90-browser-floor-lane/what-each-check-means/the-agent-team-trigger:
+  en: fbcc2e56330e05da
+  zh: 1c6b17ef0769c6f1
 /chromium-90-browser-floor-lane/what-it-cannot-see:
-  en: 6bc048989cafb1fe
-  zh: 85cf06ecd6f08377
+  en: 9c26755d0efbbd5f
+  zh: 2e6fce3a8b8235ac
 /chromium-90-browser-floor-lane/why-this-is-a-manual-lane-not-a-ci-job:
   en: 8d737a60b1e4f1da
   zh: 88ba2a0679ff7244
 /chromium-90-browser-floor-lane/files:
-  en: d1b278fbee1b803b
-  zh: 0d1f8c36ecde4d62
+  en: 1c99d303cdd98edc
+  zh: 92b8175a84e23394

@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The lane drives a portable Chromium 90 snapshot build over the Chrome DevTools protocol against a `dsh web` server that is already running, reads the floor's facts back out of that engine, writes screenshots, and prints one JSON report. It is the behavior half of the [client browser floor](../../.agents/notes/implemented/architecture/2026-09-30-client-browser-floor.md): the gates beside it pin the build inputs and the shipped bytes, and this lane is what says the served client still renders on the engine itself.
+The lane drives a portable Chromium 90 snapshot build over the Chrome DevTools protocol against a `dsh web` server that is already running, reads the floor's facts back out of that engine, writes screenshots, and prints one JSON report. It is the behavior half of the [client browser floor](../../.agents/notes/implemented/architecture/2026-09-30-client-browser-floor.md): the gates beside it pin the build inputs and the shipped bytes, and this lane is what says the served client still renders on the engine itself. Three of its checks need a real model behind the server and a fourth needs the server started with this repository's agent-team overlay; the rest read any server.
 
 ## Why it lives here
 
@@ -27,6 +27,15 @@ pnpm dsh web --no-open
 # dsh web: http://127.0.0.1:<port>/?token=<token>
 ```
 
+Three checks type into the composer and let a real model answer, so the server they run against has to hold the key in its own environment:
+
+```sh
+$env:DEEPSEEK_API_KEY='<key>'
+pnpm dsh web --no-open --port 3081
+```
+
+The key belongs to that server process; nothing here reads it, writes it, or prints it.
+
 The URL with its token is the lane's only credential. `--url-file <path>` reads the last token URL a file holds, which is how a teammate takes the URL from the log of a background server instead of copying a token that may already be stale; a UTF-16LE log written by a PowerShell redirect is decoded too.
 
 ## Run the lane
@@ -41,6 +50,14 @@ Without a server, the same driver runs against the lane's own fixture page:
 
 ```sh
 npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\chrome.exe" --smoke
+```
+
+The keyed checks are opt-in, because every other check runs against a server that has no model behind it:
+
+```sh
+npx tsx scripts/browser-floor-lane/drive.ts \
+  --chrome "<dir>\r857891\chrome-win\chrome.exe" \
+  --url-file .artifacts/floor-lane-server.log --model-checks
 ```
 
 | Flag | Environment variable | Default |
@@ -62,12 +79,15 @@ npx tsx scripts/browser-floor-lane/drive.ts --chrome "<dir>\r857891\chrome-win\c
 | `--settle <ms>` | `DSH_FLOOR_SETTLE` | `1200` |
 | `--session-attempts <n>` | `DSH_FLOOR_SESSION_ATTEMPTS` | `6`; `0` reads whatever Session is open |
 | `--session-timeout <ms>` | `DSH_FLOOR_SESSION_TIMEOUT` | `6000` |
+| `--model-checks` | `DSH_FLOOR_MODEL_CHECKS=1` | off; runs the keyed, real-model checks against a server started with `DEEPSEEK_API_KEY` |
+| `--gesture-timeout <ms>` | `DSH_FLOOR_GESTURE_TIMEOUT` | `45000`; how long one page gesture of a model check waits |
+| `--reply-timeout <ms>` | `DSH_FLOOR_REPLY_TIMEOUT` | `240000`; how long one real-model turn may take |
 | `--fail-on-log-errors` | `DSH_FLOOR_FAIL_ON_LOG_ERRORS=1` | off; see the console check below |
 | `--smoke` | none | off; runs against `smoke/fixture.html` |
 
 The driver picks the Session itself: it clicks the sidebar rows in order until one renders at least two turn marks, because the turn rail renders only for a multi-turn Session, and it restores the view tab it found afterwards. After the viewport passes it opens the right Sidebar, picks the workspace-files entry, and opens `AGENTS.md`, which is the gesture the preview check reads.
 
-Output goes to three places: the JSON report on stdout, one summary line on stderr, and `--report` plus three screenshots in `--shots`. The exit code is `0` when every check passed, `1` when a check failed or a fact was unreadable, and `2` on a usage or startup failure.
+Output goes to three places: the JSON report on stdout, one summary line on stderr, and `--report` plus three screenshots in `--shots`, five of them under `--model-checks`. The exit code is `0` when every check passed, `1` when a check failed or a fact was unreadable, and `2` on a usage or startup failure.
 
 ## What each check means
 
@@ -78,11 +98,15 @@ Output goes to three places: the JSON report on stdout, one summary line on stde
 | `floor.iterator-statics` | `Iterator.from`, `Iterator.prototype.map` | the global is installed and both statics stay undefined, the one gap the floor records |
 | `layout.composer-control-row` | the control row's own content box, its `data-narrow`/`data-tight` markers, and the control groups' `column-gap` | at the narrow viewport the row is at or below 560px with both markers and an 8px gap; at the wide viewport it is above 560px with neither marker and a 12px gap |
 | `layout.header-title-row` | the `header` title row's content box and its markers | at the narrow viewport it is at or below 540px with `data-narrow` (540) and `data-tight` (480); at the wide viewport it carries neither |
+| `layout.agent-team-trigger` | the experimental agent-team header action's label and the markers the title row publishes | not applicable on a server that does not compose `@deepseek-ai/dsh-experimental-client-ui-agent-team`; where it is mounted, the marked title row keeps the trigger's icon and computes `display: none` for its label, and the unmarked row shows the label |
 | `layout.turn-rail-band` | the band that states the transcript width, and the rail frame it selects | at the narrow viewport the band is at or below 900px, marked, and its frame computes `display: none`; at the wide viewport it is unmarked and the frame renders |
 | `layout.trajectory-pane` | the trajectory pane's own width, its marker, and the kind label the compact columns collapse | at the narrow viewport the pane is at or below 620px, marked, with the label at `opacity: 0`; at the wide viewport it is unmarked with `opacity: 1` |
 | `scroll.conversation-scroller` | the conversation scroller's computed `overflow-y` and the space reserved for its scrollbar | it computes `scroll`, the floor's replacement for `scrollbar-gutter`; the reserved width is reported |
 | `css.no-container-queries` | every rule in every mounted document-level stylesheet | no `@container` rule is mounted, the feature the floor cannot render |
 | `preview.workspace-file` | the document container the workspace-files pane opened at `AGENTS.md` | its `data-textpreview-state` is `text` and its rendered text carries the document's own opening prose, so the file resource service answered the address |
+| `model.streaming-round-trip` | the assistant step the lane's own prompt produced, sampled by a page-side observer installed before the send | the composer sent the prompt, the assistant step entered its streaming state and its text grew while it streamed, and it settled on a reply carrying both ends of the range the prompt asked for, with no error notice |
+| `layout.deliverables-card` | the closing turn's changed-files card and the declared-deliveries grid beside it, read at both viewports | the changed-files card names the files the turn was asked to write; at the narrow viewport the grid's container carries `data-narrow` and computes one column, and at the wide viewport it carries no marker and computes two |
+| `preview.pdf` | the PDF the model wrote, opened through the workspace-files pane | the preview elected the PDF renderer, the page surface left its rendering state, and the canvas carries the document's ink. A body that refused the bytes renders its own failure line, and a surface that stays in its rendering state or a canvas with no ink is not a rendered document; the check reports whichever it read |
 | `console.errors` | the run's console errors and exceptions, plus the browser's error-level log entries | the page logged no console error and threw no exception. Error-level log entries (a failed request) are recorded in the report and fail the run only under `--fail-on-log-errors`, because a route outside the floor answering 404 says nothing about the floor |
 
 ### The workspace-file preview
@@ -99,6 +123,34 @@ Three answers share the status, and only the body separates them: `not found` is
 
 The report labels what it recognizes. `events.logErrorLabels` holds one record per error-level log entry whose path starts with `/api/changes.` and whose log text states `404`: its index in `events.logErrors`, the path, the status, the label `handler's own expired-summary answer`, and a note stating that the reading is a heuristic on the URL family and the status rather than a look at the response. Every other entry in `events.logErrors` stays as it was, and the label decides nothing: console errors and exceptions still gate the run, and error-level log entries still gate it only under `--fail-on-log-errors`.
 
+### The keyed, real-model checks
+
+Three checks need a server started with `DEEPSEEK_API_KEY`, and the driver runs them only under `--model-checks`. They open a Session of their own, so the prompts they type never land in the Session the other checks read, and they run last because that Session is not the one the earlier readings measured.
+
+Their prompts are fixed, so a failing run names the same fact a passing one does:
+
+| Check | Prompt |
+|---|---|
+| `model.streaming-round-trip` | `Count from 1 to 40, one number per line.` |
+| `layout.deliverables-card` | `Use the write tool to create two files in the working directory: floor-lane-probe.txt and floor-lane-probe-b.txt, each containing exactly the single word ok. Then call the present tool with both files as deliverables, and reply with one short sentence.` |
+| `preview.pdf` | `Use the write tool to create a file named floor-lane-probe.pdf whose entire content is exactly these lines, byte for byte and with no code fence:`, then the 445 bytes of a one-page PDF, then `Do not change, reorder, or add any character. Then reply with one short sentence.` |
+
+Two of those prompts are shaped by the surface rather than by taste. The streaming check asks for forty lines because a one-token answer mounts its assistant step already settled — measured on this client, `ok` never renders a streaming state at all — so a check built on that answer could only read the final text; and its observer watches mutations as well as the clock, because a short answer can add and remove the streaming attribute between two timer ticks. The deliverables prompt asks for two files because one declared file collapses the delivery grid to a single column at every width, and for a `present` call because that grid belongs to the declared deliveries rather than to the changed-files card beside it.
+
+The run writes what it reads: the three files land in the Session's workspace, which is this checkout when the server runs from it. They carry the `floor-lane-probe` prefix so they are easy to find and remove, and a re-run overwrites them.
+
+A reply is the model's own. When a check fails it names the fact that was missing — the reply did not carry the range, the turn rendered no changed-files card, the model never called `present` — so a red run can mean the model answered differently rather than that the client broke, and the lane fails loud instead of reading such a reply as a pass.
+
+### The agent-team trigger
+
+`layout.agent-team-trigger` reports itself as not applicable on a server that does not compose the experimental agent-team client package, which is every ordinary run, so the lane stays green there. To read it, start a second server with the repository's own overlay and point a run at it:
+
+```sh
+pnpm dsh web --patch apps/web/tests/agent-team-panel.overlay.yml --no-open --port 3082
+```
+
+The launcher owns `--patch` and hands everything from the first option it does not recognize to the booted app, so the overlay comes before `--no-open`.
+
 ## What it cannot see
 
 - It reads one Session's rendered DOM at two viewport widths, plus the one document preview the workspace-files pane opened. The workspace list, settings, dialogs, and the preview Workers are not exercised; a Worker is a realm of its own, and the lane reads only the page realm.
@@ -106,6 +158,10 @@ The report labels what it recognizes. `events.logErrorLabels` holds one record p
 - Font metrics decide the composer row's own width, so `--narrow-width` has to stay inside the band: the check fails with the measured width when the row is too wide to be marked, rather than passing quietly.
 - Surfaces a Session does not mount report as `absent`, and an absent fact fails the run. The turn rail needs two turns; the trajectory pane needs a Session with a trajectory.
 - It does not prove the shipped bytes. Artifact syntax and post-floor API call sites belong to the artifact gate, and the corpus counts to the ratchet.
+- The three keyed checks are absent from a run without `--model-checks`, and that flag is only useful against a server started with `DEEPSEEK_API_KEY`: a keyless server fails the first prompt instead of reading anything.
+- Those checks read a real model's own work, so they measure the model as much as the client. Every failure names the missing fact, and a re-run can turn red-to-green on the same tree.
+- `preview.pdf` reaches the PDF reader's own Worker realm, not only the page: the reader builds its Worker from `pdf.worker.min.mjs` alone ([runtime.ts](../../packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts)), so an install that stops at the page realm leaves the document unrendered and the check reports the body's own failure line. It also reads the canvas's own pixels, because a page surface can report itself ready over a canvas nothing was ever drawn on — which is the reading this check recorded on Chromium 90: one 400x213 canvas, surface ready, no failure line, and no ink.
+- `floor-lane-probe.txt`, `floor-lane-probe-b.txt`, and `floor-lane-probe.pdf` stay in the workspace after a keyed run. The lane does not remove them.
 - A green run says the facts above were read from this engine on this server. It says nothing about engines newer than the floor, which the repository's other browser lanes already cover.
 
 ## Why this is a manual lane, not a CI job
@@ -120,5 +176,6 @@ CI holds three things in its place, all keyless and all on the artifact side. Th
 |---|---|
 | `drive.ts` | Flags, browser lifecycle, DevTools connection, Session selection, the report |
 | `steps.ts` | The checks, the viewport passes, the workspace-file gesture, and the page operations they need |
+| `model-steps.ts` | The keyed, real-model checks: the Session they open, the prompts they type, and the facts they read back |
 | `probe.js` | Page source the driver evaluates: it must stay parseable by the floor engine and must not call the APIs the floor installs |
 | `smoke/fixture.html` | The lane's own fixture page, for a run without a server |

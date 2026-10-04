@@ -25,6 +25,16 @@ const FLOOR = [
   'Promise.try',
   'URL.parse',
   'Uint8Array.fromBase64',
+  'Uint8Array.prototype.toHex',
+  'Uint8Array.prototype.toBase64',
+  'Map.prototype.getOrInsert',
+  'Map.prototype.getOrInsertComputed',
+  'WeakMap.prototype.getOrInsert',
+  'WeakMap.prototype.getOrInsertComputed',
+  'Math.sumPrecise',
+  'Set.prototype.intersection',
+  'Blob.prototype.bytes',
+  'ArrayBuffer.prototype.transferToFixedLength',
   'RegExp.escape',
   'Response.prototype.bytes',
 ]
@@ -32,8 +42,41 @@ const FLOOR = [
 /** `RegExp.escape` as the floor installs it, read at call time. */
 const regexp = RegExp as { escape?: (value: string) => string }
 
+/** `AbortSignal.prototype.throwIfAborted` as the floor installs it, read at call time. */
+const abortCheck = AbortSignal.prototype as { throwIfAborted?: () => void }
+
 /** `Response.prototype.bytes` as the floor installs it, read at call time. */
 const responseBytes = Response.prototype as { bytes?: () => Promise<Uint8Array> }
+
+/** `Uint8Array.prototype.toHex` as the floor installs it, read at call time. */
+const uint8ArrayHex = Uint8Array.prototype as { toHex?: (this: Uint8Array) => string }
+
+/** `Uint8Array.prototype.toBase64` as the floor installs it, read at call time. */
+const uint8ArrayBase64 = Uint8Array.prototype as { toBase64?: (this: Uint8Array, options?: unknown) => string }
+
+/** The Map upserts as the floor installs them, read at call time. */
+const mapUpserts = Map.prototype as {
+  getOrInsert?: <K, V>(this: Map<K, V>, key: K, value: V) => V
+  getOrInsertComputed?: <K, V>(this: Map<K, V>, key: K, callback: (key: K) => V) => V
+}
+
+/** The WeakMap upserts as the floor installs them, read at call time. */
+const weakMapUpserts = WeakMap.prototype as {
+  getOrInsert?: <K extends WeakKey, V>(this: WeakMap<K, V>, key: K, value: V) => V
+  getOrInsertComputed?: <K extends WeakKey, V>(this: WeakMap<K, V>, key: K, callback: (key: K) => V) => V
+}
+
+/** `Math.sumPrecise` as the floor installs it, read at call time. */
+const mathSumPrecise = Math as { sumPrecise?: (values: Iterable<unknown>) => number }
+
+/** `Set.prototype.intersection` as the floor installs it, read at call time. */
+const setIntersection = Set.prototype as { intersection?: <T>(this: Set<T>, other: ReadonlySet<T>) => Set<T> }
+
+/** `Blob.prototype.bytes` as the floor installs it, read at call time. */
+const blobBytes = Blob.prototype as { bytes?: () => Promise<Uint8Array> }
+
+/** `ArrayBuffer.prototype.transferToFixedLength` as the floor installs it, read at call time. */
+const transferToFixedLength = ArrayBuffer.prototype as { transferToFixedLength?: (newLength?: number) => ArrayBuffer }
 
 /** Undo one removal of a realm API. */
 type Restoration = () => void
@@ -77,11 +120,19 @@ describe('browser compatibility floor', () => {
   const restorations: Restoration[] = []
 
   beforeAll(async () => {
-    // The test realm can trail the engines the client ships to: stand in for the
-    // two floor APIs Node lacks, so a complete engine still installs nothing.
+    // The test realm can trail the engines the client ships to: stand in for
+    // every floor API this Node release lacks, so a complete engine still
+    // installs nothing.
     restorations.push(
       withNative(Promise, 'try', (callback: () => unknown) => Promise.resolve(callback())),
       withNative(Uint8Array, 'fromBase64', () => new Uint8Array()),
+      withNative(Uint8Array.prototype, 'toHex', () => ''),
+      withNative(Uint8Array.prototype, 'toBase64', () => ''),
+      withNative(Map.prototype, 'getOrInsert', () => undefined),
+      withNative(Map.prototype, 'getOrInsertComputed', () => undefined),
+      withNative(WeakMap.prototype, 'getOrInsert', () => undefined),
+      withNative(WeakMap.prototype, 'getOrInsertComputed', () => undefined),
+      withNative(Math, 'sumPrecise', () => 0),
       withNative(RegExp, 'escape', (value: string) => value),
     )
     // An engine that ships every API: the floor installs nothing.
@@ -105,6 +156,16 @@ describe('browser compatibility floor', () => {
       without(Promise, 'try'),
       without(URL, 'parse'),
       without(Uint8Array, 'fromBase64'),
+      without(Uint8Array.prototype, 'toHex'),
+      without(Uint8Array.prototype, 'toBase64'),
+      without(Map.prototype, 'getOrInsert'),
+      without(Map.prototype, 'getOrInsertComputed'),
+      without(WeakMap.prototype, 'getOrInsert'),
+      without(WeakMap.prototype, 'getOrInsertComputed'),
+      without(Math, 'sumPrecise'),
+      without(Set.prototype, 'intersection'),
+      without(Blob.prototype, 'bytes'),
+      without(ArrayBuffer.prototype, 'transferToFixedLength'),
       without(RegExp, 'escape'),
       without(Response.prototype, 'bytes'),
     )
@@ -233,6 +294,10 @@ describe('browser compatibility floor', () => {
     const bare = new AbortController()
     bare.abort()
     expect(() => { bare.signal.throwIfAborted() }).toThrow(expect.objectContaining({ name: 'AbortError' }))
+    // Chromium 90 aborts carry no reason, and that arm answers with the
+    // specification AbortError too.
+    expect(() => abortCheck.throwIfAborted?.call({ aborted: true }))
+      .toThrow(expect.objectContaining({ name: 'AbortError' }))
   })
 
   it('times out on its own deadline', async () => {
@@ -270,10 +335,126 @@ describe('browser compatibility floor', () => {
     expect(urlParse.parse?.('http://')).toBeNull()
   })
 
+  it('rethrows the error a URL parse cannot read as a rejected address', () => {
+    const urlParse = URL as { parse?: (value: unknown, base?: unknown) => URL | null }
+    const unreadable = { toString: () => { throw new Error('unreadable address') } }
+    expect(() => urlParse.parse?.(unreadable)).toThrow('unreadable address')
+  })
+
   it('decodes base64 bytes', () => {
     const fromBase64 = Uint8Array as { fromBase64?: (value: string) => Uint8Array }
     expect([...(fromBase64.fromBase64?.('AQID') ?? new Uint8Array())]).toEqual([1, 2, 3])
     expect(fromBase64.fromBase64?.('')?.length).toBe(0)
+  })
+
+  it('encodes the receiver bytes as lower-case hex', () => {
+    expect(uint8ArrayHex.toHex?.call(new Uint8Array([0, 15, 255]))).toBe('000fff')
+    expect(uint8ArrayHex.toHex?.call(new Uint8Array([222, 173, 190, 239]))).toBe('deadbeef')
+    expect(uint8ArrayHex.toHex?.call(new Uint8Array([171]))).toBe('ab')
+    expect(uint8ArrayHex.toHex?.call(new Uint8Array())).toBe('')
+  })
+
+  it('encodes the receiver bytes as base64', () => {
+    const encode = (bytes: readonly number[], options?: unknown): string | undefined => {
+      const toBase64 = uint8ArrayBase64.toBase64
+      return toBase64 === undefined ? undefined : toBase64.call(new Uint8Array(bytes), options)
+    }
+    expect(encode([77, 97, 110])).toBe('TWFu')
+    expect(encode([77, 97])).toBe('TWE=')
+    expect(encode([77])).toBe('TQ==')
+    expect(encode([])).toBe('')
+    // The two alphabets' last characters are what separate them: 62 and 63 are
+    // +/ in base64 and -_ in base64url.
+    expect(encode([251, 255, 191])).toBe('+/+/')
+    expect(encode([251, 255, 191, 77, 97])).toBe('+/+/TWE=')
+    expect(encode([77], {})).toBe('TQ==')
+    expect(encode([77, 97], { omitPadding: true })).toBe('TWE')
+    expect(encode([251, 255, 191], { alphabet: 'base64url' })).toBe('-_-_')
+    expect(encode([251, 255, 191], { alphabet: 'base64', omitPadding: true })).toBe('+/+/')
+  })
+
+  it('reads the options the proposal defines and refuses the rest', () => {
+    const call = uint8ArrayBase64.toBase64 as (this: Uint8Array, options?: unknown) => string
+    const encode = (options: unknown): string => call.call(new Uint8Array([77]), options)
+    expect(encode({ omitPadding: 1 })).toBe('TQ')
+    expect(() => encode(null)).toThrow(TypeError)
+    expect(() => encode(7)).toThrow(TypeError)
+    expect(() => encode({ alphabet: 'latin1' })).toThrow(TypeError)
+  })
+
+  it('inserts a map entry once and returns the value already there', () => {
+    const getOrInsert = mapUpserts.getOrInsert as (key: string, value: number) => number
+    const map = new Map<string, number>()
+    expect(getOrInsert.call(map, 'a', 1)).toBe(1)
+    expect(getOrInsert.call(map, 'a', 2)).toBe(1)
+    expect(map.get('a')).toBe(1)
+    // A key that holds undefined is present, not missing: the entry stays.
+    const insertText = mapUpserts.getOrInsert as (key: string, value: string | undefined) => string | undefined
+    const explicit = new Map<string, string | undefined>([['present', undefined]])
+    expect(insertText.call(explicit, 'present', 'replacement')).toBeUndefined()
+    expect(explicit.get('present')).toBeUndefined()
+    expect(explicit.size).toBe(1)
+  })
+
+  it('computes a map entry once, keyed by the entry it missed on', () => {
+    const getOrInsertComputed = mapUpserts.getOrInsertComputed as (key: string, callback: (key: string) => string) => string
+    const computed = new Map<string, string>()
+    const seen: string[] = []
+    expect(getOrInsertComputed.call(computed, 'x', (key) => {
+      seen.push(key)
+      return 'first'
+    })).toBe('first')
+    expect(getOrInsertComputed.call(computed, 'x', () => 'second')).toBe('first')
+    expect(seen).toEqual(['x'])
+    expect(computed.size).toBe(1)
+  })
+
+  it('upserts a WeakMap entry', () => {
+    const getOrInsert = weakMapUpserts.getOrInsert as (key: object, value: number) => number
+    const getOrInsertComputed = weakMapUpserts.getOrInsertComputed as (key: object, callback: (key: object) => number) => number
+    const key = {}
+    const weak = new WeakMap<object, number>()
+    expect(getOrInsert.call(weak, key, 1)).toBe(1)
+    expect(getOrInsertComputed.call(weak, key, () => 2)).toBe(1)
+    const fresh = {}
+    expect(getOrInsertComputed.call(weak, fresh, missed => missed === fresh ? 3 : 0)).toBe(3)
+    expect(weak.get(key)).toBe(1)
+  })
+
+  it('sums the values pdf.js measures with', () => {
+    expect(mathSumPrecise.sumPrecise?.([1, 2, 3])).toBe(6)
+    expect(mathSumPrecise.sumPrecise?.([])).toBe(0)
+    expect(mathSumPrecise.sumPrecise?.(new Set([2, 4]))).toBe(6)
+    expect(mathSumPrecise.sumPrecise?.([0.1, 0.2])).toBeCloseTo(0.3, 12)
+    // Neumaier compensation keeps a sum a plain accumulation loses.
+    expect(mathSumPrecise.sumPrecise?.([1e100, 1, -1e100])).toBe(1)
+    expect(() => mathSumPrecise.sumPrecise?.([1, 'x'])).toThrow(TypeError)
+  })
+
+  it('intersects two sets without changing either', () => {
+    const first = new Set([1, 2, 3])
+    const shared = setIntersection.intersection?.call(first, new Set([2, 3, 4]))
+    expect([...(shared ?? [])]).toEqual([2, 3])
+    expect([...first]).toEqual([1, 2, 3])
+    expect([...(setIntersection.intersection?.call(new Set([1]), new Set()) ?? [])]).toEqual([])
+  })
+
+  it('reads a blob body as bytes', async () => {
+    const bytes = await blobBytes.bytes?.call(new Blob([new Uint8Array([1, 2, 3])]))
+    expect([...(bytes ?? [])]).toEqual([1, 2, 3])
+  })
+
+  it('moves buffer bytes into a fixed-length buffer and detaches the source', () => {
+    const source = new Uint8Array([1, 2, 3, 4]).buffer
+    const trimmed = transferToFixedLength.transferToFixedLength?.call(source, 2)
+    expect([...new Uint8Array(trimmed ?? new ArrayBuffer(0))]).toEqual([1, 2])
+    // The proposal leaves the source detached, so its byteLength reads zero.
+    expect(source.byteLength).toBe(0)
+    const grown = transferToFixedLength.transferToFixedLength?.call(new Uint8Array([9]).buffer, 3)
+    expect([...new Uint8Array(grown ?? new ArrayBuffer(0))]).toEqual([9, 0, 0])
+    const same = new Uint8Array([5, 6]).buffer
+    expect([...new Uint8Array(transferToFixedLength.transferToFixedLength?.call(same) ?? new ArrayBuffer(0))]).toEqual([5, 6])
+    expect(() => transferToFixedLength.transferToFixedLength?.call(new ArrayBuffer(1), -1)).toThrow(RangeError)
   })
 
   it('escapes a string for literal use in a pattern', () => {

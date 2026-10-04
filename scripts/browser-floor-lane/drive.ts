@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
+import { runModelSteps } from './model-steps.ts'
 import { expiredSummaryLabel, isJsonObject, runSteps } from './steps.ts'
 import type { CheckOutcome, StepEvents, StepPage } from './steps.ts'
 
@@ -46,6 +47,10 @@ const DEFAULT_SETTLE_MS = 1200
 const DEFAULT_SESSION_ATTEMPTS = 6
 /** Default wait for one Session row to render its turns. */
 const DEFAULT_SESSION_TIMEOUT_MS = 6000
+/** Default wait for one keyed run's page gestures to answer. */
+const DEFAULT_GESTURE_TIMEOUT_MS = 45_000
+/** Default wait for one real-model turn, from Enter to a settled assistant message. */
+const DEFAULT_REPLY_TIMEOUT_MS = 240_000
 /** Longest console event text kept in the report. */
 const EVENT_TEXT_LIMIT = 400
 /** Most events kept per category. */
@@ -71,6 +76,9 @@ interface LaneOptions {
   readonly sessionAttempts: number
   readonly sessionTimeoutMs: number
   readonly failOnLogErrors: boolean
+  readonly modelChecks: boolean
+  readonly gestureTimeoutMs: number
+  readonly replyTimeoutMs: number
 }
 
 /** One page target the browser exposes over the DevTools protocol. */
@@ -188,6 +196,9 @@ const USAGE = [
   '  --settle <ms>            DSH_FLOOR_SETTLE          ' + String(DEFAULT_SETTLE_MS),
   '  --session-attempts <n>   DSH_FLOOR_SESSION_ATTEMPTS ' + String(DEFAULT_SESSION_ATTEMPTS),
   '  --session-timeout <ms>   DSH_FLOOR_SESSION_TIMEOUT ' + String(DEFAULT_SESSION_TIMEOUT_MS),
+  '  --model-checks           DSH_FLOOR_MODEL_CHECKS    off; runs the keyed, real-model checks against a server started with DEEPSEEK_API_KEY',
+  '  --gesture-timeout <ms>   DSH_FLOOR_GESTURE_TIMEOUT ' + String(DEFAULT_GESTURE_TIMEOUT_MS) + '; how long one page gesture of a model check waits',
+  '  --reply-timeout <ms>     DSH_FLOOR_REPLY_TIMEOUT   ' + String(DEFAULT_REPLY_TIMEOUT_MS) + '; how long one real-model turn may take',
   '  --fail-on-log-errors     DSH_FLOOR_FAIL_ON_LOG_ERRORS false; a network 404 is recorded but does not fail the run',
   '  --smoke                  -                          run the lane against its own fixture page',
   '  --help                   -                          print this text',
@@ -220,6 +231,9 @@ function parseOptions(argv: readonly string[]): LaneOptions | null {
       settle: { type: 'string' },
       'session-attempts': { type: 'string' },
       'session-timeout': { type: 'string' },
+      'model-checks': { type: 'boolean' },
+      'gesture-timeout': { type: 'string' },
+      'reply-timeout': { type: 'string' },
       'fail-on-log-errors': { type: 'boolean' },
       smoke: { type: 'boolean' },
       help: { type: 'boolean' },
@@ -256,6 +270,9 @@ function parseOptions(argv: readonly string[]): LaneOptions | null {
     sessionAttempts: intValue(optionValue(parsed.values['session-attempts'], 'DSH_FLOOR_SESSION_ATTEMPTS', ''), DEFAULT_SESSION_ATTEMPTS, '--session-attempts'),
     sessionTimeoutMs: intValue(optionValue(parsed.values['session-timeout'], 'DSH_FLOOR_SESSION_TIMEOUT', ''), DEFAULT_SESSION_TIMEOUT_MS, '--session-timeout'),
     failOnLogErrors: parsed.values['fail-on-log-errors'] === true || process.env.DSH_FLOOR_FAIL_ON_LOG_ERRORS === '1',
+    modelChecks: parsed.values['model-checks'] === true || process.env.DSH_FLOOR_MODEL_CHECKS === '1',
+    gestureTimeoutMs: intValue(optionValue(parsed.values['gesture-timeout'], 'DSH_FLOOR_GESTURE_TIMEOUT', ''), DEFAULT_GESTURE_TIMEOUT_MS, '--gesture-timeout'),
+    replyTimeoutMs: intValue(optionValue(parsed.values['reply-timeout'], 'DSH_FLOOR_REPLY_TIMEOUT', ''), DEFAULT_REPLY_TIMEOUT_MS, '--reply-timeout'),
   }
 }
 
@@ -576,6 +593,7 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     await sleep(options.loadSettleMs)
     const opened = options.mode === 'smoke' ? null : await openUsableSession(page, options)
+    const keyed = options.mode === 'server' && options.modelChecks
     const outcomes = await runSteps(page, {
       narrowWidth: options.narrowWidth,
       wideWidth: options.wideWidth,
@@ -586,7 +604,16 @@ async function main(argv: readonly string[]): Promise<number> {
       failOnLogErrors: options.failOnLogErrors,
       floorApisApplicable: options.mode === 'server',
       sessionUiApplicable: options.mode === 'server',
-    })
+    }, keyed
+      ? modelPage => runModelSteps(modelPage, {
+        narrowWidth: options.narrowWidth,
+        wideWidth: options.wideWidth,
+        viewportHeight: options.windowHeight,
+        settleMs: options.settleMs,
+        gestureTimeoutMs: options.gestureTimeoutMs,
+        replyTimeoutMs: options.replyTimeoutMs,
+      })
+      : undefined)
     const summary = summarize(outcomes)
     const report = {
       lane: 'browser-floor-lane',
@@ -599,7 +626,9 @@ async function main(argv: readonly string[]): Promise<number> {
       durationMs: Date.now() - startedAt,
       viewports: { narrow: options.narrowWidth, wide: options.wideWidth, height: options.windowHeight },
       session: opened,
-      screenshots: ['01-narrow.png', '02-wide.png', '03-trajectory.png'],
+      screenshots: keyed
+        ? ['01-narrow.png', '02-wide.png', '03-trajectory.png', '04-deliverables-wide.png', '05-pdf-preview.png']
+        : ['01-narrow.png', '02-wide.png', '03-trajectory.png'],
       checks: outcomes,
       summary,
       events: session.events,

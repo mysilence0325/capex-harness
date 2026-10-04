@@ -274,10 +274,24 @@ interface PreviewReading {
   readonly textLength: number | null
   /** The rendered text, capped by the probe. */
   readonly text: string
+  /** Whether the PDF body reported itself, which it does only once its bytes parsed. */
+  readonly pdf: boolean
+  /** Page elements the PDF body mounted. */
+  readonly pdfPages: number
+  /** Canvases the preview mounted, one per painted PDF page. */
+  readonly canvases: number
+  /** Dark pixels the fullest canvas carries, sampled; null when the bitmap could not be read. */
+  readonly ink: number | null
+  /** Whether the page surface is still hidden, which it is until a render completes; null when no surface is mounted. */
+  readonly surfaceHidden: boolean | null
+  /** Backing-store size of the fullest canvas, as WxH; null when no canvas reports one. */
+  readonly canvasSize: string | null
+  /** Text of the preview's own failure line, when it carries one. */
+  readonly alert: string | null
 }
 
 /** What opening the workspace file reported. */
-interface FileOpenAttempt {
+export interface FileOpenAttempt {
   /** Whether the pane was reached and the file's own tab became the selected one. */
   readonly opened: boolean
   /** Sidebar tab id whose body the gesture read the preview in. */
@@ -299,9 +313,10 @@ interface FileOpenAttempt {
  * reading, taken after this returns.
  * @param fileName - basename of the file to open.
  * @param marker - prose the rendered document must carry; an absent marker stops the wait at the mounted container.
+ * @param timeoutMs - how long one gesture of this check waits for the client to answer it.
  * @returns the expression the driver evaluates.
  */
-function openWorkspaceFileExpression(fileName: string, marker: string | undefined): string {
+export function openWorkspaceFileExpression(fileName: string, marker: string | undefined, timeoutMs = PREVIEW_TIMEOUT_MS): string {
   const suffix = JSON.stringify(`/${fileName}`)
   const suffixLength = fileName.length + 1
   const noRow = JSON.stringify(`the workspace-files pane lists no ${fileName}`)
@@ -310,7 +325,7 @@ function openWorkspaceFileExpression(fileName: string, marker: string | undefine
     '(async () => {',
     '  const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))',
     '  const until = async (read) => {',
-    '    const deadline = Date.now() + ' + String(PREVIEW_TIMEOUT_MS),
+    '    const deadline = Date.now() + ' + String(timeoutMs),
     '    for (;;) {',
     '      const found = read()',
     '      if (found !== null && found !== undefined) return found',
@@ -396,7 +411,7 @@ function openWorkspaceFileExpression(fileName: string, marker: string | undefine
  * @param value - the page's return value.
  * @returns the attempt, reading an answer it cannot parse as a gesture that never opened.
  */
-function fileOpenAttempt(value: unknown): FileOpenAttempt {
+export function fileOpenAttempt(value: unknown): FileOpenAttempt {
   const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : null
   if (!isJsonObject(parsed)) return { opened: false, tab: null, reason: 'the page did not report the file-opening gesture' }
   return {
@@ -407,7 +422,7 @@ function fileOpenAttempt(value: unknown): FileOpenAttempt {
 }
 
 /** One probe payload with the sections the checks read. */
-interface PageReading {
+export interface PageReading {
   readonly payload: Record<string, unknown>
   readonly composer: Record<string, unknown> | null
   readonly titleRow: Record<string, unknown> | null
@@ -415,6 +430,8 @@ interface PageReading {
   readonly trajectory: Record<string, unknown> | null
   readonly scroller: Record<string, unknown> | null
   readonly previews: PreviewReading[]
+  readonly deliverables: Record<string, unknown> | null
+  readonly teamTrigger: Record<string, unknown> | null
   readonly containerQueries: Record<string, unknown> | null
 }
 
@@ -438,6 +455,13 @@ function previewReadings(payload: Record<string, unknown>): PreviewReading[] {
       body: booleanAt(entry, 'body') === true,
       textLength: numberAt(entry, 'textLength'),
       text: textAt(entry, 'text') ?? '',
+      pdf: booleanAt(entry, 'pdf') === true,
+      pdfPages: numberAt(entry, 'pdfPages') ?? 0,
+      canvases: numberAt(entry, 'canvases') ?? 0,
+      ink: numberAt(entry, 'ink'),
+      surfaceHidden: booleanAt(entry, 'surfaceHidden'),
+      canvasSize: textAt(entry, 'canvasSize'),
+      alert: textAt(entry, 'alert'),
     })
   }
   return readings
@@ -449,7 +473,7 @@ function previewReadings(payload: Record<string, unknown>): PreviewReading[] {
  * @returns the parsed payload with its nested sections.
  * @throws {Error} when the probe did not return its JSON report.
  */
-async function readPage(page: StepPage): Promise<PageReading> {
+export async function readPage(page: StepPage): Promise<PageReading> {
   const raw = await page.evaluate(probeExpression(CLIENT_FLOOR_APIS))
   if (typeof raw !== 'string') throw new Error('the page probe returned ' + typeof raw + ' instead of its JSON report')
   const parsed: unknown = JSON.parse(raw)
@@ -462,6 +486,8 @@ async function readPage(page: StepPage): Promise<PageReading> {
     trajectory: objectAt(parsed, 'trajectory'),
     scroller: objectAt(parsed, 'scroller'),
     previews: previewReadings(parsed),
+    deliverables: objectAt(parsed, 'deliverables'),
+    teamTrigger: objectAt(parsed, 'teamTrigger'),
     containerQueries: objectAt(parsed, 'containerQueries'),
   }
 }
@@ -699,6 +725,74 @@ function titleRowCheck(reading: PageReading, side: 'narrow' | 'wide'): CheckOutc
     id: 'layout.header-title-row',
     status: 'fail',
     detail: 'at ' + String(width) + 'px the title row must carry neither marker; read narrow=' + String(narrow) + ', tight=' + String(tight),
+    evidence,
+  }
+}
+
+/** Label display the collapsed agent-team trigger computes. */
+const TRIGGER_COLLAPSED_DISPLAY = 'none'
+
+/**
+ * Whether the experimental agent-team header action follows the title row's own markers.
+ *
+ * The action is composed only on a server that loads the experimental
+ * ui-agent-team package, so its absence reports as not applicable rather than
+ * as a fault: every other check in this lane runs without it. Where it is
+ * mounted, its label is what the marked title row sacrifices, and the fact read
+ * here is the label's own computed display.
+ * @param reading - probe payload carrying the header reading.
+ * @param side - which side of the breakpoint this reading came from.
+ * @returns the check outcome.
+ */
+function agentTeamTriggerCheck(reading: PageReading, side: 'narrow' | 'wide'): CheckOutcome {
+  const evidence = {
+    side,
+    present: booleanAt(reading.teamTrigger, 'present'),
+    labelDisplay: textAt(reading.teamTrigger, 'labelDisplay'),
+    labelText: textAt(reading.teamTrigger, 'labelText'),
+    icons: numberAt(reading.teamTrigger, 'icons'),
+    titleRowWidth: numberAt(reading.titleRow, 'contentWidth'),
+    titleRowTight: booleanAt(reading.titleRow, 'tight'),
+  }
+  if (booleanAt(reading.teamTrigger, 'present') !== true) {
+    return {
+      id: 'layout.agent-team-trigger',
+      status: 'not-applicable',
+      detail: 'no agent-team header action is mounted: this server does not compose the experimental ui-agent-team package',
+      evidence,
+    }
+  }
+  const display = textAt(reading.teamTrigger, 'labelDisplay')
+  const icons = numberAt(reading.teamTrigger, 'icons')
+  const tight = booleanAt(reading.titleRow, 'tight') === true
+  if (side === 'narrow') {
+    if (tight && display === TRIGGER_COLLAPSED_DISPLAY && icons !== null && icons > 0) {
+      return {
+        id: 'layout.agent-team-trigger',
+        status: 'pass',
+        detail: 'the title row carries data-tight and the team trigger keeps its ' + String(icons) + ' icon with its label at display: ' + TRIGGER_COLLAPSED_DISPLAY,
+        evidence,
+      }
+    }
+    return {
+      id: 'layout.agent-team-trigger',
+      status: 'fail',
+      detail: 'with the title row marked data-tight the trigger must keep only its icon; read tight=' + String(tight) + ', label display=' + String(display) + ', icons=' + String(icons),
+      evidence,
+    }
+  }
+  if (!tight && display !== null && display !== TRIGGER_COLLAPSED_DISPLAY) {
+    return {
+      id: 'layout.agent-team-trigger',
+      status: 'pass',
+      detail: 'the title row carries no marker and the team trigger shows its label at display: ' + display,
+      evidence,
+    }
+  }
+  return {
+    id: 'layout.agent-team-trigger',
+    status: 'fail',
+    detail: 'with the title row unmarked the trigger must show its label; read tight=' + String(tight) + ', label display=' + String(display),
     evidence,
   }
 }
@@ -1128,6 +1222,16 @@ function consoleErrorCheck(events: StepEvents, failOnLogErrors: boolean): CheckO
 }
 
 /**
+ * The keyed, real-model steps one run appends before its console check.
+ *
+ * The driver supplies them only when it was told to drive a real model, so a
+ * keyless run keeps exactly the checks that need no model.
+ * @param page - page operations.
+ * @returns one outcome per model-driven check, in report order.
+ */
+export type ModelStepRunner = (page: StepPage) => Promise<CheckOutcome[]>
+
+/**
  * Run every check the lane owns against one server page.
  *
  * The chat view is read at both viewport widths first, because the turn rail
@@ -1137,9 +1241,10 @@ function consoleErrorCheck(events: StepEvents, failOnLogErrors: boolean): CheckO
  * conversation the earlier readings measured.
  * @param page - page operations.
  * @param options - the run's fixed inputs.
+ * @param runModel - the keyed, real-model steps to append before the console check, absent on a run that has no key.
  * @returns one outcome per check, in report order.
  */
-export async function runSteps(page: StepPage, options: StepOptions): Promise<CheckOutcome[]> {
+export async function runSteps(page: StepPage, options: StepOptions, runModel?: ModelStepRunner): Promise<CheckOutcome[]> {
   const outcomes: CheckOutcome[] = []
   const setViewport = async (width: number): Promise<void> => {
     await page.send('Emulation.setDeviceMetricsOverride', {
@@ -1158,6 +1263,7 @@ export async function runSteps(page: StepPage, options: StepOptions): Promise<Ch
   outcomes.push(iteratorGapCheck(chatNarrow, options.floorApisApplicable))
   outcomes.push(composerCheck(chatNarrow, 'narrow'))
   outcomes.push(titleRowCheck(chatNarrow, 'narrow'))
+  outcomes.push(agentTeamTriggerCheck(chatNarrow, 'narrow'))
   outcomes.push(railBandCheck(chatNarrow, 'narrow'))
   outcomes.push(scrollerCheck(chatNarrow))
   outcomes.push(containerQueryCheck(chatNarrow))
@@ -1167,6 +1273,7 @@ export async function runSteps(page: StepPage, options: StepOptions): Promise<Ch
   const chatWide = await readPage(page)
   outcomes.push(composerCheck(chatWide, 'wide'))
   outcomes.push(titleRowCheck(chatWide, 'wide'))
+  outcomes.push(agentTeamTriggerCheck(chatWide, 'wide'))
   outcomes.push(railBandCheck(chatWide, 'wide'))
   await page.shot('02-wide.png')
 
@@ -1195,6 +1302,9 @@ export async function runSteps(page: StepPage, options: StepOptions): Promise<Ch
 
   const selectedLabel = textAt(activationRecord, 'selectedLabel')
   if (selectedLabel !== null && selectedLabel !== '') await page.evaluate(restoreViewTabExpression(selectedLabel))
+  // The keyed, real-model steps run last: they open a Session of their own,
+  // which would invalidate every reading above if a Session is what they read.
+  if (runModel !== undefined && options.sessionUiApplicable) outcomes.push(...await runModel(page))
   await page.send('Emulation.clearDeviceMetricsOverride')
   outcomes.push(consoleErrorCheck(options.events, options.failOnLogErrors))
   return outcomes
