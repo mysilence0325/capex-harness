@@ -760,7 +760,10 @@ ${loggingBlock()}
       MT_NETWORK: \${MT_NETWORK:-mt-net}
       MT_CONTAINER_NAME_PREFIX: \${MT_CONTAINER_NAME_PREFIX:-mt-}
       MT_PROJECT_DIR: ${hostRoot()}
-      MT_DATA_ROOT: /project
+      # 实测：这个容器挂的是宿主同名路径，/project 在容器里并不存在。
+      # 它只被一处用到 —— remove --purge 前的"要删的路径必须在租户目录内"这道校验，
+      # 指向不存在的路径等于把这道校验架空（它校验的是虚构路径，随后照样执行清理）。
+      MT_DATA_ROOT: ${hostRoot()}
       MT_AGENT_PORT: \${MT_AGENT_PORT:-3199}
       TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
