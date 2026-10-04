@@ -307,7 +307,13 @@ if [ "$QUICK" = yes ]; then
   skip "MFA 全流程（--quick 跳过）"
 else
   T=mfaaccept
-  PW="$(cred mfa password)"; PW="${PW:-MfaAccept2026x}"
+  # 口令一律来自凭据文件。没有默认值 —— 一个写在仓库里的默认口令，
+  # 即使只对"运行时临时创建、结束时删除"的账号有效，也仍然是仓库里的一份口令。
+  # 凭据文件缺失时这段检查整体跳过，这正是该有的行为。
+  PW="$(cred mfa password)"
+  if [ -z "$PW" ]; then
+    skip "MFA 全流程（$CREDS 里缺 mfa.password）"
+  else
   bin/mt.sh admin-add "$T" --role admin --password "$PW" >/dev/null 2>&1
   SETUP="$(bin/mt.sh admin-mfa setup "$T" 2>&1)"
   SECRET="$(printf '%s' "$SETUP" | grep -o '密钥: [A-Z2-7]*' | awk '{print $2}')"
@@ -343,6 +349,7 @@ else
     assert_eq "303" "$(http --data-urlencode "user=$ADMIN_USER" --data-urlencode "password=$ADMIN_PW" http://127.0.0.1:8099/__mt/admin/login)" "$ADMIN_USER 账号仍然可登录"
   else
     skip "admin 账号登录复查（缺口令）"
+  fi
   fi
 fi
 
