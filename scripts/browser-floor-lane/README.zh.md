@@ -80,6 +80,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 | `--session-attempts <n>` | `DSH_FLOOR_SESSION_ATTEMPTS` | `6`；`0` 表示直接读取已打开的 Session |
 | `--session-timeout <ms>` | `DSH_FLOOR_SESSION_TIMEOUT` | `6000` |
 | `--model-checks` | `DSH_FLOOR_MODEL_CHECKS=1` | 关闭；对着以 `DEEPSEEK_API_KEY` 启动的服务器运行带密钥的真实模型检查 |
+| `--pdf-preview <file>` | `DSH_FLOOR_PDF_PREVIEW` | 无；打开工作区里已有的某个 PDF 并对它运行 `preview.pdf`，无需模型 |
 | `--gesture-timeout <ms>` | `DSH_FLOOR_GESTURE_TIMEOUT` | `45000`；模型检查中一次页面手势的等待上限 |
 | `--reply-timeout <ms>` | `DSH_FLOOR_REPLY_TIMEOUT` | `240000`；一个真实模型回合的等待上限 |
 | `--fail-on-log-errors` | `DSH_FLOOR_FAIL_ON_LOG_ERRORS=1` | 关闭；参见下面的控制台检查 |
@@ -87,7 +88,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 
 驱动自己挑选 Session：它按顺序点击侧栏的行，直到某一行渲染出至少两个回合标记，因为回合导航轨道只为多回合 Session 渲染；随后它会恢复原先选中的视图标签页。两轮视口读取之后，它会打开右侧边栏、选择工作区文件入口并打开 `AGENTS.md`，这正是预览检查所读取的手势。
 
-输出分三处：stdout 上的 JSON 报告、stderr 上的一行摘要，以及 `--report` 与 `--shots` 里的三张截图，`--model-checks` 下是五张。退出码为 `0` 表示所有检查通过，`1` 表示某项检查失败或某项事实读不到，`2` 表示用法或启动失败。
+输出分三处：stdout 上的 JSON 报告、stderr 上的一行摘要，以及 `--report` 与 `--shots` 里的三张截图，`--pdf-preview` 下是四张，`--model-checks` 下是五张。退出码为 `0` 表示所有检查通过，`1` 表示某项检查失败或某项事实读不到，`2` 表示用法或启动失败。
 
 ## 每项检查的含义
 
@@ -106,7 +107,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 | `preview.workspace-file` | 工作区文件面板打开的 `AGENTS.md` 文档容器 | 其 `data-textpreview-state` 为 `text`，且渲染文本带有该文档自己的开篇文字，说明文件资源服务应答了这个地址 |
 | `model.streaming-round-trip` | 通道自己的提示词所产生的助手步骤，由发送前安装的页面观察器采样 | 输入框发出了提示词，助手步骤进入流式状态且其文本在流式过程中增长，最终落在带有提示词所要求区间两端的回复上，且没有错误提示 |
 | `layout.deliverables-card` | 收尾回合的改动文件卡片与它旁边的已声明交付网格，在两种视口下读取 | 改动文件卡片列出该回合被要求写入的文件；窄视口下网格容器带 `data-narrow` 且计算为一列，宽视口下不带标记且计算为两列 |
-| `preview.pdf` | 模型写出的 PDF，经工作区文件面板打开 | 预览选中了 PDF 渲染器、页面表面离开渲染状态，且画布带有文档的墨迹。拒绝这些字节的正文会渲染它自己的失败行；仍停留在渲染状态的页面表面、或没有墨迹的画布，都不算渲染出的文档——检查会报告它读到的那一种 |
+| `preview.pdf` | 模型写出的 PDF，或 `--pdf-preview` 指名的文件，经工作区文件面板打开 | 预览选中了 PDF 渲染器、页面表面离开渲染状态，且画布带有文档的墨迹。拒绝这些字节的正文会渲染它自己的失败行；仍停留在渲染状态的页面表面、或没有墨迹的画布，都不算渲染出的文档——检查会报告它读到的那一种 |
 | `console.errors` | 本次运行的控制台错误与异常，以及浏览器记录的错误级日志条目 | 页面没有记录控制台错误、也没有抛异常。错误级日志条目（请求失败）会写进报告，且只有在 `--fail-on-log-errors` 下才判定失败：与下限无关的路由返回 404，说明不了下限的任何事情 |
 
 ### 工作区文件预览
@@ -141,6 +142,20 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 
 回答是模型自己的。检查失败时会指名缺失的那个事实——回复没带上区间、该回合没有渲染出改动文件卡片、模型没有调用 `present`——因此一次红色的运行可能意味着模型答得不一样，而不是客户端坏了；通道宁可显式失败，也不把这样的回答读成通过。
 
+### PDF 预览的墨迹读数
+
+`preview.pdf` 会读取画布自身的像素，因为页面表面可以在一个从未被绘制过的画布上报出就绪。当阅读器收到的算子列表为空时，它的一次渲染仍然会成功结束：显示层把这份被截断的列表标为最后一块并据此运行渲染任务，而给该任务放行的能力早在页面的起始消息里就已兑现，因此随空列表一起到来的拒绝已经无处可拒。面板因此可以进入就绪状态、不渲染任何失败行，却显示一张白页。Chromium 90 在下限缺少 `ArrayBuffer.prototype.transferToFixedLength` 时正是如此：Worker 的字体导出抛错，显示层画完页面底色就停下，而检查记录到的是一块 400x213 的画布、表面就绪、没有失败行、也没有墨迹。
+
+由模型驱动的那一步是更完整的读数，因为它还证明模型自己的字节确实抵达了阅读器。当文档已经在 Session 工作区里——重跑，或有人用那份 445 字节的探针文档铺过工作区——同一项检查无需模型即可运行：
+
+```sh
+npx tsx scripts/browser-floor-lane/drive.ts \
+  --chrome "<dir>\r857891\chrome-win\chrome.exe" \
+  --url-file .artifacts/floor-lane-server.log --pdf-preview floor-lane-probe.pdf
+```
+
+`--pdf-preview <file>` 用同一套工作区文件手势打开该文件、等待同样长的静默窗口来读取正文的决定，并报告同一项 `preview.pdf` 检查，因此一份报告里这样的检查只有一项：只有当 `--model-checks` 关闭时，驱动才会提供这个无需密钥的步骤。它读的是磁盘上的字节，因此它对模型能否写出这些字节不作断言；那仍然是带密钥那一步的职责。
+
 ### agent-team 触发器
 
 `layout.agent-team-trigger` 在未组合实验性 agent-team 客户端包的服务器上报告为不适用，而普通的每一次运行都是这种情况，通道在那里保持绿色。要读到它，就用仓库自带的叠加层再起一台服务器，并把一次运行指向它：
@@ -161,6 +176,7 @@ pnpm dsh web --patch apps/web/tests/agent-team-panel.overlay.yml --no-open --por
 - 不带 `--model-checks` 时，这三项带密钥的检查不会出现；而该选项只对以 `DEEPSEEK_API_KEY` 启动的服务器有意义：没有密钥的服务器会在第一句提示词上失败，而不是读到任何东西。
 - 这些检查读的是真实模型自己的工作，因此它们既在测量客户端，也在测量模型。每次失败都会指名缺失的事实，同一棵树上重跑也可能由红转绿。
 - `preview.pdf` 会抵达 PDF 阅读器自己的 Worker realm，而不只是页面：阅读器只用 `pdf.worker.min.mjs` 构建它的 Worker（[runtime.ts](../../packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts)），因此只覆盖页面 realm 的安装会让文档渲染不出来，检查会报告正文自己的失败行。它还会读取画布自身的像素，因为页面表面可以在一个从未被绘制过的画布上报出就绪——这正是本检查在 Chromium 90 上记录到的读数：一块 400x213 的画布、表面就绪、没有失败行，也没有墨迹。
+- `--pdf-preview` 读的是一份并非通道自己创建的文档。它证明阅读器在这个引擎上能画出这些字节，而不证明模型能写出它们；后者仍是带密钥那一步的读数。
 - 一次带密钥的运行结束后，`floor-lane-probe.txt`、`floor-lane-probe-b.txt` 与 `floor-lane-probe.pdf` 会留在工作区里。通道不会删除它们。
 - 一次绿色运行说明：上述事实是在这台服务器、这个引擎上读到的。它对更新的引擎不作任何断言，那些引擎已由仓库中其他浏览器通道覆盖。
 
@@ -176,7 +192,7 @@ CI 在它的位置上守住三件事，全部无需密钥，且都在产物一�
 |---|---|
 | `drive.ts` | 选项、浏览器生命周期、DevTools 连接、Session 选择与报告 |
 | `steps.ts` | 各项检查、两轮视口读取、工作区文件手势，以及它们需要的页面操作 |
-| `model-steps.ts` | 带密钥的真实模型检查：它们打开的 Session、输入的提示词，以及读回来的事实 |
+| `model-steps.ts` | PDF 预览检查，以及围绕它的带密钥真实模型步骤：它们打开的 Session、输入的提示词，以及读回来的事实 |
 | `probe.js` | 驱动在页面里求值的源码：必须能被下限引擎解析，且不得调用下限所安装的 API |
 | `smoke/fixture.html` | 通道自带的夹具页，用于没有服务器的运行 |
 

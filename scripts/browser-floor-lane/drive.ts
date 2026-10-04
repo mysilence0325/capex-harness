@@ -19,7 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
-import { runModelSteps } from './model-steps.ts'
+import { runModelSteps, runPdfPreviewStep } from './model-steps.ts'
 import { expiredSummaryLabel, isJsonObject, runSteps } from './steps.ts'
 import type { CheckOutcome, StepEvents, StepPage } from './steps.ts'
 
@@ -79,6 +79,8 @@ interface LaneOptions {
   readonly modelChecks: boolean
   readonly gestureTimeoutMs: number
   readonly replyTimeoutMs: number
+  /** Basename of a PDF already in the Session workspace, or '' when the keyless preview check is off. */
+  readonly pdfPreview: string
 }
 
 /** One page target the browser exposes over the DevTools protocol. */
@@ -197,6 +199,7 @@ const USAGE = [
   '  --session-attempts <n>   DSH_FLOOR_SESSION_ATTEMPTS ' + String(DEFAULT_SESSION_ATTEMPTS),
   '  --session-timeout <ms>   DSH_FLOOR_SESSION_TIMEOUT ' + String(DEFAULT_SESSION_TIMEOUT_MS),
   '  --model-checks           DSH_FLOOR_MODEL_CHECKS    off; runs the keyed, real-model checks against a server started with DEEPSEEK_API_KEY',
+  '  --pdf-preview <file>     DSH_FLOOR_PDF_PREVIEW     none; opens a PDF already in the Session workspace and runs preview.pdf against it, without a model',
   '  --gesture-timeout <ms>   DSH_FLOOR_GESTURE_TIMEOUT ' + String(DEFAULT_GESTURE_TIMEOUT_MS) + '; how long one page gesture of a model check waits',
   '  --reply-timeout <ms>     DSH_FLOOR_REPLY_TIMEOUT   ' + String(DEFAULT_REPLY_TIMEOUT_MS) + '; how long one real-model turn may take',
   '  --fail-on-log-errors     DSH_FLOOR_FAIL_ON_LOG_ERRORS false; a network 404 is recorded but does not fail the run',
@@ -232,6 +235,7 @@ function parseOptions(argv: readonly string[]): LaneOptions | null {
       'session-attempts': { type: 'string' },
       'session-timeout': { type: 'string' },
       'model-checks': { type: 'boolean' },
+      'pdf-preview': { type: 'string' },
       'gesture-timeout': { type: 'string' },
       'reply-timeout': { type: 'string' },
       'fail-on-log-errors': { type: 'boolean' },
@@ -271,6 +275,7 @@ function parseOptions(argv: readonly string[]): LaneOptions | null {
     sessionTimeoutMs: intValue(optionValue(parsed.values['session-timeout'], 'DSH_FLOOR_SESSION_TIMEOUT', ''), DEFAULT_SESSION_TIMEOUT_MS, '--session-timeout'),
     failOnLogErrors: parsed.values['fail-on-log-errors'] === true || process.env.DSH_FLOOR_FAIL_ON_LOG_ERRORS === '1',
     modelChecks: parsed.values['model-checks'] === true || process.env.DSH_FLOOR_MODEL_CHECKS === '1',
+    pdfPreview: optionValue(parsed.values['pdf-preview'], 'DSH_FLOOR_PDF_PREVIEW', ''),
     gestureTimeoutMs: intValue(optionValue(parsed.values['gesture-timeout'], 'DSH_FLOOR_GESTURE_TIMEOUT', ''), DEFAULT_GESTURE_TIMEOUT_MS, '--gesture-timeout'),
     replyTimeoutMs: intValue(optionValue(parsed.values['reply-timeout'], 'DSH_FLOOR_REPLY_TIMEOUT', ''), DEFAULT_REPLY_TIMEOUT_MS, '--reply-timeout'),
   }
@@ -594,6 +599,9 @@ async function main(argv: readonly string[]): Promise<number> {
     await sleep(options.loadSettleMs)
     const opened = options.mode === 'smoke' ? null : await openUsableSession(page, options)
     const keyed = options.mode === 'server' && options.modelChecks
+    // One report carries one preview.pdf: the keyless option stands in for the
+    // keyed step, which owns that check when it runs.
+    const pdfPreview = options.mode === 'server' && !keyed ? options.pdfPreview : ''
     const outcomes = await runSteps(page, {
       narrowWidth: options.narrowWidth,
       wideWidth: options.wideWidth,
@@ -613,7 +621,13 @@ async function main(argv: readonly string[]): Promise<number> {
         gestureTimeoutMs: options.gestureTimeoutMs,
         replyTimeoutMs: options.replyTimeoutMs,
       })
-      : undefined)
+      : pdfPreview === ''
+        ? undefined
+        : previewPage => runPdfPreviewStep(previewPage, {
+          file: pdfPreview,
+          gestureTimeoutMs: options.gestureTimeoutMs,
+          settleMs: options.settleMs,
+        }))
     const summary = summarize(outcomes)
     const report = {
       lane: 'browser-floor-lane',
@@ -626,9 +640,12 @@ async function main(argv: readonly string[]): Promise<number> {
       durationMs: Date.now() - startedAt,
       viewports: { narrow: options.narrowWidth, wide: options.wideWidth, height: options.windowHeight },
       session: opened,
+      pdfPreview: pdfPreview === '' ? null : pdfPreview,
       screenshots: keyed
         ? ['01-narrow.png', '02-wide.png', '03-trajectory.png', '04-deliverables-wide.png', '05-pdf-preview.png']
-        : ['01-narrow.png', '02-wide.png', '03-trajectory.png'],
+        : pdfPreview === ''
+          ? ['01-narrow.png', '02-wide.png', '03-trajectory.png']
+          : ['01-narrow.png', '02-wide.png', '03-trajectory.png', '04-pdf-preview.png'],
       checks: outcomes,
       summary,
       events: session.events,

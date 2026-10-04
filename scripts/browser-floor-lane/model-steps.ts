@@ -359,6 +359,14 @@ interface TurnResult {
   readonly elapsedMs: number
 }
 
+/** The waits the PDF-preview check reads a pane with, shared by both of its callers. */
+interface PdfPreviewWaits {
+  /** How long one page gesture waits for the client to answer it. */
+  readonly gestureTimeoutMs: number
+  /** Quiet window the body's decision must hold before it is read. */
+  readonly settleMs: number
+}
+
 /** What the closing-turn card wait last read. */
 interface CardPresence {
   readonly changed: number
@@ -773,12 +781,17 @@ function deliverablesCardCheck(reading: PageReading, side: 'narrow' | 'wide', fi
 }
 
 /**
- * Whether the workspace-files pane rendered the PDF the model wrote.
+ * Whether the workspace-files pane rendered the PDF it opened.
  *
  * A preview that claimed the address is not a rendered document: its state is
  * text from the moment a body was elected, so the fact read here is the PDF
  * body's own report and the canvases it painted. A body that refused the bytes
  * says so through its own failure line, which is carried into the evidence.
+ *
+ * The ink reading is the only one that catches the reader's silent blank: a
+ * render whose operator list arrives empty completes successfully, so the pane
+ * reaches its ready state over a canvas nothing was drawn on and reports no
+ * failure line at all.
  * @param reading - probe payload carrying the mounted previews.
  * @param attempt - what opening the file in the pane reported.
  * @param fileName - the PDF this check opened.
@@ -943,11 +956,35 @@ export async function runModelSteps(page: StepPage, options: ModelStepOptions): 
     outcomes.push(unreachable('preview.pdf', 'the model turn ended on its own error notice: ' + pdf.record.errorText.slice(0, 200)))
     return outcomes
   }
-  const attempt = await openModelFile(page, PDF_FILE, options)
+  const attempt = await openPdfPreviewFile(page, PDF_FILE, options)
   if (attempt.opened) await awaitPdfBody(page, PDF_FILE, options)
   outcomes.push(pdfPreviewCheck(await readPage(page), attempt, PDF_FILE))
   await page.shot('05-pdf-preview.png')
   return outcomes
+}
+
+/** One PDF already in the Session workspace, and the waits its check reads the pane with. */
+export interface PdfPreviewOptions extends PdfPreviewWaits {
+  /** Basename of the PDF to open through the workspace-files pane. */
+  readonly file: string
+}
+
+/**
+ * Run the PDF-preview check against a PDF the lane did not have to ask a model for.
+ *
+ * This is `preview.pdf` without the model turns in front of it: the file is
+ * already in the Session's workspace, so the check opens it by the same gesture
+ * and reads the same facts the keyed step reads. The driver offers it only when
+ * the keyed checks are off, which keeps one `preview.pdf` per report.
+ * @param page - page operations.
+ * @param options - the file to open and the waits its check reads the pane with.
+ * @returns the PDF-preview outcome, or the file-opening gesture's own refusal.
+ */
+export async function runPdfPreviewStep(page: StepPage, options: PdfPreviewOptions): Promise<CheckOutcome[]> {
+  const attempt = await openPdfPreviewFile(page, options.file, options)
+  if (attempt.opened) await awaitPdfBody(page, options.file, options)
+  await page.shot('04-pdf-preview.png')
+  return [pdfPreviewCheck(await readPage(page), attempt, options.file)]
 }
 
 /**
@@ -974,10 +1011,10 @@ async function setViewport(page: StepPage, width: number, options: ModelStepOpti
  * decided yet. This waits for that decision and never decides it itself.
  * @param page - page operations.
  * @param fileName - basename of the file the pane opened.
- * @param options - the run's fixed inputs.
+ * @param waits - how long the gesture and the quiet window may take.
  */
-async function awaitPdfBody(page: StepPage, fileName: string, options: ModelStepOptions): Promise<void> {
-  const deadline = Date.now() + options.gestureTimeoutMs
+async function awaitPdfBody(page: StepPage, fileName: string, waits: PdfPreviewWaits): Promise<void> {
+  const deadline = Date.now() + waits.gestureTimeoutMs
   let previous: string | null = null
   for (;;) {
     const raw = await page.evaluate(pdfBodyExpression(fileName))
@@ -994,20 +1031,20 @@ async function awaitPdfBody(page: StepPage, fileName: string, options: ModelStep
     if (decided && reading === previous) return
     previous = decided ? reading : null
     if (Date.now() >= deadline) return
-    await page.sleep(options.settleMs)
+    await page.sleep(waits.settleMs)
   }
 }
 
 /**
- * Open a workspace file the model wrote, asking the pane to reread its listing once.
+ * Open a workspace file in the files pane, asking the pane to reread its listing once.
  * @param page - page operations.
  * @param fileName - basename of the file to open.
- * @param options - the run's fixed inputs.
+ * @param waits - how long one open gesture may take.
  * @returns what the gesture reported the second time it ran.
  */
-async function openModelFile(page: StepPage, fileName: string, options: ModelStepOptions): Promise<FileOpenAttempt> {
-  const first = fileOpenAttempt(await page.evaluate(openWorkspaceFileExpression(fileName, undefined, options.gestureTimeoutMs)))
+async function openPdfPreviewFile(page: StepPage, fileName: string, waits: PdfPreviewWaits): Promise<FileOpenAttempt> {
+  const first = fileOpenAttempt(await page.evaluate(openWorkspaceFileExpression(fileName, undefined, waits.gestureTimeoutMs)))
   if (first.opened) return first
   await page.evaluate(RELOAD_FILES)
-  return fileOpenAttempt(await page.evaluate(openWorkspaceFileExpression(fileName, undefined, options.gestureTimeoutMs)))
+  return fileOpenAttempt(await page.evaluate(openWorkspaceFileExpression(fileName, undefined, waits.gestureTimeoutMs)))
 }

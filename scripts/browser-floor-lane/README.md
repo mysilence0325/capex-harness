@@ -80,6 +80,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 | `--session-attempts <n>` | `DSH_FLOOR_SESSION_ATTEMPTS` | `6`; `0` reads whatever Session is open |
 | `--session-timeout <ms>` | `DSH_FLOOR_SESSION_TIMEOUT` | `6000` |
 | `--model-checks` | `DSH_FLOOR_MODEL_CHECKS=1` | off; runs the keyed, real-model checks against a server started with `DEEPSEEK_API_KEY` |
+| `--pdf-preview <file>` | `DSH_FLOOR_PDF_PREVIEW` | none; opens a PDF already in the Session workspace and runs `preview.pdf` against it, without a model |
 | `--gesture-timeout <ms>` | `DSH_FLOOR_GESTURE_TIMEOUT` | `45000`; how long one page gesture of a model check waits |
 | `--reply-timeout <ms>` | `DSH_FLOOR_REPLY_TIMEOUT` | `240000`; how long one real-model turn may take |
 | `--fail-on-log-errors` | `DSH_FLOOR_FAIL_ON_LOG_ERRORS=1` | off; see the console check below |
@@ -87,7 +88,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 
 The driver picks the Session itself: it clicks the sidebar rows in order until one renders at least two turn marks, because the turn rail renders only for a multi-turn Session, and it restores the view tab it found afterwards. After the viewport passes it opens the right Sidebar, picks the workspace-files entry, and opens `AGENTS.md`, which is the gesture the preview check reads.
 
-Output goes to three places: the JSON report on stdout, one summary line on stderr, and `--report` plus three screenshots in `--shots`, five of them under `--model-checks`. The exit code is `0` when every check passed, `1` when a check failed or a fact was unreadable, and `2` on a usage or startup failure.
+Output goes to three places: the JSON report on stdout, one summary line on stderr, and `--report` plus three screenshots in `--shots`, four under `--pdf-preview` and five under `--model-checks`. The exit code is `0` when every check passed, `1` when a check failed or a fact was unreadable, and `2` on a usage or startup failure.
 
 ## What each check means
 
@@ -106,7 +107,7 @@ Output goes to three places: the JSON report on stdout, one summary line on stde
 | `preview.workspace-file` | the document container the workspace-files pane opened at `AGENTS.md` | its `data-textpreview-state` is `text` and its rendered text carries the document's own opening prose, so the file resource service answered the address |
 | `model.streaming-round-trip` | the assistant step the lane's own prompt produced, sampled by a page-side observer installed before the send | the composer sent the prompt, the assistant step entered its streaming state and its text grew while it streamed, and it settled on a reply carrying both ends of the range the prompt asked for, with no error notice |
 | `layout.deliverables-card` | the closing turn's changed-files card and the declared-deliveries grid beside it, read at both viewports | the changed-files card names the files the turn was asked to write; at the narrow viewport the grid's container carries `data-narrow` and computes one column, and at the wide viewport it carries no marker and computes two |
-| `preview.pdf` | the PDF the model wrote, opened through the workspace-files pane | the preview elected the PDF renderer, the page surface left its rendering state, and the canvas carries the document's ink. A body that refused the bytes renders its own failure line, and a surface that stays in its rendering state or a canvas with no ink is not a rendered document; the check reports whichever it read |
+| `preview.pdf` | the PDF the model wrote, or the file `--pdf-preview` names, opened through the workspace-files pane | the preview elected the PDF renderer, the page surface left its rendering state, and the canvas carries the document's ink. A body that refused the bytes renders its own failure line, and a surface that stays in its rendering state or a canvas with no ink is not a rendered document; the check reports whichever it read |
 | `console.errors` | the run's console errors and exceptions, plus the browser's error-level log entries | the page logged no console error and threw no exception. Error-level log entries (a failed request) are recorded in the report and fail the run only under `--fail-on-log-errors`, because a route outside the floor answering 404 says nothing about the floor |
 
 ### The workspace-file preview
@@ -141,6 +142,20 @@ The run writes what it reads: the three files land in the Session's workspace, w
 
 A reply is the model's own. When a check fails it names the fact that was missing — the reply did not carry the range, the turn rendered no changed-files card, the model never called `present` — so a red run can mean the model answered differently rather than that the client broke, and the lane fails loud instead of reading such a reply as a pass.
 
+### The PDF preview's ink reading
+
+`preview.pdf` reads the canvas's own pixels, because a page surface can report itself ready over a canvas nothing was ever drawn on. The reader's render completes successfully when the operator list it received is empty: the display marks the truncated list as the last chunk and runs the render task over it, while the capability that gates the task was already resolved by the page's start message, so the rejection that arrived with the empty list has nothing left to reject. A pane can therefore reach its ready state, render no failure line, and show a blank page. Chromium 90 did exactly that while the floor lacked `ArrayBuffer.prototype.transferToFixedLength`: the Worker's font export threw, the display painted the page background and stopped, and the check recorded one 400x213 canvas, surface ready, no failure line, no ink.
+
+The model-driven step is the fuller reading, because it also proves a model's own bytes reach the reader. Where the document is already in the Session workspace — a re-run, or a workspace seeded with the 445-byte probe document — the same check runs without a model:
+
+```sh
+npx tsx scripts/browser-floor-lane/drive.ts \
+  --chrome "<dir>\r857891\chrome-win\chrome.exe" \
+  --url-file .artifacts/floor-lane-server.log --pdf-preview floor-lane-probe.pdf
+```
+
+`--pdf-preview <file>` opens that file through the same workspace-files gesture, waits the same quiet window for the body's decision, and reports the same `preview.pdf` check, so one report carries one such check: the driver offers the keyless step only when `--model-checks` is off. It reads the bytes on disk, so it says nothing about whether a model can write them; that stays the keyed step's job.
+
 ### The agent-team trigger
 
 `layout.agent-team-trigger` reports itself as not applicable on a server that does not compose the experimental agent-team client package, which is every ordinary run, so the lane stays green there. To read it, start a second server with the repository's own overlay and point a run at it:
@@ -161,6 +176,7 @@ The launcher owns `--patch` and hands everything from the first option it does n
 - The three keyed checks are absent from a run without `--model-checks`, and that flag is only useful against a server started with `DEEPSEEK_API_KEY`: a keyless server fails the first prompt instead of reading anything.
 - Those checks read a real model's own work, so they measure the model as much as the client. Every failure names the missing fact, and a re-run can turn red-to-green on the same tree.
 - `preview.pdf` reaches the PDF reader's own Worker realm, not only the page: the reader builds its Worker from `pdf.worker.min.mjs` alone ([runtime.ts](../../packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts)), so an install that stops at the page realm leaves the document unrendered and the check reports the body's own failure line. It also reads the canvas's own pixels, because a page surface can report itself ready over a canvas nothing was ever drawn on — which is the reading this check recorded on Chromium 90: one 400x213 canvas, surface ready, no failure line, and no ink.
+- `--pdf-preview` reads a document the lane did not create. It proves the reader paints those bytes on this engine, not that a model can write them, and the keyed step stays the reading for that.
 - `floor-lane-probe.txt`, `floor-lane-probe-b.txt`, and `floor-lane-probe.pdf` stay in the workspace after a keyed run. The lane does not remove them.
 - A green run says the facts above were read from this engine on this server. It says nothing about engines newer than the floor, which the repository's other browser lanes already cover.
 
@@ -176,6 +192,6 @@ CI holds three things in its place, all keyless and all on the artifact side. Th
 |---|---|
 | `drive.ts` | Flags, browser lifecycle, DevTools connection, Session selection, the report |
 | `steps.ts` | The checks, the viewport passes, the workspace-file gesture, and the page operations they need |
-| `model-steps.ts` | The keyed, real-model checks: the Session they open, the prompts they type, and the facts they read back |
+| `model-steps.ts` | The PDF-preview check and the keyed, real-model steps around it: the Session they open, the prompts they type, and the facts they read back |
 | `probe.js` | Page source the driver evaluates: it must stay parseable by the floor engine and must not call the APIs the floor installs |
 | `smoke/fixture.html` | The lane's own fixture page, for a run without a server |
