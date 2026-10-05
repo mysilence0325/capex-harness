@@ -425,6 +425,63 @@ print(1 if b and max(b) < min(a) else 0)')"
   rm -f "$HJAR" /tmp/hist_all.json /tmp/hist_w.json /tmp/hist_p1.json /tmp/hist_p2.json /tmp/hist_bad.json /tmp/hist_bound.txt
 fi
 
+# ---------------------------------------------------------------- 控制台登录的落地页
+head_ "控制台登录：表单提交到哪、落在哪一页"
+if [ "$QUICK" = yes ]; then
+  skip "控制台登录落地页（--quick 跳过）"
+else
+  ADMIN_PW_LOCAL="$(cred admin password)"
+  if [ -z "$ADMIN_PW_LOCAL" ]; then
+    skip "控制台登录落地页（$CREDS 里缺 admin.password）"
+  else
+    LPAGE=$(mktemp)
+    curl -sSk -o "$LPAGE" -w '%{http_code}' --max-time 15 https://127.0.0.1:8090/__mt/admin > /tmp/lp_code.txt 2>/dev/null
+    assert_eq "200" "$(cat /tmp/lp_code.txt)" "控制台登录页返回 200"
+
+    # 关键：不问"路由对不对"，问【浏览器会提交到哪里】。
+    # 页面地址没有结尾斜杠时，相对 action 会被解析到上一级目录 —— 这正是线上那次事故。
+    RESOLVED="$(python3 - "$LPAGE" <<'PY'
+import re, sys
+from urllib.parse import urljoin
+page_url = 'https://127.0.0.1:8090/__mt/admin'
+html = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+base = re.search(r'<base href="([^"]+)"', html)
+base_url = urljoin(page_url, base.group(1)) if base else page_url
+form = re.search(r'<form[^>]*action="([^"]+)"', html)
+print(urljoin(base_url, form.group(1)) if form else '(没有表单)')
+PY
+)"
+    assert_eq "https://127.0.0.1:8090/__mt/admin/login" "$RESOLVED" "登录表单解析后的提交地址"
+
+    # 提交到那个地址，并【跟随跳转】—— 只看状态码是不够的，那次事故里状态码是 303。
+    LANDED=$(mktemp); LANDJAR=$(mktemp)
+    # 必须带上 cookie jar：303 的 Set-Cookie 不保存的话，跟随跳转后是未登录状态，
+    # 而 /__mt/admin 对未登录者返回登录页 —— 登录页的 <h1> 也叫「DSH 多租户管理控制台」，
+    # 于是只比标题的断言会在什么都没发生时也通过。
+    FINAL=$(curl -sSk -L -c "$LANDJAR" -b "$LANDJAR" -o "$LANDED" -w '%{url_effective}' --max-time 20 \
+      --data-urlencode "user=$(cred admin user)" --data-urlencode "password=$ADMIN_PW_LOCAL" \
+      "$RESOLVED" 2>/dev/null)
+    assert_eq "https://127.0.0.1:8090/__mt/admin" "$FINAL" "登录后落在控制台（不是租户页）"
+    # hist-tenant 只在控制台页里出现，登录页没有 —— 用它区分两页，而不是用标题。
+    grep -q 'hist-tenant' "$LANDED" && pass "落地页是控制台（含只有控制台才有的控件）" \
+      || fail "落地页不是控制台页（拿到的多半是登录页）"
+    grep -q 'name="password"' "$LANDED" && fail "落地页仍是登录表单（会话没带上）" || pass "落地页不是登录表单"
+
+    # 页内脚本用的相对地址也走同一个基准，必须解析到 /__mt/admin/ 之下
+    API_BASE="$(python3 - "$LPAGE" <<'PY'
+import re, sys
+from urllib.parse import urljoin
+html = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+base = re.search(r'<base href="([^"]+)"', html)
+base_url = urljoin('https://127.0.0.1:8090/__mt/admin', base.group(1)) if base else 'https://127.0.0.1:8090/__mt/admin'
+print(urljoin(base_url, 'api/state'))
+PY
+)"
+    assert_eq "https://127.0.0.1:8090/__mt/admin/api/state" "$API_BASE" "页内脚本的相对地址基准"
+    rm -f "$LPAGE" "$LANDED" "$LANDJAR" /tmp/lp_code.txt
+  fi
+fi
+
 # ---------------------------------------------------------------- MFA：控制台动作
 head_ "MFA 的控制台动作"
 if [ "$QUICK" = yes ]; then

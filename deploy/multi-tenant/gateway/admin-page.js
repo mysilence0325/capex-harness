@@ -59,10 +59,11 @@ function escapeHtml(value) {
 }
 
 /** One page shell. */
-function shell(title, body) {
+function shell(prefix, title, body) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
+  <base href="${prefix}/admin/">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
@@ -84,16 +85,16 @@ ${body}
  * @param options.configured - whether an administrator password exists yet.
  * @returns the HTML.
  */
-function loginPage({ error, locked, configured }) {
+function loginPage(prefix, { error, locked, configured }) {
   const notice = error === undefined ? '' : `<div class="msg bad">${escapeHtml(error)}</div>`
   const setup = configured ? '' : `<div class="msg">还没有设置管理员密码。在部署机上执行 <code>bin/mt.sh admin-passwd</code> 设置后再登录。</div>`
-  return shell('管理控制台 · 登录', `<div class="wrap login">
+  return shell(prefix, '管理控制台 · 登录', `<div class="wrap login">
 <h1>DSH 多租户管理控制台</h1>
 <p class="sub">仅管理员使用</p>
 ${locked !== undefined && locked > 0 ? `<div class="msg bad">尝试次数过多，请 ${String(locked)} 秒后再试。</div>` : ''}
 ${notice}
 ${setup}
-<form method="post" action="login" class="card">
+<form method="post" action="${prefix}/admin/login" class="card">
   <input name="user" placeholder="管理员用户名" value="admin" autocomplete="username" autofocus>
   <input name="password" type="password" placeholder="密码" autocomplete="current-password">
       <input id="login-code" placeholder="验证码（开启 MFA 后必填）" size="18" inputmode="numeric" autocomplete="one-time-code">
@@ -118,14 +119,14 @@ function statusTag(entry) {
  * @param options.user - the signed-in administrator.
  * @returns the HTML.
  */
-function consolePage({ user, role }) {
-  return shell('DSH 多租户管理控制台', `<div class="wrap">
+function consolePage(prefix, { user, role }) {
+  return shell(prefix, 'DSH 多租户管理控制台', `<div class="wrap">
 <div class="row" style="justify-content: space-between">
   <div>
     <h1>DSH 多租户管理控制台</h1>
     <p class="sub">${role === 'admin' ? '管理员' : '只读账号'} ${escapeHtml(user)} · 数据来自控制面实时状态${role === 'admin' ? '' : '（只读账号只能查看，运维操作会被拒绝）'}</p>
   </div>
-  <form method="post" action="logout"><button type="submit">退出</button></form>
+  <form method="post" action="${prefix}/admin/logout"><button type="submit">退出</button></form>
 </div>
 
 <h2>租户</h2>

@@ -1766,11 +1766,11 @@ async function handleAdmin(req, res, url) {
   if (path === '' || path === '/') {
     if (session === undefined) {
       send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-        adminLoginPage({ configured: admin.hasAdmin() }))
+        adminLoginPage(PREFIX, { configured: admin.hasAdmin() }))
       return
     }
     send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-      adminConsolePage({ user: session, role: admin.roleOf(session) }))
+      adminConsolePage(PREFIX, { user: session, role: admin.roleOf(session) }))
     return
   }
 
@@ -1779,7 +1779,7 @@ async function handleAdmin(req, res, url) {
     if (locked > 0) {
       admin.audit({ action: 'login', tenant: '-', user: '-', result: 'throttled', source: remote })
       send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-        adminLoginPage({ locked, configured: admin.hasAdmin() }))
+        adminLoginPage(PREFIX, { locked, configured: admin.hasAdmin() }))
       return
     }
     const form = await readForm(req).catch(() => new URLSearchParams())
@@ -1797,7 +1797,7 @@ async function handleAdmin(req, res, url) {
       }
       admin.audit({ action: 'login', tenant: '-', user: String(form.get('user') ?? ''), result: 'rejected', source: remote })
       send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-        adminLoginPage({ error: '用户名或密码不正确', configured: admin.hasAdmin() }))
+        adminLoginPage(PREFIX, { error: '用户名或密码不正确', configured: admin.hasAdmin() }))
       return
     }
     // Second factor, when this administrator has one.
@@ -1814,7 +1814,7 @@ async function handleAdmin(req, res, url) {
           note: code === '' ? '未提供验证码' : '验证码不正确',
         })
         send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-          adminLoginPage({ error: '验证码不正确（或已用过的恢复码）', configured: admin.hasAdmin() }))
+          adminLoginPage(PREFIX, { error: '验证码不正确（或已用过的恢复码）', configured: admin.hasAdmin() }))
         return
       }
       admin.audit({
