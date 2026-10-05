@@ -149,6 +149,8 @@ A reply is the model's own. When a check fails it names the fact that was missin
 The model-driven step is the fuller reading, because it also proves a model's own bytes reach the reader. Where the document is already in the Session workspace — a re-run, or a workspace seeded with the 445-byte probe document — the same check runs without a model:
 
 ```sh
+# the probe PDF ships as a fixture; the gesture reads the Session workspace
+cp scripts/browser-floor-lane/smoke/floor-lane-probe.pdf .
 npx tsx scripts/browser-floor-lane/drive.ts \
   --chrome "<dir>\r857891\chrome-win\chrome.exe" \
   --url-file .artifacts/floor-lane-server.log --pdf-preview floor-lane-probe.pdf
