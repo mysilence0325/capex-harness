@@ -478,6 +478,24 @@ print(urljoin(base_url, 'api/state'))
 PY
 )"
     assert_eq "https://127.0.0.1:8090/__mt/admin/api/state" "$API_BASE" "页内脚本的相对地址基准"
+
+    # 服务端【真正送出】的脚本必须能被解析。页面脚本包在模板字符串里，
+    # 文件里写成 '\n' 的转义会被模板解成真实换行，让整段脚本语法错误、
+    # 页面永远停在"加载中…"——而源文件本身看起来完全正常。
+    SERVED="$LANDED"
+    python3 - "$SERVED" <<'PY' > /tmp/served.js
+import re, sys
+html = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+blocks = re.findall(r'<script[^>]*>(.*?)</script>', html, re.S)
+sys.stdout.write(blocks[0] if blocks else '')
+PY
+    if [ -s /tmp/served.js ]; then
+      PARSED="$(docker exec -i mt-gateway sh -c 'cat > /tmp/served.js && node --check /tmp/served.js 2>&1 | head -3; rm -f /tmp/served.js' < /tmp/served.js)"
+      [ -z "$PARSED" ] && pass "服务端送出的脚本能解析" || fail "服务端送出的脚本有语法错误：$PARSED"
+    else
+      fail "页面里没有 script 块（脚本根本不会被调用）"
+    fi
+    rm -f /tmp/served.js
     rm -f "$LPAGE" "$LANDED" "$LANDJAR" /tmp/lp_code.txt
   fi
 fi

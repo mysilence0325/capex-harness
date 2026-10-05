@@ -422,7 +422,7 @@ async function opsRun(op, label, params, node) {
     $('ops-out').textContent = answer.output || '（没有输出）'
     notice(label + ' 完成')
   } else {
-    $('ops-out').textContent = (answer.error || '失败') + (answer.output ? '\n\n' + answer.output : '')
+    $('ops-out').textContent = (answer.error || '失败') + (answer.output ? '\\n\\n' + answer.output : '')
     notice(label + ' 失败：' + (answer.error || ''), true)
   }
 }
@@ -441,7 +441,7 @@ async function pruneImages() {
 
 async function pruneSessions(dryRun) {
   const days = $('prune-days').value.trim()
-  if (!/^\d+$/.test(days)) { notice('填一个整数天（注意：N 表示超过 N×24 小时，0 表示超过一天）', true); return }
+  if (!/^\\d+$/.test(days)) { notice('填一个整数天（注意：N 表示超过 N×24 小时，0 表示超过一天）', true); return }
   if (!dryRun && !confirm('归档并删除超过 ' + days + ' 天的会话？会先打包到 backups/，打包失败则跳过该租户。')) return
   const tenants = selected.size > 0 ? Array.from(selected) : undefined
   if (tenants === undefined && !confirm('没有选中租户，将对全部租户执行。继续？')) return
@@ -449,10 +449,10 @@ async function pruneSessions(dryRun) {
   // partial failure names the tenant it failed on.
   const list = tenants || (snapshot.tenants || []).map((tenant) => tenant.id)
   $('ops-out').style.display = 'block'
-  $('ops-out').textContent = '会话清理（' + (dryRun ? '预览' : '执行') + '）…\n'
+  $('ops-out').textContent = '会话清理（' + (dryRun ? '预览' : '执行') + '）…\\n'
   for (const id of list) {
     const answer = await post('api/tenant', { action: 'ops', node: agentNode(), op: 'disk-prune-sessions', params: { olderThan: Number(days), tenant: id, dryRun } })
-    $('ops-out').textContent += '\n=== ' + id + ' ===\n' + (answer.ok ? answer.output : '失败：' + answer.error)
+    $('ops-out').textContent += '\\n=== ' + id + ' ===\\n' + (answer.ok ? answer.output : '失败：' + answer.error)
   }
   notice('会话清理' + (dryRun ? '预览' : '') + '完成')
 }
@@ -471,19 +471,19 @@ async function upgradeTenants(all) {
   if (image === '') { notice('填要升级到的镜像引用', true); return }
   const list = all ? (snapshot.tenants || []).map((tenant) => tenant.id) : Array.from(selected)
   if (list.length === 0) { notice(all ? '没有租户' : '先选中租户，或用"升级全部"', true); return }
-  if (!confirm('把 ' + list.join('、') + ' 升级到 ' + image + '？\n会逐个重建容器，任一租户起不来就回滚它并停止。')) return
+  if (!confirm('把 ' + list.join('、') + ' 升级到 ' + image + '？\\n会逐个重建容器，任一租户起不来就回滚它并停止。')) return
   $('ops-out').style.display = 'block'
-  $('ops-out').textContent = '升级到 ' + image + '\n'
+  $('ops-out').textContent = '升级到 ' + image + '\\n'
   const target = agentNode()
   if (target === undefined) { notice('没有节点代理在跑，升级无法执行', true); return }
   let done = 0
   for (const id of list) {
-    $('ops-out').textContent += '\n=== ' + id + ' （' + (done + 1) + '/' + list.length + '）===\n正在重建…\n'
+    $('ops-out').textContent += '\\n=== ' + id + ' （' + (done + 1) + '/' + list.length + '）===\\n正在重建…\\n'
     const answer = await post('api/tenant', { action: 'ops', node: target, op: 'upgrade', params: { image, tenants: id } })
-    $('ops-out').textContent += (answer.ok ? answer.output : '失败：' + (answer.error || '')) + '\n'
+    $('ops-out').textContent += (answer.ok ? answer.output : '失败：' + (answer.error || '')) + '\\n'
     if (!answer.ok) {
       notice(id + ' 升级失败，已停止；该租户已回滚', true)
-      $('ops-out').textContent += '\n已停止：' + id + ' 未能就绪，脚本已把它回滚。\n'
+      $('ops-out').textContent += '\\n已停止：' + id + ' 未能就绪，脚本已把它回滚。\\n'
       await load()
       return
     }
@@ -503,9 +503,9 @@ async function listBackups() {
   // archives the agent itself listed — which is also what its validation accepts.
   const archives = (answer.backups || [])
   if (archives.length === 0) return
-  $('ops-out').textContent += '\n\n恢复某个归档（会先把现有数据移到 restore-aside-<时间戳>/）：\n'
+  $('ops-out').textContent += '\\n\\n恢复某个归档（会先把现有数据移到 restore-aside-<时间戳>/）：\\n'
   window.__backups = archives
-  $('ops-out').textContent += archives.map((name, index) => '  [' + (index + 1) + '] ' + name).join('\n')
+  $('ops-out').textContent += archives.map((name, index) => '  [' + (index + 1) + '] ' + name).join('\\n')
   const which = prompt('输入要恢复的归档编号（留空取消）：')
   if (which === null || which.trim() === '') return
   const index = Number(which.trim()) - 1
@@ -516,7 +516,7 @@ async function listBackups() {
 async function restoreBackup(archive) {
   // Typing the name is the confirmation: this replaces every tenant's data with
   // the archive's contents, and a stray click should not be able to do that.
-  const typed = prompt('恢复 ' + archive + ' 会用它覆盖当前所有租户的数据（现有数据会先移到 restore-aside-<时间戳>/）。\n\n确认请输入归档名：')
+  const typed = prompt('恢复 ' + archive + ' 会用它覆盖当前所有租户的数据（现有数据会先移到 restore-aside-<时间戳>/）。\\n\\n确认请输入归档名：')
   if (typed === null) return
   if (typed.trim() !== archive) { notice('名字不匹配，已取消', true); return }
   await opsRun('restore', '恢复 ' + archive, { archive })
@@ -569,7 +569,7 @@ async function tenantImport() {
   const archive = document.querySelector('#tr-archive').value.trim()
   const tenant = document.querySelector('#tr-as').value.trim()
   if (archive === '' || tenant === '') { showOps('导入', { ok: false, error: '归档名与新租户名都要填' }); return }
-  if (!confirm('把 ' + archive + ' 导入为租户 ' + tenant + '？\n导入后还需要 render + up 才会启动它。')) return
+  if (!confirm('把 ' + archive + ' 导入为租户 ' + tenant + '？\\n导入后还需要 render + up 才会启动它。')) return
   showOps('导入 ' + archive + ' → ' + tenant,
     await post('api/tenant', { action: 'ops', node: 'local', op: 'tenant-import', params: { archive, tenant } }))
 }
@@ -666,7 +666,7 @@ async function mfaConfirm() {
   const answer = await post('api/tenant', { action: 'mfa-confirm', code })
   if (!answer.ok) { showOps('两步验证', answer); return }
   if (Array.isArray(answer.recovery)) {
-    document.querySelector('#mfa-recovery').textContent = answer.recovery.join('\n')
+    document.querySelector('#mfa-recovery').textContent = answer.recovery.join('\\n')
     document.querySelector('#mfa-recovery-row').style.display = 'block'
   }
   showOps('两步验证', { ok: true, output: '已开启。恢复码只显示这一次，请立刻保存。' })
@@ -679,7 +679,7 @@ async function mfaRegenerate() {
   if (!confirm('旧的恢复码会立刻作废，确定重新生成 10 个？')) return
   const answer = await post('api/tenant', { action: 'mfa-recovery', code })
   if (!answer.ok) { showOps('两步验证', answer); return }
-  document.querySelector('#mfa-recovery').textContent = answer.recovery.join('\n')
+  document.querySelector('#mfa-recovery').textContent = answer.recovery.join('\\n')
   document.querySelector('#mfa-recovery-row').style.display = 'block'
   showOps('两步验证', { ok: true, output: '已生成新的恢复码，旧的已作废。' })
   mfaStatus()
@@ -808,7 +808,7 @@ const resetPassword = async (tenant, user) => {
   await load()
 }
 const removeTenant = async (tenant) => {
-  const name = prompt('删除租户 ' + tenant + '。输入租户 id 确认；数据会保留在磁盘上。\\n\\n如需连数据一起删除，请改在部署机上执行 bin/mt.sh remove ' + tenant + ' --purge')
+  const name = prompt('删除租户 ' + tenant + '。输入租户 id 确认；数据会保留在磁盘上。\\\\n\\\\n如需连数据一起删除，请改在部署机上执行 bin/mt.sh remove ' + tenant + ' --purge')
   if (name !== tenant) return
   notice('正在删除 ' + tenant + ' …')
   const answer = await post('api/tenant', { tenant, action: 'remove' })
