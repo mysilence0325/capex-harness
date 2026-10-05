@@ -149,7 +149,6 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 由模型驱动的那一步是更完整的读数，因为它还证明模型自己的字节确实抵达了阅读器。当文档已经在 Session 工作区里——重跑，或有人用那份 445 字节的探针文档铺过工作区——同一项检查无需模型即可运行：
 
 ```sh
-# 探针 PDF 作为 fixture 随仓库提供；手势读的是会话工作区
 cp scripts/browser-floor-lane/smoke/floor-lane-probe.pdf .
 npx tsx scripts/browser-floor-lane/drive.ts \
   --chrome "<dir>\r857891\chrome-win\chrome.exe" \
