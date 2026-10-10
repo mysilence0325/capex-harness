@@ -7,6 +7,15 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# 自己读 .env。以前这里只看环境变量，于是 `bin/mt.sh doctor`（mt.sh 已经 source 过
+# .env）与直接跑 `bash bin/doctor.sh` 会给出不同结论 —— 同一份配置，两种答案。
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 OK=0; WARN=0; BAD=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; OK=$((OK + 1)); }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; WARN=$((WARN + 1)); }
@@ -138,6 +147,34 @@ fi
 for p in 8090 8091 8092 8093; do
   if printf '%s\n' "$LISTEN" | grep -q ":$p "; then ok "端口 $p 在监听"; else warn "端口 $p 未监听"; fi
 done
+
+# 控制台页面能不能用，不看状态码也不看页面里有没有那些控件：整页脚本一旦有语法
+# 错误，浏览器里表格永远停在"加载中"、所有按钮都不响应，而接口、状态码、页面
+# 内容全都是好的。这里解析服务端【真正会送出】的那段脚本，不需要登录。
+head_ "控制台页面"
+if [ "$gstate" = running ]; then
+  SERVED_ERR="$(docker exec mt-gateway node -e '
+const vm = require("node:vm")
+const html = require("/app/admin-page.js").consolePage("/__mt/admin", { user: "doctor", role: "admin" })
+const open = html.indexOf("<script>")
+const close = html.lastIndexOf("</script>")
+if (open < 0 || close < 0) { console.log("页面里没有 script 块"); } else {
+  try { new vm.Script(html.slice(open + 8, close)); console.log("") } catch (error) { console.log(error.message) }
+}
+' 2>&1 | tr -d '\r')"
+  if [ -z "$SERVED_ERR" ]; then
+    ok "服务端送出的控制台脚本能解析（页面上的按钮才会响应）"
+  else
+    bad "控制台脚本有语法错误，页面在浏览器里不会工作: $SERVED_ERR"
+  fi
+  if docker exec mt-gateway node -e 'process.exit(require("/app/admin-page.js").consolePage("/__mt/admin", { user: "doctor", role: "admin" }).includes("adduser") ? 0 : 1)' >/dev/null 2>&1; then
+    ok "  控制台页带按用户操作（加用户/删除用户）"
+  else
+    warn "  控制台页没有用户管理入口（加用户只能走 bin/mt.sh adduser）"
+  fi
+else
+  warn "网关没在运行，跳过控制台页面检查"
+fi
 
 head_ "防火墙与网络"
 PORTS="$(firewall-cmd --list-ports 2>/dev/null || true)"
@@ -374,6 +411,24 @@ if [ -f logs/model-usage.jsonl ]; then
   ok "模型用量记录 logs/model-usage.jsonl（${USAGE_LINES:-0} 条）"
 else
   warn "还没有模型用量记录（租户尚未发起过模型请求）"
+fi
+
+# 离线升级要先有镜像：有内网仓库时走 registry-push，没有时只能 docker save/load。
+# 仓库挂了不会影响正在跑的租户，所以这里不当作致命错误，但必须看得见。
+head_ "内网仓库（离线升级用）"
+REG_HOST="$(grep -E '^MT_REGISTRY_HOST=' .env 2>/dev/null | tail -1 | cut -d= -f2)"
+REG_PLAIN="$(grep -E '^MT_REGISTRY_PLAIN_HTTP=' .env 2>/dev/null | tail -1 | cut -d= -f2)"
+if [ -z "$REG_HOST" ]; then
+  warn "未配 MT_REGISTRY_HOST：registry-push 不可用，离线升级只能 docker save/load 搬镜像"
+else
+  REG_SCHEME=https
+  [ "$REG_PLAIN" = "1" ] && REG_SCHEME=http
+  REG_CODE="$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 8 "$REG_SCHEME://$REG_HOST/v2/" 2>/dev/null)"
+  case "$REG_CODE" in
+    200|401) ok "内网仓库可达: $REG_SCHEME://$REG_HOST（HTTP $REG_CODE）" ;;
+    000|"")  bad "内网仓库 $REG_SCHEME://$REG_HOST 连不上 —— registry-push 会失败" ;;
+    *)       warn "内网仓库返回 HTTP $REG_CODE（可能不是 registry v2 端点）" ;;
+  esac
 fi
 
 head_ "资源与备份"

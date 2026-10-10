@@ -328,6 +328,7 @@ docker 区域的 ACCEPT 在第 5 步，规则必须挂在第 3 步才拦得住�
 | `state/session.key` | 网关会话签名密钥（删除＝所有人重新登录） |
 | `logs/access.jsonl` | 访问审计 |
 | `build/`、`entry-urls.txt` | 生成物 |
+| `多租户落地评估.md` | **实测评估**：能力矩阵、缺陷清单与验收、文档一致性修正（本目录其它文档与之冲突时以它为准） |
 | `state/tls/` | TLS 证书与私钥（`ca.crt` 给客户端导入） |
 | `egress-proxy/server.js` | 租户出口代理：宿主网络 + 未放行端口 = 只有容器可达 |
 | `bin/isolate.sh` | 租户→宿主 端口限制（firewalld direct 规则） |
@@ -340,12 +341,14 @@ docker 区域的 ACCEPT 在第 5 步，规则必须挂在第 3 步才拦得住�
 ```bash
 bin/mt.sh up                       # 渲染 + 构建 + 启动 + 等待就绪 + 打印入口
 bin/mt.sh status                   # 容器状态 + 就绪情况
-bin/mt.sh doctor                   # 自检：前置条件/配置/租户/控制面/防火墙/模型/资源/备份
+bin/mt.sh doctor                   # 自检：前置条件/配置/租户/控制面/控制台页面/防火墙/出网/加密/模型/内网仓库/资源与备份
 bin/mt.sh url                      # 打印入口地址
 bin/mt.sh logs alpha               # 看某个租户的运行日志
 bin/mt.sh add delta --user dave    # 开通新租户（一条命令走完全流程，见下）
 bin/mt.sh remove delta             # 摘除租户（保留数据）；--purge 连数据一起删
 bin/mt.sh passwd alpha alice       # 重置密码（会打印新密码）
+bin/mt.sh adduser alpha bob2       # 给已有租户加用户（会打印初始密码）
+bin/mt.sh removeuser alpha bob2    # 删用户（他的会话同时失效）
 bin/mt.sh key alpha sk-xxxx        # 写入该租户的模型 key，然后 bin/mt.sh up
 bin/mt.sh smoke --tenant alpha --user alice --password <pw>   # 隔离性冒烟测试
 bin/mt.sh accept --tenant alpha --user alice --password <pw>  # 端到端验收（含一次真实模型调用）
@@ -490,7 +493,9 @@ bin/mt.sh model        # 渲染 + 应用到所有租户 + 重启
 - **默认 HTTPS（自签 CA）**：公开端口用 `bin/mt.sh cert` 签发的自签证书；如需浏览器受信任的证书，可在网关前面再加一层 TLS 终结（nginx/Caddy），或给网关换证书。
 - **没有租户自助管理**：新增租户由运维执行 `bin/mt.sh add`。
 - **配额是容器级的**（内存/CPU/PID），磁盘配额需要宿主的 project quota 或独立卷。
-- **默认不共享模型凭据**：每个租户在 `.env` 里独立配置；留空则租户启动后无可用模型。
+- **模型凭据默认不进入租户容器**：真 key 只注入 `mt-model-gateway`，租户拿的是按租户生成的占位 key（见 §0.0 与验收报告 §12）。要按租户单独计费时才用 `bin/mt.sh key <租户> <key>`。
+- **一个租户 = 一个 DSH 实例**：同一租户下的多个用户（`bin/mt.sh adduser`）共用该租户的会话空间、工作区与设置，他们之间没有隔离；隔离单元是租户本身。
+- **宿主的 `ip_forward` 与 `bridge-nf-call-iptables` 已被打开**（实测值均为 1），与本文早期版本"刻意不改"的说法不同。后果是从局域网可以直接访问宿主上其它 stack 已发布的端口（实测 `3080`、`13000`、`18081`、`18082`、`19090`、`19093` 均可达）。这两项是宿主全局设置，`bin/doctor.sh` 会报出事实；关掉 `bridge-nf-call-iptables` 会让租户→宿主的隔离规则失效，所以本部署默认保持开启。
 - **`model.env` 变了必须让 compose 重建容器**（内容参与服务哈希，`bin/mt.sh up` 会重建；只 `docker restart` 不会）。
 
 ## 9. 与单租户部署的关系

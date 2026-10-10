@@ -155,7 +155,7 @@ CONSOLE_HTML="$([ "$CODE" = "skip" ] && echo '' || curl -sS -b "$JAR" http://127
 if [ "$CODE" = "skip" ]; then
   skip "控制台页的按钮与筛选控件"
 else
-  for needle in tenantExport tenantImport hist-tenant hist-q; do
+  for needle in tenantExport tenantImport hist-tenant hist-q new-user addUser; do
     printf '%s' "$CONSOLE_HTML" | grep -q "$needle" && pass "控制台页含 $needle" || fail "控制台页缺 $needle"
   done
 fi
@@ -183,6 +183,34 @@ else:
 ' | while read -r line; do
   case "$line" in OK*) pass "${line#OK }" ;; BAD*) fail "${line#BAD }" ;; esac
 done
+fi
+
+# 给已有租户加用户：控制台与命令行以前都没有这个能力（只有建租户时能带第一个用户）。
+# 这里真的加一个、再删掉，并确认它出现在状态里 —— 页面里有个按钮不算验证。
+if [ "$CODE" = "skip" ]; then
+  skip "控制台加用户/删用户（没有管理员会话）"
+else
+  PROBE_TENANT="$(printf '%s' "$TENANTS" | awk '{print $1}')"
+  PROBE_USER="acc-probe-$(date -u +%H%M%S)"
+  ADD="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+    -d "{\"tenant\":\"$PROBE_TENANT\",\"action\":\"adduser\",\"user\":\"$PROBE_USER\"}" \
+    http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null)"
+  printf '%s' "$ADD" | grep -q '"ok":true' && pass "控制台给 $PROBE_TENANT 加用户 $PROBE_USER" \
+    || fail "控制台加用户失败：$(printf '%s' "$ADD" | head -c 200)"
+  printf '%s' "$ADD" | grep -q '"password"' && pass "加用户回执带初始密码" || fail "加用户没有返回初始密码"
+  # 网关每 2 秒热加载一次注册表，所以这里的轮询是必须的：立刻读会读到旧快照，
+  # 把"还没刷新"报成"没加上"。
+  SEEN=no
+  for _ in 1 2 3 4 5 6; do
+    sleep 2
+    curl -sS -b "$JAR" http://127.0.0.1:8099/__mt/admin/api/state 2>/dev/null | grep -q "$PROBE_USER" && { SEEN=yes; break; }
+  done
+  [ "$SEEN" = "yes" ] && pass "新用户出现在控制台状态里（网关热加载注册表）" || fail "新用户始终没有出现在控制台状态里"
+  DEL="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+    -d "{\"tenant\":\"$PROBE_TENANT\",\"action\":\"removeuser\",\"user\":\"$PROBE_USER\"}" \
+    http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null)"
+  printf '%s' "$DEL" | grep -q '"ok":true' && pass "控制台删掉探测用户（自清理）" \
+    || fail "删用户失败，$PROBE_USER 还在注册表里：$(printf '%s' "$DEL" | head -c 200)"
 fi
 rm -f "$JAR"
 
