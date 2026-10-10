@@ -11,6 +11,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 # shellcheck disable=SC1091
 [ -f .env ] && set -a && . ./.env && set +a
+# 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）。
+# shellcheck disable=SC1091
+. bin/lib-http.sh
 
 IMAGE="${DSH_IMAGE:-dsh-web:0.2.0-rc.2}"
 NODE_IMAGE="${MT_NODE_IMAGE:-node:22-bookworm-slim}"

@@ -19,6 +19,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 # shellcheck disable=SC1091
 [ -f .env ] && set -a && . ./.env && set +a
+# 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）。
+# shellcheck disable=SC1091
+. bin/lib-http.sh
 
 IMAGE="${DSH_IMAGE:-dsh-web:0.2.0-rc.2}"
 TENANT=""; USER=""; PASSWORD=""; PEER=""
@@ -143,9 +146,9 @@ if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
   # 两种结果都算通过，且第二种更强：对端在别的网桥上时连不到（网络层隔离），
   # 在同一个网桥上时连得上但 cookie 一定被 401 拒。
   case "$OTHER_RESULT" in
-    401) ok "  他租户拒绝该 cookie（401）" ;;
-    unreachable) ok "  他租户在网络层就不可达（比 401 更强）" ;;
-    *) bad "  他租户的响应既不是 401 也不是不可达：${OTHER_RESULT}" ;;
+    401) check "他租户拒绝该 cookie" "$OTHER_RESULT" "401" ;;
+    unreachable) check "他租户在网络层就不可达（比 401 更强）" "$OTHER_RESULT" "unreachable" ;;
+    *) printf '  \033[31mFAIL\033[0m 他租户的响应既不是 401 也不是不可达：%s\n' "$OTHER_RESULT"; FAIL=$((FAIL + 1)) ;;
   esac
 else
   echo "  (缺少 cookie 或对端租户，跳过)"

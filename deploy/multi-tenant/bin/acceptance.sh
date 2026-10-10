@@ -44,6 +44,10 @@ IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br|veth
 EDGE="$(grep '^MT_EDGE_PORT=' .env 2>/dev/null | cut -d= -f2)"; EDGE="${EDGE:-8090}"
 TENANTS="$(grep -o '"id": *"[a-z0-9-]*"' tenants.json 2>/dev/null | sed 's/.*"\([a-z0-9-]*\)"$/\1/' | tr '\n' ' ')"
 
+# 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）；有 curl 时它什么都不做。
+# shellcheck disable=SC1091
+. bin/lib-http.sh
+
 # 口令不写进仓库：从部署机上这个 0600 文件读。它【不放在 state/ 里】——那个目录会进
 # 备份归档，把明文口令塞进备份是降级。文件不存在时，用得到口令的检查会明确跳过，
 # 而不是默默算作通过。
@@ -97,7 +101,16 @@ for t in $TENANTS; do
     continue
   fi
   R="$(bin/mt.sh smoke --tenant "$t" --user "$U" --password "$P" 2>&1 | grep -o '结果.*')"
-  case "$R" in *"15 通过，0 失败"*) pass "$t 冒烟 $R" ;; *) fail "$t 冒烟 $R" ;; esac
+  # 断言"0 失败"而不是写死条数：检查项会增加（例如把一条一直没被计数的检查接回计数），
+  # 写死 15 会让加一条检查就报红 —— 那不是发现缺陷，只是数字变了。条数只做下限校验。
+  case "$R" in
+    *"0 失败"*)
+      # 条数在"通过"**前面**：`结果：16 通过，0 失败` —— 用 sed 取，别用前缀/后缀截断
+      # （`${R#*通过}` 拿到的是"通过"之后，取不出数字）。
+      PASSED="$(printf '%s' "$R" | sed -n 's/.*结果：\([0-9][0-9]*\) 通过.*/\1/p')"
+      if [ -n "$PASSED" ] && [ "$PASSED" -ge 15 ]; then pass "$t 冒烟 $R"; else fail "$t 冒烟条数偏少：$R"; fi ;;
+    *) fail "$t 冒烟 $R" ;;
+  esac
 done
 
 DOCTOR="$(bin/mt.sh doctor 2>&1 | tail -1 | sed 's/^ *//')"

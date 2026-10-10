@@ -16,6 +16,10 @@ if [ -f .env ]; then
   set +a
 fi
 
+# 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）；有 curl 时这个文件什么都不做。
+# shellcheck disable=SC1091
+. bin/lib-http.sh
+
 OK=0; WARN=0; BAD=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; OK=$((OK + 1)); }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; WARN=$((WARN + 1)); }
@@ -230,6 +234,44 @@ if [ -n "${ORPHAN// /}" ]; then
   warn "注册表里没有对应租户的网络还在:$ORPHAN（删租户现在会连带删除；历史残留可 docker network rm）"
 else
   ok "没有多余的租户网络"
+fi
+
+# 限速是**运行时**规则（tc 落在容器的 netns 里）：机器重启或容器重建都会把它清掉，而
+# 意图文件 state/bandwidth.json 还在 —— 于是"以为限着、其实没限"。这里逐租户核对意图与
+# 现状，不一致就点名（重放：bin/mt.sh up 或 bin/bandwidth.sh apply）。
+if [ -s state/bandwidth.json ]; then
+  BW_INTENT="$(python3 - state/bandwidth.json <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(' '.join(json.load(open(sys.argv[1], encoding='utf-8')).keys()))
+except Exception:
+    pass
+PY
+)"
+  BW_MISSING=""
+  for t in ${BW_INTENT:-}; do
+    # 先取输出再匹配，不要写成 `cmd | grep -q`：doctor 开了 pipefail，而 bandwidth.sh
+    # 的退出码在"该租户没规则"等路径上可能是非零，管道整体就会失败，把"已限速"也判成没限速
+    # （这个假警报我自己踩过：同一时刻手工 show 显示已限速，doctor 却说没落下）。
+    BW_OUT="$(bash bin/bandwidth.sh show "$t" 2>/dev/null || true)"
+    case "$BW_OUT" in *已限速*) : ;; *) BW_MISSING="$BW_MISSING $t" ;; esac
+  done
+  # 增删租户会重建容器：那一刻运行时规则被清掉，随后由同一次操作重放（可能几十秒）。
+  # 只在缺规则时才轮询等待，避免把"正在重放"报成"没限速"。
+  for _ in 1 2 3; do
+    [ -z "${BW_MISSING// /}" ] && break
+    sleep 5
+    BW_MISSING=""
+    for t in ${BW_INTENT:-}; do
+      BW_OUT="$(bash bin/bandwidth.sh show "$t" 2>/dev/null || true)"
+      case "$BW_OUT" in *已限速*) : ;; *) BW_MISSING="$BW_MISSING $t" ;; esac
+    done
+  done
+  if [ -n "${BW_MISSING// /}" ]; then
+    warn "限速规则没落下:$BW_MISSING（重启/重建会清掉运行时规则，跑 bin/bandwidth.sh apply 重放）"
+  else
+    ok "限速意图与现状一致（${BW_INTENT}）"
+  fi
 fi
 
 head_ "防火墙与网络"

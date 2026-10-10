@@ -21,6 +21,9 @@
 # 私钥写进 server.key，再把你们的 CA 证书放到 ca.crt，网关只读 server.crt 与 server.key。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）。
+# shellcheck disable=SC1091
+. bin/lib-http.sh
 
 OUT="${MT_TLS_DIR:-state/tls}"
 EXTRA="${1:-}"

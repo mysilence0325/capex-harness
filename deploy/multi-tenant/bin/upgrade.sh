@@ -13,6 +13,9 @@
 #   bin/upgrade.sh --status                           # 看各租户当前用的是哪个镜像
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）。
+# shellcheck disable=SC1091
+. bin/lib-http.sh
 
 ROOT="$PWD"
 IMAGE=""
