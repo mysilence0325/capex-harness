@@ -26,15 +26,19 @@ head_() { printf '\n\033[36m== %s ==\033[0m\n' "$1"; }
 
 # 探针镜像：优先用本部署的租户运行时镜像（它带 landlock-run），否则退到 node 官方镜像
 # （只能测 bwrap，且装 bubblewrap 需要网络）。
+# 探针镜像必须【本机真的有】才算数：拉不下来的镜像会让 docker run 什么都不输出，
+# 那不能读成"沙箱不可用"（我第一次跑就踩了这个：内核 5.15 且 LSM 里有 landlock，
+# 却被报成不可用，而真正失败的是镜像没拉下来）。
 PICK_IMAGE=""
+IMAGE_SOURCE=""
 for candidate in "${DSH_IMAGE:-}" $(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^dsh-web:' | head -1); do
   [ -n "$candidate" ] || continue
-  if docker image inspect "$candidate" >/dev/null 2>&1; then PICK_IMAGE="$candidate"; break; fi
+  if docker image inspect "$candidate" >/dev/null 2>&1; then
+    PICK_IMAGE="$candidate"; IMAGE_SOURCE="本部署运行时镜像（带 landlock-run）"; break
+  fi
 done
-IMAGE_SOURCE="本部署运行时镜像"
-if [ -z "$PICK_IMAGE" ]; then
-  PICK_IMAGE="node:22-bookworm-slim"
-  IMAGE_SOURCE="node 官方镜像（DSH 镜像不在本机）"
+if [ -z "$PICK_IMAGE" ] && docker image inspect node:22-bookworm-slim >/dev/null 2>&1; then
+  PICK_IMAGE="node:22-bookworm-slim"; IMAGE_SOURCE="node 官方镜像（只能测 bwrap，不含 landlock-run）"
 fi
 
 head_ "发行版与内核"
@@ -46,8 +50,18 @@ glibc="$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')"
 
 head_ "资源"
 ok "CPU $(nproc) 核"
-MEM="$(free -m | awk '/Mem:/{print $7}')"
-[ "${MEM:-0}" -ge 2048 ] && ok "可用内存 ${MEM} MB" || warn "可用内存仅 ${MEM} MB（每个租户常驻约 100 MB，限额另算）"
+if command -v free >/dev/null 2>&1; then
+  MEM="$(free -m 2>/dev/null | awk '/Mem:/{print $7}')"
+  if [ -z "$MEM" ]; then
+    warn "读不出可用内存（free 的输出不认识）"
+  elif [ "$MEM" -ge 2048 ]; then
+    ok "可用内存 ${MEM} MB"
+  else
+    warn "可用内存仅 ${MEM} MB（每个租户常驻约 100 MB，限额另算）"
+  fi
+else
+  warn "没有 free（procps 未安装）：内存无法判定 —— apt install procps"
+fi
 DF="$(df -h / | awk 'NR==2{print $4" / "$2"（已用 "$5"）"}')"
 ok "根分区 $DF"
 
@@ -70,7 +84,11 @@ else
   else
     bad "没有 compose v2（bin/mt.sh 依赖它）"
   fi
-  ok "探针镜像：$PICK_IMAGE（$IMAGE_SOURCE）"
+  if [ -n "$PICK_IMAGE" ]; then
+    ok "探针镜像：$PICK_IMAGE（$IMAGE_SOURCE）"
+  else
+    warn "本机没有可用于探针的镜像（既无 dsh-web，也没有 node:22-bookworm-slim，且拉不下来）：沙箱只能按内核证据判断"
+  fi
 fi
 
 head_ "user namespace（bwrap 的前提）"
@@ -88,7 +106,7 @@ case "$AR" in
 esac
 
 head_ "沙箱：bubblewrap"
-if command -v docker >/dev/null 2>&1; then
+if [ -n "$PICK_IMAGE" ]; then
   BWRAP="$(docker run --rm "$PICK_IMAGE" sh -c '
     command -v bwrap >/dev/null 2>&1 || {
       (apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1) || { echo "no-bwrap"; exit 0; }
@@ -101,36 +119,64 @@ if command -v docker >/dev/null 2>&1; then
     *)    warn "镜像里没有 bwrap 且装不上（离线/无源）：把 bubblewrap 打进镜像，或先接受无沙箱" ;;
   esac
 else
-  warn "没有 docker，跳过 bwrap 实测"
+  warn "没有可用探针镜像，跳过 bwrap 实测（bwrap 还需要打进租户镜像，见结论）"
 fi
 
 head_ "沙箱：Landlock"
-case "$KMAJ.$KMIN" in
-  3.*|4.*|5.[0-9]|5.1[0-2]) bad "内核 $KMAJ.$KMIN < 5.13：**没有 Landlock**（Landlock 自 5.13 起；平台包要 ABI 5 = 6.10+ 才算 full）" ;;
-  *)
-    ok "内核 $KMAJ.$KMIN ≥ 5.13，具备 Landlock 的前提"
-    LSM="$(cat /sys/kernel/security/lsm 2>/dev/null || echo '')"
-    case "$LSM" in
-      *landlock*) ok "LSM 列表含 landlock（$LSM）" ;;
-      "")         warn "读不到 /sys/kernel/security/lsm（securityfs 未挂载？）" ;;
-      *)          warn "LSM 列表不含 landlock：$LSM" ;;
-    esac
-    if command -v docker >/dev/null 2>&1; then
-      PROBE="$(docker run --rm "$PICK_IMAGE" sh -c '
-        L="$(find / -name landlock-run -type f 2>/dev/null | head -1)"
-        if [ -z "$L" ]; then echo "no-launcher"; exit 0; fi
-        OUT="$("$L" --probe 2>&1)"; CODE=$?
-        echo "$OUT (exit=$CODE)"
-      ' 2>/dev/null | tr -d "\r")"
-      case "$PROBE" in
-        *fully*)      ok "Landlock 探针：$PROBE" ;;
-        *partially*)  warn "Landlock 探针：$PROBE —— 只治理该 ABI 暴露的访问类别（partial）" ;;
-        *no-launcher*) warn "探针镜像里没有 landlock-run（用本部署的 dsh-web 镜像能测）；内核与 LSM 的结论以上面为准" ;;
-        *)            bad "Landlock 不可用：$PROBE" ;;
-      esac
-    fi
-    ;;
+# 内核版本决定能拿到哪个 Landlock ABI（1=5.13 ~ 2=5.19 ~ 3=6.2 ~ 4=6.7 ~ 5=6.10+）；
+# launcher 最多管到 ABI 5，所以 ABI<5 一律只算 partial。
+LL_ABI=0
+if [ "$KMAJ" -lt 5 ] || { [ "$KMAJ" -eq 5 ] && [ "$KMIN" -lt 13 ]; }; then LL_ABI=0
+elif [ "$KMAJ" -eq 5 ]; then { [ "$KMIN" -le 18 ] && LL_ABI=1; } || LL_ABI=2
+else
+  case "$KMAJ.$KMIN" in
+    6.[0-1]) LL_ABI=2 ;;
+    6.[2-6]) LL_ABI=3 ;;
+    6.[7-9]) LL_ABI=4 ;;
+    *)       LL_ABI=5 ;;
+  esac
+fi
+LSM="$(cat /sys/kernel/security/lsm 2>/dev/null || echo '')"
+case "$LSM" in
+  *landlock*) LL_LSM=yes ;;
+  "")         LL_LSM=unknown ;;
+  *)          LL_LSM=no ;;
 esac
+if [ "$LL_ABI" = 0 ]; then
+  bad "内核 $KMAJ.$KMIN < 5.13：**没有 Landlock**（Landlock 自 5.13 起；ABI 5 = 内核 6.10+ 才算 full）"
+elif [ "$LL_LSM" = no ]; then
+  bad "内核 $KMAJ.$KMIN 支持 Landlock，但 LSM 列表里没有它（lsm= 未启用）：$LSM"
+else
+  if [ "$LL_LSM" = unknown ]; then
+    warn "读不到 /sys/kernel/security/lsm（securityfs 未挂载）：按内核版本推断，建议实测一次"
+  else
+    ok "LSM 列表含 landlock（$LSM）"
+  fi
+  if [ "$LL_ABI" = 5 ]; then
+    ok "内核 $KMAJ.$KMIN → Landlock ABI 5：launcher 可达到 full"
+  else
+    warn "内核 $KMAJ.$KMIN → Landlock ABI $LL_ABI：可用，但只治理该 ABI 暴露的访问类别（partial）"
+  fi
+fi
+if [ -n "$PICK_IMAGE" ] && [ "$LL_ABI" != 0 ]; then
+  PROBE="$(docker run --rm "$PICK_IMAGE" sh -c '
+    L="$(find / -name landlock-run -type f 2>/dev/null | head -1)"
+    if [ -z "$L" ]; then echo "no-launcher"; exit 0; fi
+    OUT="$("$L" --probe 2>&1)"; CODE=$?
+    echo "$OUT (exit=$CODE)"
+  ' 2>/dev/null | tr -d "\r")"
+  case "$PROBE" in
+    *fully*)        ok "Landlock 探针：$PROBE"; LL_PROBE=yes ;;
+    *partially*)    warn "Landlock 探针：$PROBE（与内核推断一致）"; LL_PROBE=yes ;;
+    *no-launcher*)  warn "探针镜像里没有 landlock-run：以上按内核与 LSM 判断；要实测就用本部署的 dsh-web 镜像"; LL_PROBE=unknown ;;
+    "")             warn "探针没跑起来（镜像不可用）：以上按内核与 LSM 判断"; LL_PROBE=unknown ;;
+    # 探针问的是内核本身，所以它说"没被强制"时它说了算 —— 版本号和 lsm= 都只是推断。
+    *)              bad "Landlock 探针否决：$PROBE"; LL_PROBE=no ;;
+  esac
+elif [ "$LL_ABI" != 0 ]; then
+  warn "没有可用探针镜像，Landlock 未实测（内核证据表明可用）"
+  LL_PROBE=unknown
+fi
 
 head_ "宿主工具（部署脚本要用）"
 for tool in python3 curl openssl nsenter tc ss; do
@@ -155,9 +201,11 @@ command -v xfs_quota >/dev/null 2>&1 && ok "xfs_quota（磁盘配额）" || warn
 head_ "文件系统与配额能力"
 FS="$(stat -fc %T / 2>/dev/null)"
 case "$FS" in
-  xfs)  ok "根分区是 XFS（可开 prjquota）" ;;
-  ext4) warn "根分区是 ext4：本部署的 quota.sh 用 xfs_quota，只对 XFS 有效——数据盘建议单独做 XFS + prjquota" ;;
-  *)    warn "根分区文件系统 $FS：配额方案要先确认" ;;
+  xfs) ok "根分区是 XFS（可开 prjquota）" ;;
+  # 老 coreutils 把 ext2/ext3/ext4 一律打成 "ext2/ext3"，别把它当另一种文件系统。
+  ext2/ext3|ext3|ext4)
+      warn "根分区是 ext 家族（$FS，多半是 ext4）：本部署的 quota.sh 用 xfs_quota 只对 XFS 有效——数据盘建议单独做 XFS + prjquota" ;;
+  *) warn "根分区文件系统 $FS：配额方案要先确认" ;;
 esac
 mount | grep -q "prjquota" && ok "已有挂载带 prjquota" || warn "当前没有挂载带 prjquota（XFS 配额需要挂载参数，改 fstab 后重启生效）"
 
@@ -201,11 +249,26 @@ fi
 echo "  推荐的租户权限模式："
 case "${BWRAP:-}" in
   OK) echo "    DSH_PERMISSION_MODE=workspace-write （bwrap 可用：写只允许落工作区）"; APPROVAL="ask" ;;
-  *)  case "${PROBE:-}" in
-        *fully*)     echo "    DSH_PERMISSION_MODE=workspace-write （Landlock full）"; APPROVAL="ask" ;;
-        *partially*) echo "    DSH_PERMISSION_MODE=workspace-write （Landlock partial：只治理该 ABI 的访问类别）"; APPROVAL="ask" ;;
-        *)           echo "    DSH_PERMISSION_MODE=danger-full-access （无可用沙箱：只能以容器为边界，审批设 never 免得无人值守挂住）"; APPROVAL="never" ;;
-      esac ;;
+  *)
+    if [ "${LL_PROBE:-unknown}" = no ]; then
+      echo "    DSH_PERMISSION_MODE=danger-full-access （探针说这个内核没有强制 Landlock：只能以容器为边界，审批设 never）"
+      APPROVAL="never"
+    elif [ "${LL_ABI:-0}" != 0 ] && [ "${LL_LSM:-unknown}" != no ]; then
+      if [ "${LL_ABI}" = 5 ]; then
+        echo "    DSH_PERMISSION_MODE=workspace-write （Landlock full）"
+      else
+        echo "    DSH_PERMISSION_MODE=workspace-write （Landlock ABI ${LL_ABI}：可用但只治理部分访问类别）"
+      fi
+      APPROVAL="ask"
+    else
+      echo "    DSH_PERMISSION_MODE=danger-full-access （无可用沙箱：只能以容器为边界，审批设 never 免得无人值守挂住）"
+      APPROVAL="never"
+    fi ;;
 esac
 echo "    审批策略相应地设为 $APPROVAL"
+echo "  另外两件事："
+echo "    * 租户镜像里现在没有 bubblewrap。要用 bwrap（比 Landlock 覆盖更完整）就把它打进镜像："
+echo "      image/Dockerfile 里加 apt-get install -y bubblewrap（或在基础镜像层里装）。"
+echo "    * cgroup v1 上磁盘 I/O 限速无效：磁盘用 XFS + prjquota 兜（Ubuntu 20.04 也可以在 GRUB 加"
+echo "      systemd.unified_cgroup_hierarchy=1 切到 cgroup v2，重启后块设备限速才生效）。"
 printf '\n  %s 项通过, %s 项警告, %s 项不可用\n' "$OK" "$WARN" "$BAD"
