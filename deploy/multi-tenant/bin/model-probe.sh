@@ -153,6 +153,9 @@ cat <<'TXT'
               apiKeyEnv: DEEPSEEK_API_KEY                  # 租户的占位 key，由 render 注入
               models:
                 - id: <上面列出的模型 id>
+                  name: <界面显示名>
+                  contextWindow: <模型实际上下文，例 131072 = 128k>
+                  maxTokens: <输出上限>
 
   若 /v1/messages 存在 → Anthropic Messages 兼容，model.patch.yml 用：
       - id: llm-pi-ai
@@ -165,6 +168,13 @@ cat <<'TXT'
               apiKeyEnv: DEEPSEEK_API_KEY
               models:
                 - id: <上面列出的模型 id>
+                  name: <界面显示名>
+                  contextWindow: <模型实际上下文，例 131072 = 128k>
+                  maxTokens: <输出上限>
+
+  容量一定要写实：自建模型不在 pi-ai 的目录里，缺省按 defaultContextWindow=262144 与
+  defaultMaxTokens=32768 兜底。模型只有 128k 而照缺省走的话，DSH 会以为有两倍空间，
+  压缩触发得太晚，请求会被上游直接拒掉。128k 写 131072。
 
   两种接法都要在部署机上把真凭据交给模型网关（只进 .env，绝不进 model.env 或租户）：
       MT_UPSTREAM_BASE=<内网端点>

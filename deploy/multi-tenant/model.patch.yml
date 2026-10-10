@@ -8,6 +8,11 @@
 #     内网无鉴权的推理服务也要给个占位 key，或改用 headers 传 Authorization。
 #   * models 列表会整体替换该 route 的模型目录，要用的模型都要列上。
 #   * 一行 patch 替换整行 config：llm-pi-ai 这一行里要写全所有 providers。
+#   * 容量必须自己写：不在目录里的自建模型按 route 的 defaultContextWindow(262144) 与
+#     defaultMaxTokens(32768) 兜底。模型实际只有 128k 上下文时如果照缺省走，DSH 会以为
+#     有两倍空间，压缩触发得太晚，请求直接被上游拒 —— 所以 contextWindow 一定要写实。
+#     128k 写 131072。maxTokens 是输出上限：写了它同时成为该模型的单次请求默认值，
+#     所以不要虚高；不确定就先写保守值（如 8192），确认后再调。
 #
 # 本文件里只要还有 CHANGE-ME，render 就会跳过它（租户只拿到默认的官方 DeepSeek 卡片）。
 # 改完执行： bin/mt.sh up
@@ -22,6 +27,9 @@
         apiKeyEnv: GATEWAY_API_KEY
         models:
           - id: CHANGE-ME-MODEL
+            name: 内网模型显示名
+            contextWindow: 131072     # 128k 上下文；不写就会按 262144 算
+            maxTokens: 8192           # 输出上限：按端点实际能力填，别虚高
             # reasoningEfforts:
             #   off:
             #   high: high
