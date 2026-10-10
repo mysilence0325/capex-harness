@@ -26,6 +26,11 @@ ROOT="$PWD"
 CONTAINER="${MT_ALERT_SINK_CONTAINER:-dsh-alert-sink}"
 SINK_IMAGE="${MT_ALERT_SINK_IMAGE:-node:22-bookworm-slim}"
 SINK_NETWORK="${MT_ALERT_SINK_NETWORK:-capex-ai-lab_ops}"
+# 固定的 MAC。Docker 结束点上的 MAC 不跟着 IP 变，而重建会重新分配 IP —— 实测
+# 出现过接收器与 Alertmanager 在同一张网络上 MAC 完全相同（都是 02:42:ac:19:00:02），
+# 网桥因此分不清两台：Alertmanager 的邻居表里接收器永远是 0x0（incomplete），
+# 表现为 "no route to host"，而告警看着像是发不出去。钉住它，冲突就不会再出现。
+SINK_MAC="${MT_ALERT_SINK_MAC:-02:42:d5:5a:91:10}"
 AM_CONTAINER="${MT_ALERTMANAGER_CONTAINER:-capex-ai-lab-alertmanager-1}"
 AM_CONFIG="${MT_ALERTMANAGER_CONFIG:-/home/capex-ai-lab/deploy/private/alertmanager/alertmanager.yml}"
 DATA_DIR="$ROOT/state/alerts"
@@ -46,13 +51,44 @@ case "$command" in
     chmod 640 "$LOG_FILE" 2>/dev/null || true
     echo "==> 重建接收器容器 $CONTAINER（网络 $SINK_NETWORK）"
     docker rm -f "$CONTAINER" >/dev/null 2>&1
-    docker run -d --name "$CONTAINER" --restart unless-stopped --network "$SINK_NETWORK" \
+    docker run -d --name "$CONTAINER" --restart unless-stopped --network "$SINK_NETWORK" --mac-address "$SINK_MAC" \
       -v "$ROOT/alerts/sink.js:/sink.js:ro" \
       -v "$DATA_DIR:/data" \
       --entrypoint node "$SINK_IMAGE" /sink.js >/dev/null
     sleep 4
     echo "  $(docker ps --filter "name=$CONTAINER" --format '{{.Names}}  {{.Status}}')"
     echo "  日志: $(docker logs "$CONTAINER" 2>&1 | tail -1)"
+    # 重建会换掉容器 IP。Alertmanager 可能还留着旧邻居表项，表现为它那边报
+    # "no route to host" —— 看起来是告警发不出去，其实是收件人换了地址。
+    # 它是别的栈的容器，所以先探一次，必要时重启它，并把做了什么说清楚。
+    probe_sink() {
+      docker exec "$AM_CONTAINER" wget -q -O - --post-data='{"alerts":[]}' \
+        --header='Content-Type: application/json' "http://${CONTAINER}:9110/alert" >/dev/null 2>&1
+    }
+    # MAC 撞车时，提示语要指向真正的原因，而不是让人去猜网络。
+    CLASH="$(docker network inspect "$SINK_NETWORK" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr ' ' '\n' | while read -r name; do
+      [ -n "$name" ] || continue
+      mac="$(docker inspect "$name" --format "{{index .NetworkSettings.Networks \"$SINK_NETWORK\"}}" 2>/dev/null | grep -o 'mac=[0-9a-f:]*' | cut -d= -f2)"
+      [ "$mac" = "$SINK_MAC" ] && [ "$name" != "$CONTAINER" ] && echo "$name"
+    done)"
+    if [ -n "$CLASH" ]; then
+      echo "  ⚠ 网络上还有别的容器用同一个 MAC $SINK_MAC:$CLASH —— 两台会互相抢包" >&2
+    fi
+    if probe_sink; then
+      echo "  Alertmanager 能投递到接收器"
+    else
+      echo "  Alertmanager 连不上重建后的接收器（多半是旧邻居表项），重启它"
+      docker restart "$AM_CONTAINER" >/dev/null 2>&1
+      for _ in $(seq 1 20); do
+        sleep 2
+        probe_sink && break
+      done
+      if probe_sink; then
+        echo "  已恢复：Alertmanager 能投递到接收器"
+      else
+        echo "  ⚠ 仍然连不上：确认 $AM_CONTAINER 与接收器在同一张网络（当前 $SINK_NETWORK）" >&2
+      fi
+    fi
     ;;
 
   wire)
@@ -122,8 +158,24 @@ PY
     after="$(wc -l < "$LOG_FILE")"
     echo "  投递后落盘条目: $after"
     if [ "$after" -gt "$before" ]; then
-      echo "  链路打通 ✓  最新一条:"
-      tail -1 "$LOG_FILE" | sed 's/^/    /'
+      # 只看"条数变多"不够：接收器曾把 Alertmanager 的载荷当成单条告警解析，
+      # 记录里只剩 receivedAt 与 status，告警名/租户/摘要全丢 —— 条数照样增加。
+      # 所以这里断言"新落盘的记录里带着本次的告警名"。
+      NAMED="$(tail -n +"$((before + 1))" "$LOG_FILE" | python3 -c '
+import json
+import sys
+want = sys.argv[1]
+names = [json.loads(line).get("name") for line in sys.stdin if line.strip()]
+print("yes" if want in names else "no")
+' "DshDeliveryCheck-$stamp")"
+      if [ "$NAMED" = "yes" ]; then
+        echo "  链路打通 ✓  最新一条:"
+        tail -1 "$LOG_FILE" | sed 's/^/    /'
+      else
+        echo "  ✗ 有新条目但没带本次告警名 —— 接收器丢掉了告警内容:"
+        tail -n +"$((before + 1))" "$LOG_FILE" | sed 's/^/    /'
+        exit 1
+      fi
     else
       echo "  ✗ 没有新条目；看接收器与 Alertmanager 的日志:"
       docker logs "$CONTAINER" 2>&1 | tail -3 | sed 's/^/    /'

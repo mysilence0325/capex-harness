@@ -30,11 +30,14 @@ const PORT = Number(process.env.MT_ALERT_SINK_PORT ?? 9110)
  * purpose — a log nobody parses is worse than a smaller one somebody does.
  *
  * @param alert - one entry from the webhook body.
+ * @param groupKey - the payload's group key, so repeated notifications for one group
+ *   can be recognised as the same event.
  * @returns the record to append.
  */
-function record(alert) {
+function record(alert, groupKey) {
   return {
     receivedAt: new Date().toISOString(),
+    groupKey,
     status: alert?.status,
     name: alert?.labels?.alertname,
     severity: alert?.labels?.severity,
@@ -45,6 +48,27 @@ function record(alert) {
     summary: alert?.annotations?.summary,
     description: alert?.annotations?.description,
   }
+}
+
+/**
+ * The alerts in one webhook body.
+ *
+ * Alertmanager posts `{version, groupKey, status, alerts: [...]}`, one entry per alert
+ * in the group. Reading the body itself as a single alert - which is what this did -
+ * records only its `status` and loses the name, tenant and summary of every alert:
+ * 114 of the first 115 records had no name at all. A bare alert object and a bare
+ * array are still accepted, because `bin/mt.sh alert-sink test` and any other sender
+ * may post either.
+ *
+ * @param parsed - the JSON body of the request.
+ * @returns the alert entries to record.
+ */
+function alertsIn(parsed) {
+  if (Array.isArray(parsed)) return parsed.map((alert) => ({ alert, groupKey: undefined }))
+  if (Array.isArray(parsed?.alerts)) {
+    return parsed.alerts.map((alert) => ({ alert, groupKey: parsed.groupKey }))
+  }
+  return [{ alert: parsed, groupKey: undefined }]
 }
 
 const server = http.createServer((req, res) => {
@@ -59,9 +83,8 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     try {
       const parsed = JSON.parse(body)
-      const list = Array.isArray(parsed) ? parsed : [parsed]
-      for (const alert of list) {
-        const line = JSON.stringify(record(alert))
+      for (const { alert, groupKey } of alertsIn(parsed)) {
+        const line = JSON.stringify(record(alert, groupKey))
         fs.appendFileSync(FILE, `${line}\n`)
         // Also on stdout, so `docker logs` shows alerts as they arrive.
         console.log(`ALERT ${line}`)
