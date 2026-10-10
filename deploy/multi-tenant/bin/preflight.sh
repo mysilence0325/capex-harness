@@ -54,17 +54,14 @@ glibc="$(ldd --version 2>/dev/null | head -1 | awk '{print $NF}')"
 
 head_ "资源"
 ok "CPU $(nproc) 核"
-if command -v free >/dev/null 2>&1; then
-  MEM="$(free -m 2>/dev/null | awk '/Mem:/{print $7}')"
-  if [ -z "$MEM" ]; then
-    warn "读不出可用内存（free 的输出不认识）"
-  elif [ "$MEM" -ge 2048 ]; then
-    ok "可用内存 ${MEM} MB"
-  else
-    warn "可用内存仅 ${MEM} MB（每个租户常驻约 100 MB，限额另算）"
-  fi
+# 直接读 /proc/meminfo：不依赖 procps，也不会被本地化的 free 表头影响。
+MEM="$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)"
+if [ -z "$MEM" ]; then
+  warn "读不出可用内存（/proc/meminfo 里没有 MemAvailable）"
+elif [ "$MEM" -ge 2048 ]; then
+  ok "可用内存 ${MEM} MB"
 else
-  warn "没有 free（procps 未安装）：内存无法判定 —— apt install procps"
+  warn "可用内存仅 ${MEM} MB（每个租户常驻约 100 MB，限额另算）"
 fi
 DF="$(df -h / | awk 'NR==2{print $4" / "$2"（已用 "$5"）"}')"
 ok "根分区 $DF"
@@ -211,9 +208,14 @@ elif [ "$LL_ABI" != 0 ]; then
 fi
 
 head_ "宿主工具（部署脚本要用）"
-for tool in python3 curl openssl nsenter tc ss; do
+for tool in python3 openssl nsenter tc ss; do
   command -v "$tool" >/dev/null 2>&1 && ok "$tool" || warn "缺少 $tool"
 done
+if command -v curl >/dev/null 2>&1; then
+  ok "curl（部署阶段的 doctor/acceptance 用它做检查）"
+else
+  warn "没有 curl：环境测试不需要（脚本用 python3），但部署阶段的 doctor/acceptance 会用到 —— 到那一步我们改成走容器或 python3"
+fi
 if command -v python3 >/dev/null 2>&1; then
   PYV="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))' 2>/dev/null)"
   case "$PYV" in
@@ -224,11 +226,13 @@ fi
 if command -v firewall-cmd >/dev/null 2>&1; then
   ok "firewalld 已安装（隔离脚本用它）"
 elif command -v nft >/dev/null 2>&1 || command -v ufw >/dev/null 2>&1; then
-  warn "没有 firewalld（conf：Ubuntu 默认是 nftables/ufw）——隔离规则要装 firewalld 或改写成 nft"
+  warn "没有 firewalld（Ubuntu 默认是 nftables/ufw）：不需要装 —— 隔离规则改用 nft/iptables 即可（Docker 本身就依赖 iptables，必然在位）"
 else
-  warn "既没有 firewalld 也没有 nft/ufw：租户到宿主端口的隔离没有落点"
+  warn "既没有 firewalld 也没有 nft/ufw/iptables：租户到宿主端口的隔离没有落点"
 fi
-command -v xfs_quota >/dev/null 2>&1 && ok "xfs_quota（磁盘配额）" || warn "缺少 xfs_quota：磁盘配额不可用（装 xfsprogs，且数据盘要 XFS + prjquota）"
+command -v iptables >/dev/null 2>&1 && ok "iptables（隔离规则可以落在它上面）"
+command -v xfs_quota >/dev/null 2>&1 && ok "xfs_quota（磁盘配额）" \
+  || warn "缺少 xfs_quota：只影响磁盘配额（不影响能不能跑）；配额可延后，或给租户数据单独做 XFS + prjquota 卷"
 
 head_ "文件系统与配额能力"
 FS="$(stat -fc %T / 2>/dev/null)"
@@ -245,7 +249,21 @@ head_ "出网"
 # 一律先试 IPv4：有 AAAA 记录但没有 IPv6 路由的机器，直接连主机名会去走 IPv6 而失败，
 # 那种失败不代表"没有网络"。
 reachable() {
+  # 优先 python3（Ubuntu 自带，局域网装不了 curl 也有），curl 只是备选。
   local url="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$url" <<'PY' >/dev/null 2>&1 && return 0
+import sys, urllib.request, urllib.error
+request = urllib.request.Request(sys.argv[1], method='GET')
+try:
+    urllib.request.urlopen(request, timeout=8)
+except urllib.error.HTTPError:
+    pass  # 401/404 也说明连得上：我们要的是可达性，不是成功
+except Exception:
+    sys.exit(1)
+PY
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
   curl -sS -4 -o /dev/null -m 8 --connect-timeout 8 "$url" >/dev/null 2>&1 && return 0
   curl -sS    -o /dev/null -m 8 --connect-timeout 8 "$url" >/dev/null 2>&1 && return 0
   return 1
