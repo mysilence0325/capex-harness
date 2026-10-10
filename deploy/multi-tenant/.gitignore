@@ -17,7 +17,11 @@ __pycache__/
 
 # 构建与打包产物
 build-local.log
-image-overlay.tar.gzimage-overlay/
+build-image.log
+image-overlay-*.tar.gz
+# 这两条原来粘成了一行（`image-overlay.tar.gzimage-overlay/`），于是 image-overlay/ 从来没被忽略过
+image-overlay.tar.gz
+image-overlay/
 
 # 验收脚本读的口令文件：不进仓库，也不放在 state/（那个目录会进备份）
 .acceptance-credentials.json

@@ -114,24 +114,28 @@ bin/model-check.sh --tenant alpha --user alice --password <pw> --model deepseek-
 
 默认的 `DSH_IMAGE` 是 npm 发行版。要让部署跑**你改过的源码**，把本地构建产物做成覆盖层叠到基础镜像上：
 
+两条脚本，一个在源码检出上跑，一个在部署机上跑（原本七步手工流程，容易漏步也没留证据）：
+
 ```bash
-# ① 源码检出里：构建三个面（宿主 lib、客户端 bundle、Web dist）
-pnpm run build:lib && pnpm run build:web        # 或 Windows 上的 build-dsh.ps1
+# ① 源码检出（Windows）：构建三个面 → 过浏览器下限门禁 → 打覆盖层 → 打包
+.\deploy\multi-tenant\build-image.ps1
+#    输出：image-overlay-<UTC 时间戳>.tar.gz 的路径与 sha256，以及下一步命令
 
-# ② 生成覆盖层（目录结构 = 容器内安装路径）
-node deploy/multi-tenant/bin/make-image-overlay.mjs --src . --out image-overlay
-tar -czf image-overlay.tar.gz -C image-overlay .
-
-# ③ 上传到部署机并发布镜像
-scp image-overlay.tar.gz root@<主机>:/tmp/
-ssh root@<主机> 'cd /home/dsh-mt && bin/mt.sh publish-image "" /tmp/image-overlay.tar.gz'
-
-# ④ 切换租户到新镜像
-ssh root@<主机> 'cd /home/dsh-mt && bin/mt.sh up'
+# ② 部署机：发布 → 切换租户 → 巡检 → 核对运行中的前端 → 冒烟
+scp image-overlay-<时间戳>.tar.gz root@<主机>:/tmp/
+ssh root@<主机> 'cd /home/dsh-mt && bin/publish-and-verify.sh /tmp/image-overlay-<时间戳>.tar.gz --switch --mock'
 ```
 
-`publish-image.sh` 会在构建后**核对镜像内的 `index.html` 哈希与覆盖层一致**，不一致直接失败——
-避免出现"以为部署了新代码、其实没有"。
+`build-image.ps1` 里的第 2 步（`verify-client-browser-floor`）扫描**真正发出去的字节**
+（`packages/client/*/lib/client*.js`、`packages/client/web/lib/**`、`apps/web/dist/**`），
+报告"多少浏览器产物与内嵌载荷满足浏览器下限"——这是"这份 dist 能在老 Chromium 上跑"的直接证据。
+`publish-image.sh` 随后**核对镜像内的 `index.html` 哈希与覆盖层一致**，不一致直接失败；
+`--switch` 再核对一次**运行中的租户容器里**的哈希，避免"以为部署了新代码、其实没有"。
+
+`--mock` 用仓库自带的假模型（OpenAI 兼容、真流式，回复固定带 `MULTITENANT-OK`）在 `mt-net` 上跑一次
+`bin/dsh-smoke.sh`：它证明"这个镜像里的 DSH 能起来、能跑完一条 agent 任务、回答真的来自模型、会话落盘"。
+内网端点可达的机器上换成 `--smoke http://15.11.40.44:3100 <key> deepseek-v4-flash --expect <词>` 即可，
+脚本默认用 `--network host`，容器直接走宿主网络。
 
 刻意不做的事：原生插件（`build:native-system`）产出的是构建机的 `.node`，不能跨平台塞进 Linux 容器；
 Electron 桌面包与 Web 部署无关。两者都不影响 Web GUI。

@@ -140,6 +140,10 @@ cmd_up() {
     echo "==> 本节点是 ${this_node}：运行时由节点代理上报（在控制面用 bin/mt.sh runtimes 查看）"
   fi
   cmd_wait
+  # 限速是运行时状态，容器一重建就没了 —— 切镜像的 up 正是这种情况，而重放原先只写在
+  # cmd_add 里，于是每次 up 之后限速都静默消失（doctor 的限速检查抓到过）。放在"等就绪"
+  # 之后：这时容器的 netns 才存在，nsenter/tc 才进得去。失败只提示，不让 up 半途而废。
+  bash bin/bandwidth.sh apply || echo "    !! 网络限速未恢复，执行 bin/mt.sh bandwidth apply 查看"
   cmd_url
 }
 
