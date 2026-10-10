@@ -7,8 +7,9 @@
 # 直接说出是哪种协议、有哪些模型，并打印对应的 model.patch.yml 片段。
 #
 # 用法：
-#   bin/model-probe.sh <baseURL> [apiKey]
+#   bin/model-probe.sh <baseURL> [apiKey] [模型id]
 #   bin/model-probe.sh http://15.11.40.44:3100 sk-xxxx
+#   bin/model-probe.sh http://15.11.40.44:3100 sk-xxxx deepseek-v4-flash
 #
 # 只用 curl。判定必须带 key：像 api.deepseek.com 这类网关**先鉴权再路由**，不带 key 时
 # 任何路径都回 401，光看状态码会把每条路径都判成"存在"（这个假阳性我实测踩过）。
@@ -82,6 +83,64 @@ done
 
 echo
 echo "== 结论与配置"
+echo
+echo "-- DSH 除了"能对话"之外还依赖的能力"
+# 1) 先定一个对话模型：显式给了就用它，否则从 /v1/models 里挑第一个看着像对话模型的 id。
+#    向量与重排模型（bge-*、embed、rerank）不是对话模型，挑中它们会得到 400/404，
+#    那不是"端点不行"，是挑错了 model。
+MODEL="${3:-}"
+if [ -z "$MODEL" ]; then
+  MODEL="$(printf '%s' "$LIST" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    doc = json.loads(raw)
+except Exception:
+    sys.exit(0)
+items = doc.get("data") or doc.get("models") or []
+if isinstance(items, dict):
+    items = [{"id": k} for k in items]
+for item in items:
+    mid = (item.get("id") if isinstance(item, dict) else str(item)) or ""
+    low = mid.lower()
+    if any(bad in low for bad in ("bge", "embed", "rerank", "reranker")):
+        continue
+    print(mid)
+    break
+' 2>/dev/null)"
+fi
+if [ -z "$MODEL" ]; then
+  echo "  ! 没能自动挑出对话模型（列表读不出来）：把模型 id 作为第三个参数传进来重跑"
+  echo "    例：bin/model-probe.sh $BASE <apiKey> deepseek-v4-flash"
+else
+  echo "  用来测的对话模型 id：$MODEL"
+  chat() { curl -sS -m 25 -H "Authorization: Bearer $KEY" -H 'content-type: application/json' -X POST "$BASE/v1/chat/completions" -d "$1" 2>/dev/null; }
+
+  # 2) 普通调用：任何 OpenAI 兼容端点都该过，过不了说明模型 id 或端点不对。
+  PLAIN="$(chat "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}")"
+  case "$PLAIN" in
+    *'"choices"'*) echo "  ✓ 普通对话调用可用" ;;
+    *)             echo "  ✗ 普通对话调用失败：$(printf '%s' "$PLAIN" | head -c 200)" ;;
+  esac
+
+  # 3) 流式：DSH 全程用 SSE 流式。网关把 stream 当摆设的话，这里只有一次性 JSON。
+  STREAM="$(curl -sS -m 25 -N -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+    -X POST "$BASE/v1/chat/completions" \
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8,\"stream\":true}" 2>/dev/null | head -c 300)"
+  case "$STREAM" in
+    *"data:"*) echo "  ✓ 流式（SSE）可用" ;;
+    *)         echo "  ✗ 流式拿不到 SSE 帧（DSH 会报错）：$(printf '%s' "$STREAM" | head -c 160)" ;;
+  esac
+
+  # 4) 函数调用：DSH 的工具调用全靠它；网关不支持 tools 时 agent 只能聊天。
+  TOOLS='{"model":"'"$MODEL"'","messages":[{"role":"user","content":"调用 probe_tool，参数 x=1"}],"max_tokens":64,"tools":[{"type":"function","function":{"name":"probe_tool","description":"probe","parameters":{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}}}],"tool_choice":"auto"}'
+  CALLED="$(chat "$TOOLS")"
+  case "$CALLED" in
+    *'"tool_calls"'*) echo "  ✓ 函数调用（tools）可用 —— DSH 的 agent 循环能跑" ;;
+    *)                echo "  ✗ 没看到 tool_calls：$(printf '%s' "$CALLED" | head -c 200)" ;;
+  esac
+fi
+
 cat <<'TXT'
   若 /v1/chat/completions 存在 → OpenAI 兼容，model.patch.yml 用：
       - id: llm-pi-ai
