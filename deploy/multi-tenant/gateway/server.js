@@ -1381,6 +1381,77 @@ async function adminAction(body, actor) {
     return { ok: true, password, message: `${id}/${user} 的密码已重置，该用户已登录的会话同时失效` }
   }
 
+  // Adding a user to an existing tenant. The tenant is the isolation unit and an
+  // account is only an identity inside it, so this touches the registry and nothing
+  // else: no container is created and no runtime restarts, because every user of a
+  // tenant shares that tenant's one DSH instance.
+  if (action === 'adduser') {
+    const user = typeof body?.user === 'string' ? body.user : ''
+    if (!USER_PATTERN.test(user)) return { ok: false, error: '用户名只能包含字母、数字、点、下划线和短横线' }
+    const password = crypto.randomBytes(9).toString('base64url')
+    let problem
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
+        if (tenant === undefined) {
+          problem = `没有租户 ${id}`
+          return
+        }
+        if ((tenant.users ?? []).some((entry) => entry.name === user)) {
+          problem = `租户 ${id} 已经有用户 ${user}`
+          return
+        }
+        tenant.users = [...(tenant.users ?? []), { name: user, passwordHash: hashPassword(password) }]
+      })
+    } catch (error) {
+      admin.audit({ action: 'adduser', tenant: id, user, result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
+    }
+    if (problem !== undefined) return { ok: false, error: problem }
+    admin.audit({ action: 'adduser', tenant: id, user, result: 'registry-written' })
+    const clash = [...tenants.values()].find((entry) => entry.id !== id
+      && (entry.users ?? []).some((candidate) => candidate.name === user))
+    return {
+      ok: true,
+      password,
+      message: clash === undefined
+        ? `${id}/${user} 已创建，初始密码见下`
+        : `${id}/${user} 已创建；注意 ${clash.id} 下也有同名用户，共用入口按用户名分不出来，让他走该租户的专属入口`,
+    }
+  }
+
+  // Removing a user. The account disappears, so a cookie it authorized matches nobody
+  // at sign-in and is refused. The last user is kept: a tenant nobody can sign into is
+  // what `bin/mt.sh remove` is for, not this.
+  if (action === 'removeuser') {
+    const user = typeof body?.user === 'string' ? body.user : ''
+    let problem
+    try {
+      updateRegistry(CONFIG_FILE, (document) => {
+        const tenant = (document.tenants ?? []).find((entry) => entry.id === id)
+        if (tenant === undefined) {
+          problem = `没有租户 ${id}`
+          return
+        }
+        if (!(tenant.users ?? []).some((entry) => entry.name === user)) {
+          problem = `租户 ${id} 没有用户 ${user}`
+          return
+        }
+        if ((tenant.users ?? []).length <= 1) {
+          problem = `租户 ${id} 只剩这一个用户，删掉就没人能登录；要停用整个租户请用 bin/mt.sh remove`
+          return
+        }
+        tenant.users = (tenant.users ?? []).filter((entry) => entry.name !== user)
+      })
+    } catch (error) {
+      admin.audit({ action: 'removeuser', tenant: id, user, result: 'failed', error: error.message })
+      return { ok: false, error: `写入注册表失败：${error.message}` }
+    }
+    if (problem !== undefined) return { ok: false, error: problem }
+    admin.audit({ action: 'removeuser', tenant: id, user, result: 'registry-written', revoked: true })
+    return { ok: true, message: `已从 ${id} 删除用户 ${user}，他已有的会话同时失效` }
+  }
+
   if (action === 'kick') {
     // Withdraw sessions without changing the password: a lost device is the
     // usual reason, and forcing a new password on the user is not always wanted.

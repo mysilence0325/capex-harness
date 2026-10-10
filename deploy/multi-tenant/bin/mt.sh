@@ -18,6 +18,8 @@
 #   bin/mt.sh list               list tenants from the registry
 #   bin/mt.sh add <id> [...]     add a tenant (see bin/registry.js)
 #   bin/mt.sh passwd <id> <user> set a tenant password (and end that user's sessions)
+#   bin/mt.sh adduser <id> <user>  add a user to an existing tenant (prints the password)
+#   bin/mt.sh removeuser <id> <user>  remove a user (their sessions end with them)
 #   bin/mt.sh kick <id> [user]   end a tenant's or one user's sessions without changing the password
 #   bin/mt.sh limit <id> [--rpm n] [--daily-tokens n] [--clear]   model ceilings for one tenant
 #   bin/mt.sh registry-push      push the images to an internal registry (for offline machines)
@@ -704,6 +706,10 @@ case "${1:-}" in
   list)    node_run bin/registry.js list ;;
   add)     shift; cmd_add "$@" ;;
   passwd)  shift; node_run bin/registry.js passwd "$@"; node_run bin/render.js ;;
+  # 给【已有租户】加用户/删用户：只动注册表。租户是一个隔离单元，它的用户共用
+  # 同一个运行时，所以这里不需要 render、也不需要重启容器。
+  adduser) shift; node_run bin/registry.js adduser "$@" ;;
+  removeuser) shift; node_run bin/registry.js removeuser "$@" ;;
   kick)    shift; node_run bin/registry.js kick "$@" ;;   # 让某租户（或某用户）已登录的会话失效
   limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额
   registry-push) shift; bash bin/registry-push.sh "$@" ;;  # 把镜像推进内网仓库（离线环境用）

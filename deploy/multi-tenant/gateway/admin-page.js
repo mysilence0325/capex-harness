@@ -341,6 +341,10 @@ const notice = (text, bad) => {
   $('notice').className = 'msg ' + (bad ? 'bad' : 'ok')
   $('notice').textContent = text
 }
+// 页内自己的转义函数：这里以前调的是服务端那个同名函数，浏览器里并不存在。
+const escapeHtml = (value) => String(value).replace(/[&<>"']/gu, (character) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[character]))
 // Selection lives outside the render so filtering, paging and the refresh do not
 // drop what the operator ticked. It holds ids rather than rows: a tenant that
 // scrolled out of view stays selected, and one deleted elsewhere is dropped on
@@ -762,6 +766,51 @@ async function loadHistory() {
     since: toInstant('#hist-since'),
     until: toInstant('#hist-until') ?? histCursor,
   })
+  const body = document.querySelector('#history tbody')
+  if (!answer.ok) {
+    body.innerHTML = '<tr><td colspan="5" class="muted">读取失败：' + escapeHtml(answer.error || '') + '</td></tr>'
+    return
+  }
+  // 下拉框选项来自服务端返回的租户清单，这样筛选里也能选到"未归属"（'-'）。
+  if (picker !== null && picker.options.length <= 1 && Array.isArray(answer.tenants)) {
+    for (const id of answer.tenants) {
+      const option = document.createElement('option')
+      option.value = id
+      option.textContent = id === '-' ? '（未归属）' : id
+      picker.appendChild(option)
+    }
+  }
+  const pageLabel = document.querySelector('#hist-page')
+  if (pageLabel !== null) pageLabel.textContent = '第 ' + (histPageIndex + 1) + ' 页'
+  const windowLabel = document.querySelector('#hist-window')
+  if (windowLabel !== null && Number.isInteger(answer.matched)) {
+    windowLabel.textContent = '本页 ' + (answer.entries || []).length + ' 条 · 匹配 ' + answer.matched + ' · 总计 ' + answer.total
+  }
+  const entries = answer.entries || []
+  if (entries.length === 0) {
+    histOldest = undefined
+    body.innerHTML = '<tr><td colspan="5" class="muted">' + (answer.total === 0 ? '还没有记录' : '没有匹配的记录（共 ' + answer.total + ' 条）') + '</td></tr>'
+    return
+  }
+  // 服务端按时间倒序返回，所以本页最旧的一条在末尾 —— 翻下一页就是"从它再往前"。
+  histOldest = entries[entries.length - 1].ts
+  body.innerHTML = entries.map((entry) => {
+    // ISO 截到秒：'2026-10-05T05:37:50.543Z' -> '2026-10-05 05:37:50'
+    const when = typeof entry.ts === 'string' ? entry.ts.slice(0, 19).replace('T', ' ') : ''
+    const who = entry.user ? ' · ' + entry.user : ''
+    const what = entry.node ? '（节点 ' + entry.node + '）' : ''
+    const outcome = entry.error !== undefined ? '失败：' + entry.error
+      : entry.status !== undefined ? 'HTTP ' + entry.status
+        : entry.result !== undefined ? entry.result
+          : entry.note !== undefined ? entry.note : '—'
+    // 两份审计合在一起，所以要说清每条来自哪一边：控制台自己的操作，还是网关
+    // 替租户用户做的事（登录、改密、跨租户拒绝）。
+    const from = entry.source === 'gateway' ? '网关' : '控制台'
+    return '<tr><td class="muted">' + escapeHtml(when) + '</td><td class="muted">' + from + '</td><td>' + escapeHtml(entry.action || '?')
+      + '</td><td>' + escapeHtml(entry.tenant || '-') + what + '</td><td>' + escapeHtml(String(outcome)) + who + '</td></tr>'
+  }).join('')
+}
+
 const post = async (path, body) => {
   const response = await fetch(path, {
     method: 'POST',
@@ -808,7 +857,7 @@ const resetPassword = async (tenant, user) => {
   await load()
 }
 const removeTenant = async (tenant) => {
-  const name = prompt('删除租户 ' + tenant + '。输入租户 id 确认；数据会保留在磁盘上。\\\\n\\\\n如需连数据一起删除，请改在部署机上执行 bin/mt.sh remove ' + tenant + ' --purge')
+  const name = prompt('删除租户 ' + tenant + '。输入租户 id 确认；数据会保留在磁盘上。\\n\\n如需连数据一起删除，请改在部署机上执行 bin/mt.sh remove ' + tenant + ' --purge')
   if (name !== tenant) return
   notice('正在删除 ' + tenant + ' …')
   const answer = await post('api/tenant', { tenant, action: 'remove' })
@@ -818,6 +867,22 @@ const removeTenant = async (tenant) => {
 const kickSessions = async (tenant, user) => {
   if (!confirm('让 ' + tenant + '/' + user + ' 重新登录？已登录的浏览器会立刻失效（密码不变）。')) return
   const answer = await post('api/tenant', { tenant, action: 'kick', user })
+  notice(answer.message || answer.error || '完成', answer.ok !== true)
+  await load()
+}
+// 给已有租户加一个用户。新用户和原有用户共用这个租户的运行时与工作区 ——
+// 租户才是隔离单元，用户只是能登进这个单元的人。
+const addUser = async (tenant) => {
+  const name = prompt('给租户 ' + tenant + ' 加一个用户。\\n\\n用户名可用小写字母、数字、点、下划线和短横线，不能与已有用户重名。')
+  if (name === null || name.trim() === '') return
+  const answer = await post('api/tenant', { tenant, action: 'adduser', user: name.trim() })
+  if (answer.password) notice('已给 ' + tenant + ' 加用户 ' + name.trim() + '。初始密码：' + answer.password + '（只显示这一次，请立即交给该用户）', false)
+  else notice(answer.error || '加用户失败', true)
+  await load()
+}
+const removeUser = async (tenant, user) => {
+  if (!confirm('从 ' + tenant + ' 删除用户 ' + user + '？注册表条目删除后他立刻无法登录，已登录的会话同时失效。')) return
+  const answer = await post('api/tenant', { tenant, action: 'removeuser', user })
   notice(answer.message || answer.error || '完成', answer.ok !== true)
   await load()
 }
@@ -920,17 +985,24 @@ function render() {
       tenant.agent
         ? '<button onclick="action(\\'' + tenant.id + '\\', \\'stop\\')">停止</button>'
         : '<button disabled title="该租户不是通过节点代理注册的，无法在此操作容器">停止</button>',
-      '<button onclick="resetPassword(\\'' + tenant.id + '\\', \\'' + tenant.users[0] + '\\')">改密码</button>',
-      '<button onclick="kickSessions(\\'' + tenant.id + '\\', \\'' + tenant.users[0] + '\\')" title="让已登录的浏览器失效，不改密码">踢下线</button>',
       '<button class="danger" onclick="removeTenant(\\'' + tenant.id + '\\')">删除</button>',
     ].join(' ')
+    // 每个用户一行：租户是【一个】DSH 实例，这些用户共用它，所以按用户的动作要跟着
+    // 用户名走。以前改密码/踢下线只作用于 users[0]，第二个用户在界面上根本够不着。
+    const accounts = (tenant.users || []).map((name) => '<div class="acct">' + escapeHtml(name)
+      + ' <button onclick="resetPassword(\\'' + tenant.id + '\\', \\'' + name + '\\')">改密码</button>'
+      + ' <button onclick="kickSessions(\\'' + tenant.id + '\\', \\'' + name + '\\')" title="让该用户已登录的浏览器失效，不改密码">踢下线</button>'
+      + ((tenant.users || []).length > 1
+        ? ' <button class="danger" onclick="removeUser(\\'' + tenant.id + '\\', \\'' + name + '\\')" title="从注册表删除该用户，他已有的会话同时失效">删</button>' : '')
+      + '</div>').join('')
+      + '<button class="primary" onclick="addUser(\\'' + tenant.id + '\\')">加用户</button>'
     const agentNote = tenant.agent ? '' : ' <span class="tag muted" title="没有节点代理，容器操作需在部署机上执行">无代理</span>'
     return '<tr>' +
-      '<td><input type="checkbox"' + (selected.has(tenant.id) ? ' checked' : '') + ' onclick="toggleSelect(''' + tenant.id + ''', this.checked)"></td>' +
+      '<td><input type="checkbox"' + (selected.has(tenant.id) ? ' checked' : '') + ' onclick="toggleSelect(\\'' + tenant.id + '\\', this.checked)"></td>' +
       '<td><b>' + tenant.id + '</b><br><span class="muted">' + (tenant.title || '') + '</span></td>' +
       '<td>' + tenant.status + agentNote + '</td>' +
       '<td><code>' + entry + '</code></td>' +
-      '<td>' + tenant.users.join(', ') + '</td>' +
+      '<td>' + accounts + '</td>' +
       '<td>' + usageText + limitsText + '</td>' +
       '<td class="row">' + buttons + '</td>' +
       '</tr>'
