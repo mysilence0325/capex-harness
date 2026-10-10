@@ -17,6 +17,10 @@
 #   * 容器限额靠 Docker：cgroup v1 上块设备（磁盘 I/O）限速无效，磁盘只能靠文件系统配额。
 set -uo pipefail
 
+# 一律用 C locale 解析命令输出：`free` 这类命令的**表头会被本地化**——中文环境里
+# 表头是「内存：」，于是 /Mem:/ 匹配不到，读出来就是"读不出可用内存"。
+export LC_ALL=C
+
 MODEL_ENDPOINT="${1:-}"
 OK=0; WARN=0; BAD=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; OK=$((OK + 1)); }
@@ -118,8 +122,16 @@ if [ -n "$PICK_IMAGE" ]; then
     FAIL) warn "bwrap 装了但起不来（user namespace 被禁或受限）" ;;
     *)    warn "镜像里没有 bwrap 且装不上（离线/无源）：把 bubblewrap 打进镜像，或先接受无沙箱" ;;
   esac
+elif command -v bwrap >/dev/null 2>&1; then
+  # 没有镜像时的宿主级代理证据：容器里能不能建命名空间，取决于同一个内核开关。
+  if bwrap --ro-bind / / --dev /dev true >/dev/null 2>&1; then
+    ok "宿主上的 bwrap 可用（宿主级证据；容器里还必须装了 bwrap 才生效）"
+    BWRAP=OK
+  else
+    warn "宿主上的 bwrap 起不来（user namespace 被禁或受限）"
+  fi
 else
-  warn "没有可用探针镜像，跳过 bwrap 实测（bwrap 还需要打进租户镜像，见结论）"
+  warn "没有探针镜像、宿主也没装 bwrap：apt install -y bubblewrap 后重跑即可实测（租户镜像里也要装）"
 fi
 
 head_ "沙箱：Landlock"
@@ -158,6 +170,26 @@ else
     warn "内核 $KMAJ.$KMIN → Landlock ABI $LL_ABI：可用，但只治理该 ABI 暴露的访问类别（partial）"
   fi
 fi
+# 直接问内核 ABI：landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)。
+# 没有任何镜像或 launcher 时，这是唯一的定论来源——比按版本号推断可靠得多。
+SYS_ABI="$(python3 - 2>/dev/null <<'PY' || true
+import ctypes
+SYS = 444  # x86_64 与 aarch64 上 landlock_create_ruleset 的系统调用号
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+ctypes.set_errno(0)
+res = libc.syscall(SYS, None, 0, 1)
+print("abi %d" % res if res >= 0 else "errno %d" % ctypes.get_errno())
+PY
+)"
+SYS_LL=unknown
+case "$SYS_ABI" in
+  # 模式里带空格必须加引号：`abi *)` 是语法错误（case 的模式是单个词）。
+  "abi "*) ok "内核直接报告 Landlock ABI ${SYS_ABI#abi }（syscall 实测）"; SYS_LL=yes ;;
+  # ENOSYS=38（内核没有这个系统调用）／EOPNOTSUPP=95（不支持或未启用）／EINVAL=22（不认这个 flag，即 < 5.13）
+  errno\ 38|errno\ 95|errno\ 22) bad "内核拒绝 Landlock（$SYS_ABI：未编译 / 未启用 / 早于 5.13）"; SYS_LL=no ;;
+  "") : ;;
+  *) warn "Landlock syscall 探测返回意外结果：$SYS_ABI" ;;
+esac
 if [ -n "$PICK_IMAGE" ] && [ "$LL_ABI" != 0 ]; then
   PROBE="$(docker run --rm "$PICK_IMAGE" sh -c '
     L="$(find / -name landlock-run -type f 2>/dev/null | head -1)"
@@ -250,15 +282,22 @@ echo "  推荐的租户权限模式："
 case "${BWRAP:-}" in
   OK) echo "    DSH_PERMISSION_MODE=workspace-write （bwrap 可用：写只允许落工作区）"; APPROVAL="ask" ;;
   *)
-    if [ "${LL_PROBE:-unknown}" = no ]; then
-      echo "    DSH_PERMISSION_MODE=danger-full-access （探针说这个内核没有强制 Landlock：只能以容器为边界，审批设 never）"
+    if [ "${LL_PROBE:-unknown}" = no ] || [ "${SYS_LL:-unknown}" = no ]; then
+      echo "    DSH_PERMISSION_MODE=danger-full-access （实测：这个内核/启动参数下没有可用的 Landlock；只能以容器为边界，审批设 never）"
       APPROVAL="never"
-    elif [ "${LL_ABI:-0}" != 0 ] && [ "${LL_LSM:-unknown}" != no ]; then
-      if [ "${LL_ABI}" = 5 ]; then
-        echo "    DSH_PERMISSION_MODE=workspace-write （Landlock full）"
+    elif [ "${LL_PROBE:-unknown}" = yes ] || [ "${SYS_LL:-unknown}" = yes ]; then
+      # 实测来源优先：有 launcher 探针就用它，否则用 syscall 报的 ABI 号。
+      MEASURED_ABI="${LL_ABI}"
+      case "$SYS_ABI" in abi\ *) MEASURED_ABI="${SYS_ABI#abi }" ;; esac
+      case "$PROBE" in *fully*) MEASURED_ABI=5 ;; esac
+      if [ "${MEASURED_ABI:-0}" -ge 5 ] 2>/dev/null; then
+        echo "    DSH_PERMISSION_MODE=workspace-write （Landlock full，实测 ABI ${MEASURED_ABI}）"
       else
-        echo "    DSH_PERMISSION_MODE=workspace-write （Landlock ABI ${LL_ABI}：可用但只治理部分访问类别）"
+        echo "    DSH_PERMISSION_MODE=workspace-write （Landlock 实测 ABI ${MEASURED_ABI}：可用但只治理部分访问类别）"
       fi
+      APPROVAL="ask"
+    elif [ "${LL_ABI:-0}" != 0 ] && [ "${LL_LSM:-unknown}" != no ]; then
+      echo "    DSH_PERMISSION_MODE=workspace-write （未实测：内核 ${KMAJ}.${KMIN} ⇒ 预计 Landlock ABI ${LL_ABI}，只按版本与 LSM 推断）"
       APPROVAL="ask"
     else
       echo "    DSH_PERMISSION_MODE=danger-full-access （无可用沙箱：只能以容器为边界，审批设 never 免得无人值守挂住）"
