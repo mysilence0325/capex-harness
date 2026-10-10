@@ -98,6 +98,7 @@ An unchanged catalog preserves its tool-definition prefix. Results append to his
 The integration retains the pinned server's browser and tool restrictions.
 
 - Chromium only; Firefox and WebKit are not selectable.
+- An `attach` endpoint has to name a browser the pinned upstream server supports: it uses current Chrome tooling and states that it officially supports Google Chrome and Chrome for Testing only, with the current stable Chrome or newer as its requirement. A vendor browser frozen on an older Chromium (a hardened desktop build reporting Chromium 102, for example) fails inside that server with its own protocol errors. Drive such a host in `launch` mode with a supported engine named by `executablePath`.
 - Startup failure or cancellation rejects Session creation or resume and triggers client cleanup. A disconnected client is not retried; after fixing the cause, create a new Session or unload and resume the existing one.
 - Attachment exclusivity is local to this provider instance. Other processes and browser users can still modify the same pages.
 - The shared resource-server inventory can show inherited server names; it does not grant access to another Session's browser.

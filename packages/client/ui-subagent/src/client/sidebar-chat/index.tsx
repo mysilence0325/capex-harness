@@ -17,8 +17,14 @@ import css from './SidebarChat.module.css'
 /** Stable implementation identity for the Sidebar tab body. */
 export const SUBAGENT_CHAT_ID = '@deepseek-ai/dsh-client-ui-subagent'
 
+/** Protocol host of a chat resource address: the key inside `dsh-resource://`. */
+const SUBAGENT_CHAT_HOST = 'subagentchat'
+
+/** Path scope of a chat resource address. */
+const SUBAGENT_CHAT_SCOPE = 'session'
+
 /** Resource-address prefix for an embedded Session chat. */
-export const SUBAGENT_CHAT_ADDRESS = 'dsh-resource://subagentchat/session/'
+export const SUBAGENT_CHAT_ADDRESS = `dsh-resource://${SUBAGENT_CHAT_HOST}/${SUBAGENT_CHAT_SCOPE}/`
 
 /** Value retained by one live chat resource occurrence. */
 export interface SubagentChatResource {
@@ -58,26 +64,39 @@ export function subagentChatAddress(address: SubagentAddress): string {
 
 /**
  * Parse one canonical Sidebar chat resource address.
+ *
+ * The address is read out of the string rather than through `new URL`, because a
+ * non-special scheme's host parsing is engine-dependent: Chromium 90 reports an
+ * empty `hostname` for `dsh-resource://subagentchat/…` and leaves the whole
+ * remainder in the opaque path, so a URL-based read calls every chat address
+ * malformed on that engine. `protocolOf` reads the host out of the string for
+ * that reason, and `parseFileAddress` splits the `file` protocol's address the
+ * same way.
  * @param value - possible chat resource address.
  * @returns the encoded direct-parent address, or undefined for another or malformed resource.
  */
 export function parseSubagentChatAddress(value: string): SubagentAddress | undefined {
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch (_invalidUrl) {
-    return undefined
-  }
-  if (url.protocol !== 'dsh-resource:' || url.hostname.toLowerCase() !== 'subagentchat') return undefined
-  const parts = url.pathname.split('/').filter(Boolean)
-  if (parts.length !== 2 || parts[0] !== 'session') return undefined
-  const parentSessionId = url.searchParams.get('parent')
-  const mode = url.searchParams.get('mode')
+  const prefix = `dsh-resource://${SUBAGENT_CHAT_HOST}`
+  // The URL parser lower-cases both the scheme and the host, so the canonical
+  // address is matched against that spelling.
+  if (value.slice(0, prefix.length).toLowerCase() !== prefix) return undefined
+  const boundary = value.search(/[?#]/)
+  const path = value.slice(prefix.length, boundary === -1 ? undefined : boundary)
+  const [scope, child, ...extra] = path.split('/').filter(segment => segment !== '')
+  if (!path.startsWith('/') || scope !== SUBAGENT_CHAT_SCOPE || child === undefined || extra.length > 0) return undefined
+  const queryStart = value.indexOf('?')
+  const hash = value.indexOf('#')
+  const query = queryStart === -1 || (hash !== -1 && hash < queryStart)
+    ? ''
+    : value.slice(queryStart + 1, hash === -1 ? undefined : hash)
+  const parameters = new URLSearchParams(query)
+  const parentSessionId = parameters.get('parent')
+  const mode = parameters.get('mode')
   if (parentSessionId === null || parentSessionId === '' || (mode !== 'one-shot' && mode !== 'continuable' && mode !== 'unknown')) {
     return undefined
   }
   try {
-    const childSessionId = decodeURIComponent(parts[1] as string)
+    const childSessionId = decodeURIComponent(child)
     return {
       parentSessionId: parentSessionId as SessionId,
       childSessionId: childSessionId as SessionId,

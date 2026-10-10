@@ -29,6 +29,7 @@ const ADDRESS: SubagentAddress = {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('Sidebar chat address', () => {
@@ -51,8 +52,39 @@ describe('Sidebar chat address', () => {
     'dsh-resource://subagentchat/session/child?parent=&mode=continuable',
     'dsh-resource://subagentchat/session/child?parent=parent&mode=invalid',
     'dsh-resource://subagentchat/session/%?parent=parent&mode=continuable',
+    'dsh-resource://subagentchatx/session/child?parent=parent&mode=continuable',
+    'dsh-resource://subagentchat/session?parent=parent&mode=continuable',
+    'dsh-resource://subagentchat/session/child/extra?parent=parent&mode=continuable',
+    'dsh-resource://subagentchat/session/child',
+    'dsh-resource://subagentchat/session/child#fragment?parent=parent&mode=continuable',
   ])('rejects %s', (address) => {
     expect(parseSubagentChatAddress(address)).toBeUndefined()
+  })
+
+  it('ignores a fragment after the query', () => {
+    expect(parseSubagentChatAddress(`${subagentChatAddress(ADDRESS)}#session-1`)).toEqual(ADDRESS)
+  })
+
+  it('accepts the scheme and host spelling the URL parser would have lower-cased', () => {
+    expect(parseSubagentChatAddress('DSH-RESOURCE://Subagentchat/session/child%231?parent=parent%2Fa&mode=continuable'))
+      .toEqual(ADDRESS)
+  })
+
+  it('reads the address out of the string, not through the engine URL parser', () => {
+    // Chromium 90 reads no host for a non-special scheme: `hostname` is empty and
+    // the whole remainder lands in the opaque path. jsdom's URL parser is
+    // spec-current, so the engine that recorded that behavior is stood in for by
+    // a stand-in that answers the way it did.
+    class HostlessUrl extends URL {
+      override get hostname(): string { return '' }
+      override get pathname(): string { return `//subagentchat/session/${encodeURIComponent(CHILD)}` }
+      override get searchParams(): URLSearchParams { return new URLSearchParams() }
+    }
+    vi.stubGlobal('URL', HostlessUrl)
+
+    const address = subagentChatAddress(ADDRESS)
+    expect(new URL(address).hostname).toBe('')
+    expect(parseSubagentChatAddress(address)).toEqual(ADDRESS)
   })
 })
 

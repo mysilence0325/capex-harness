@@ -16,6 +16,8 @@ Mount [`dsh-browser-use`](../../packages/browser-use/browser-use/README.md) and 
 
 The shared service registers only a name and rejects any second provider, including another instance with the same name. It has no common browser-operation methods, browser resources, or model-controlled selector. Provider configuration in a profile or preset selects launch or attachment for that activation.
 
+An attached browser has to be one the pinned upstream server supports: both providers ship current Chrome tooling, and Chrome DevTools MCP states that it officially supports Google Chrome and Chrome for Testing only, with the current stable Chrome or newer as its requirement. A vendor browser frozen on an older Chromium — a hardened Linux desktop build reporting Chromium 102, for example — is outside that window, where the upstream server fails with its own protocol errors; DSH validates the endpoint's URL form and nothing about the engine. On such a host, drive browser use in `launch` mode with a supported engine named by `executablePath`.
+
 ## Session ownership
 
 A launched browser belongs to the exact live Agent and Session that uses it. Calls across turns reuse that browser. Disposing the Session runtime closes its launched resources; reloading or forking a Session starts fresh browser state. Browser profiles and login state are not restored from the Session log.

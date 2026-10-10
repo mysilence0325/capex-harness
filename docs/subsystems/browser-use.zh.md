@@ -16,6 +16,8 @@
 
 共享服务只注册名称，并拒绝任何第二次提供方注册，包括同名实例。它不包含通用浏览器操作方法、浏览器资源或模型控制的选择器。Profile 或 preset 中的提供方配置为此次激活选择启动或附加模式。
 
+被附加的浏览器必须是所固定上游服务支持的内核：两个提供方都随附当前 Chrome 的工具链，而 Chrome DevTools MCP 明确只官方支持 Google Chrome 与 Chrome for Testing，其要求是当前稳定版 Chrome 或更新。冻结在更旧 Chromium 上的厂商浏览器——例如报告 Chromium 102 的加固 Linux 桌面版——落在该窗口之外，此时上游服务会以它自己的协议错误失败；DSH 只校验 endpoint 的 URL 形式，不校验引擎。在这类主机上，请用 `launch` 模式并通过 `executablePath` 指定受支持的内核来驱动浏览器使用。
+
 ## Session 所有权
 
 启动的浏览器属于使用它的确切实时 Agent 与 Session。跨轮次的调用复用该浏览器。Session 运行时释放时关闭其启动的资源；重新加载或 fork Session 时创建全新浏览器状态。浏览器 profile 和登录状态不会从 Session 日志恢复。

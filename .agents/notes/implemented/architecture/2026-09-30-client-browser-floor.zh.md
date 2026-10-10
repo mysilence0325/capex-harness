@@ -26,6 +26,8 @@ Web 客户端此前假定运行环境是较新的引擎。客户端产物按 ES2
 
 **预留滚动条的面板改为常驻滚动条。**该下限不认识 `scrollbar-gutter`，因此九个面板——对话滚动区、引导对话框、聊天分组主体、工作区与文件列表、任务管理器的页面滚动区与详情滚动区、trajectory 详情主体，以及 agent team 名册——改用 `overflow-y: scroll`：无论内容是否溢出，预留的空间都一样大，内容放得下时主题滚动条不绘制任何东西。另外三条 `scrollbar-gutter: auto` 只是在已经自行声明 overflow 的元素上重述初始值，已删除；composer 浮层规则通过它本就声明的 `overflow-y: auto` 取消对话滚动区的预留。
 
+**资源地址的 host 从字符串里读。**`protocolOf`（资源模型）与 `parseFileAddress`（`file` 协议）都从地址文本里取它，`subagentchat` 协议自己的 `parseSubagentChatAddress` 现在也如此：非特殊 scheme 在 Chromium 90 上按 URL 读会得到 `hostname === ''`，于是它在下限引擎上把每个这类地址都判为畸形；而某个引擎实现了 URL 标准的哪一侧 host 解析，并不是客户端可以依赖的事实。
+
 ## Verification
 
 [compat.client.spec.ts](../../../../packages/client/web/tests/compat.client.spec.ts) 从 realm 中移除每个 API，按顺序固定安装清单，固定幂等性与“全部原生”这一遍，并驱动每个已安装的实现。[client-browser-floor.spec.ts](../../../../scripts/client-browser-floor.spec.ts) 固定解析出的字面量、定义块、回退声明、保持原样的形式，以及两条语料不变量：客户端样式表中每个 `color-mix()` 都能解析；源码语料固定为记录在案的九类被整条丢弃特性的处数——十条 `:has()` 规则、无容器查询、无 `scrollbar-gutter` 声明，无锚点定位声明，以及 `@starting-style`、`field-sizing`、`accent-color`、`text-wrap` 与 `:nth-child(An+B of S)` 各自的处数——因此它们都不会悄悄扩散。

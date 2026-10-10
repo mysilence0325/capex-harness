@@ -25,6 +25,8 @@ import type { CheckOutcome, StepEvents, StepPage } from './steps.ts'
 
 /** Chromium release the floor names, and the default the engine check enforces. */
 const DEFAULT_ENGINE_MAJOR = 90
+/** Floor APIs the floor release ships natively: none, so the floor stays the default. */
+const DEFAULT_ENGINE_NATIVE: readonly string[] = []
 /** Default server URL: the Web profile's own port. */
 const DEFAULT_URL = 'http://127.0.0.1:3080/'
 /** Default DevTools protocol port for the lane's own browser. */
@@ -70,6 +72,8 @@ interface LaneOptions {
   readonly narrowWidth: number
   readonly wideWidth: number
   readonly engineMajor: number
+  /** Comma-separated floor APIs the target engine ships natively; empty on the floor itself. */
+  readonly engineNative: readonly string[]
   readonly targetTimeoutMs: number
   readonly loadSettleMs: number
   readonly settleMs: number
@@ -122,6 +126,17 @@ function intValue(value: string | undefined, fallback: number, name: string): nu
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(name + ' must be a positive integer, got ' + JSON.stringify(value))
   return parsed
+}
+
+/**
+ * Parse one comma-separated option into its names, dropping empty entries.
+ * @param value - raw option value, or undefined when absent.
+ * @param fallback - names to use when the option is absent.
+ * @returns the trimmed names, in the order they were written.
+ */
+function listValue(value: string | undefined, fallback: readonly string[]): readonly string[] {
+  if (value === undefined || value === '') return fallback
+  return value.split(',').map(name => name.trim()).filter(name => name !== '')
 }
 
 /**
@@ -193,6 +208,7 @@ const USAGE = [
   '  --narrow-width <px>      DSH_FLOOR_NARROW_WIDTH    ' + String(DEFAULT_NARROW_WIDTH),
   '  --wide-width <px>        DSH_FLOOR_WIDE_WIDTH      ' + String(DEFAULT_WIDE_WIDTH),
   '  --engine-major <n>       DSH_FLOOR_ENGINE_MAJOR    ' + String(DEFAULT_ENGINE_MAJOR),
+  '  --engine-native <a,b>    DSH_FLOOR_ENGINE_NATIVE   none; floor APIs the target engine ships natively, so a newer engine reads back as installed',
   '  --target-timeout <ms>    DSH_FLOOR_TARGET_TIMEOUT  ' + String(DEFAULT_TARGET_TIMEOUT_MS),
   '  --load-settle <ms>       DSH_FLOOR_LOAD_SETTLE     ' + String(DEFAULT_LOAD_SETTLE_MS),
   '  --settle <ms>            DSH_FLOOR_SETTLE          ' + String(DEFAULT_SETTLE_MS),
@@ -229,6 +245,7 @@ function parseOptions(argv: readonly string[]): LaneOptions | null {
       'narrow-width': { type: 'string' },
       'wide-width': { type: 'string' },
       'engine-major': { type: 'string' },
+      'engine-native': { type: 'string' },
       'target-timeout': { type: 'string' },
       'load-settle': { type: 'string' },
       settle: { type: 'string' },
@@ -268,6 +285,7 @@ function parseOptions(argv: readonly string[]): LaneOptions | null {
     narrowWidth: intValue(optionValue(parsed.values['narrow-width'], 'DSH_FLOOR_NARROW_WIDTH', ''), DEFAULT_NARROW_WIDTH, '--narrow-width'),
     wideWidth: intValue(optionValue(parsed.values['wide-width'], 'DSH_FLOOR_WIDE_WIDTH', ''), DEFAULT_WIDE_WIDTH, '--wide-width'),
     engineMajor: intValue(optionValue(parsed.values['engine-major'], 'DSH_FLOOR_ENGINE_MAJOR', ''), DEFAULT_ENGINE_MAJOR, '--engine-major'),
+    engineNative: listValue(optionValue(parsed.values['engine-native'], 'DSH_FLOOR_ENGINE_NATIVE', ''), DEFAULT_ENGINE_NATIVE),
     targetTimeoutMs: intValue(optionValue(parsed.values['target-timeout'], 'DSH_FLOOR_TARGET_TIMEOUT', ''), DEFAULT_TARGET_TIMEOUT_MS, '--target-timeout'),
     loadSettleMs: intValue(optionValue(parsed.values['load-settle'], 'DSH_FLOOR_LOAD_SETTLE', ''), DEFAULT_LOAD_SETTLE_MS, '--load-settle'),
     settleMs: intValue(optionValue(parsed.values.settle, 'DSH_FLOOR_SETTLE', ''), DEFAULT_SETTLE_MS, '--settle'),
@@ -608,6 +626,7 @@ async function main(argv: readonly string[]): Promise<number> {
       viewportHeight: options.windowHeight,
       settleMs: options.settleMs,
       engineMajor: options.engineMajor,
+      engineNative: options.engineNative,
       events: session.events,
       failOnLogErrors: options.failOnLogErrors,
       floorApisApplicable: options.mode === 'server',

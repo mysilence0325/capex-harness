@@ -98,6 +98,7 @@ kind: "package-reference"
 本集成保留固定版本服务器的浏览器与工具限制。
 
 - 仅支持 Chromium；不可选择 Firefox 或 WebKit。
+- `attach` 的 endpoint 必须是所固定上游服务支持的内核，即当前 Chromium；冻结在更旧 Chromium 上的厂商浏览器（例如报告 Chromium 102 的加固桌面版）会在该服务内部以自己的协议错误失败。在这类主机上请用 `launch` 模式，并通过 `executablePath` 指定受支持的内核。
 - 启动失败或取消会拒绝 Session 创建或恢复，并触发客户端清理。断开的客户端不会重试；修复原因后，创建新 Session，或卸载并恢复已有 Session。
 - 连接独占仅在此提供方实例内有效。其他进程与浏览器用户仍可修改相同页面。
 - 共享资源服务器目录可以显示继承的服务器名称，但不会授予对其他 Session 浏览器的访问权限。

@@ -74,6 +74,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 | `--narrow-width <px>` | `DSH_FLOOR_NARROW_WIDTH` | `520`，每个断点的带标记一侧 |
 | `--wide-width <px>` | `DSH_FLOOR_WIDE_WIDTH` | `2400`，不带标记的一侧 |
 | `--engine-major <n>` | `DSH_FLOOR_ENGINE_MAJOR` | `90` |
+| `--engine-native <a,b>` | `DSH_FLOOR_ENGINE_NATIVE` | 无；目标引擎自带的那些下限 API，它们由引擎自己提供，而不该被读成安装被跳过 |
 | `--target-timeout <ms>` | `DSH_FLOOR_TARGET_TIMEOUT` | `60000` |
 | `--load-settle <ms>` | `DSH_FLOOR_LOAD_SETTLE` | `4000` |
 | `--settle <ms>` | `DSH_FLOOR_SETTLE` | `1200` |
@@ -90,12 +91,28 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 
 输出分三处：stdout 上的 JSON 报告、stderr 上的一行摘要，以及 `--report` 与 `--shots` 里的三张截图，`--pdf-preview` 下是四张，`--model-checks` 下是五张。退出码为 `0` 表示所有检查通过，`1` 表示某项检查失败或某项事实读不到，`2` 表示用法或启动失败。
 
+### 对更高的内核运行
+
+`--engine-major` 与 `--engine-native` 让一次运行读取一个高于下限的内核，这正是部署在加固过的厂商浏览器上所需要的。下限版本自带契约里一个 API 都没有，所以下限运行一个都不声明；更高的内核自带其中一部分，而 shell 会恰好跳过这些安装。
+
+先不带 `--engine-native` 跑一次：失败的 `floor.apis` 读数会列出它读到的引擎自带 API，这份清单就是该选项要传的值。声明里出现 `CLIENT_FLOOR_APIS` 之外的名字，或出现该引擎并不自带的 API，都会让检查失败，而不是悄悄通过。
+
+```sh
+npx tsx scripts/browser-floor-lane/drive.ts \
+  --chrome "/usr/bin/qaxbrowser-safe-stable" \
+  --url "https://<host>:8090/?token=<token>" \
+  --engine-major 102 \
+  --engine-native "<the list the run without the flag read back>"
+```
+
+对更高内核的运行陈述的是该引擎上的事实，它并不移动下限。客户端仍然按 `chrome90` 构建；而拒绝远程调试端口的厂商构建会在第一项检查之前失败，这是该构建的属性，而不是客户端的属性。声明 API 清单只解决 `floor.apis` 一项：断言以下限自身版本为准的那些检查仍会报告该引擎的不同之处——更高的 `Iterator` 全局带有下限记录为缺失的那些静态成员，于是 `floor.iterator-statics` 会指名它们。
+
 ## 每项检查的含义
 
 | 检查 | 读取 | 通过条件 |
 |---|---|---|
 | `floor.engine` | `navigator.userAgent` | 主版本等于 `--engine-major`；换用其他引擎会让其余检查全部失去意义 |
-| `floor.apis` | `CLIENT_FLOOR_APIS` 中每个名字在页面里的解析结果 | 每一项都存在，且没有一项是引擎自带的 `[native code]` 实现，说明 shell 的 compat 安装确实执行过 |
+| `floor.apis` | `CLIENT_FLOOR_APIS` 中每个名字在页面里的解析结果 | 每一项都存在；除 `--engine-native` 声明的那些之外，没有一项是引擎自带的 `[native code]` 实现，说明引擎缺少的每一项都由 shell 的 compat 安装补齐 |
 | `floor.iterator-statics` | `Iterator.from`、`Iterator.prototype.map` | 该全局已安装，且这两个静态成员仍为 undefined，即本下限记录的唯一缺口 |
 | `layout.composer-control-row` | 输入控件行自身的内容盒、它的 `data-narrow`/`data-tight` 标记，以及两组控件的 `column-gap` | 窄视口下该行不超过 560px、带两个标记且间距为 8px；宽视口下该行超过 560px、不带标记且间距为 12px |
 | `layout.header-title-row` | `header` 里标题行的内容盒与其标记 | 窄视口下不超过 540px，且带 `data-narrow`（540）与 `data-tight`（480）；宽视口下两个标记都不带 |
@@ -179,7 +196,7 @@ pnpm dsh web --patch apps/web/tests/agent-team-panel.overlay.yml --no-open --por
 - `preview.pdf` 会抵达 PDF 阅读器自己的 Worker realm，而不只是页面：阅读器只用 `pdf.worker.min.mjs` 构建它的 Worker（[runtime.ts](../../packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts)），因此只覆盖页面 realm 的安装会让文档渲染不出来，检查会报告正文自己的失败行。它还会读取画布自身的像素，因为页面表面可以在一个从未被绘制过的画布上报出就绪——这正是本检查在 Chromium 90 上记录到的读数：一块 400x213 的画布、表面就绪、没有失败行，也没有墨迹。
 - `--pdf-preview` 读的是一份并非通道自己创建的文档。它证明阅读器在这个引擎上能画出这些字节，而不证明模型能写出它们；后者仍是带密钥那一步的读数。
 - 一次带密钥的运行结束后，`floor-lane-probe.txt`、`floor-lane-probe-b.txt` 与 `floor-lane-probe.pdf` 会留在工作区里。通道不会删除它们。
-- 一次绿色运行说明：上述事实是在这台服务器、这个引擎上读到的。它对更新的引擎不作任何断言，那些引擎已由仓库中其他浏览器通道覆盖。
+- 一次绿色运行说明：上述事实是在这台服务器、这个引擎上读到的。它对任何其他引擎都不作断言：一次运行只读 `--engine-major` 指名的那个引擎，而更高内核自带的 API 必须先由 `--engine-native` 声明，它的 `floor.apis` 读数才有意义。
 
 ## 为什么这是手动通道而不是 CI 任务
 

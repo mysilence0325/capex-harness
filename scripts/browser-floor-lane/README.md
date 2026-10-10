@@ -74,6 +74,7 @@ npx tsx scripts/browser-floor-lane/drive.ts \
 | `--narrow-width <px>` | `DSH_FLOOR_NARROW_WIDTH` | `520`, the marked side of every breakpoint |
 | `--wide-width <px>` | `DSH_FLOOR_WIDE_WIDTH` | `2400`, the unmarked side |
 | `--engine-major <n>` | `DSH_FLOOR_ENGINE_MAJOR` | `90` |
+| `--engine-native <a,b>` | `DSH_FLOOR_ENGINE_NATIVE` | none; floor APIs the target engine ships itself, so its own implementations are read as present rather than as a skipped install |
 | `--target-timeout <ms>` | `DSH_FLOOR_TARGET_TIMEOUT` | `60000` |
 | `--load-settle <ms>` | `DSH_FLOOR_LOAD_SETTLE` | `4000` |
 | `--settle <ms>` | `DSH_FLOOR_SETTLE` | `1200` |
@@ -90,12 +91,28 @@ The driver picks the Session itself: it clicks the sidebar rows in order until o
 
 Output goes to three places: the JSON report on stdout, one summary line on stderr, and `--report` plus three screenshots in `--shots`, four under `--pdf-preview` and five under `--model-checks`. The exit code is `0` when every check passed, `1` when a check failed or a fact was unreadable, and `2` on a usage or startup failure.
 
+### Running against a newer engine
+
+`--engine-major` and `--engine-native` read one engine newer than the floor, which is what a deployment on a hardened vendor browser needs. The floor release ships none of the contract's APIs, so a floor run declares none; a newer engine ships some of them, and the shell skips exactly those installs.
+
+Run once without `--engine-native`: the failing `floor.apis` reading lists the engine-native APIs it found, and that list is what the flag takes. A declaration that names an API outside `CLIENT_FLOOR_APIS`, or one the engine does not ship, fails the check rather than passing quietly.
+
+```sh
+npx tsx scripts/browser-floor-lane/drive.ts \
+  --chrome "/usr/bin/qaxbrowser-safe-stable" \
+  --url "https://<host>:8090/?token=<token>" \
+  --engine-major 102 \
+  --engine-native "<the list the run without the flag read back>"
+```
+
+A run against a newer engine states facts about that engine; it does not move the floor. The client still builds for `chrome90`, and a vendor build that refuses a remote debugging port fails before the first check, which is a property of that build rather than of the client. Declaring the API list settles `floor.apis` alone: the checks whose assertion is the floor's own release still report what that engine does differently — a newer `Iterator` global carries the statics the floor records as absent, so `floor.iterator-statics` names them.
+
 ## What each check means
 
 | Check | Reads | Passes when |
 |---|---|---|
 | `floor.engine` | `navigator.userAgent` | the major version is `--engine-major`; any other engine makes every other check vacuous |
-| `floor.apis` | every name in `CLIENT_FLOOR_APIS`, resolved in the page | each one is present and none is the engine's own `[native code]` implementation, so the shell compat entry ran |
+| `floor.apis` | every name in `CLIENT_FLOOR_APIS`, resolved in the page | each one is present; apart from the APIs `--engine-native` declares, none is the engine's own `[native code]` implementation, so the shell compat entry ran for every API the engine lacks |
 | `floor.iterator-statics` | `Iterator.from`, `Iterator.prototype.map` | the global is installed and both statics stay undefined, the one gap the floor records |
 | `layout.composer-control-row` | the control row's own content box, its `data-narrow`/`data-tight` markers, and the control groups' `column-gap` | at the narrow viewport the row is at or below 560px with both markers and an 8px gap; at the wide viewport it is above 560px with neither marker and a 12px gap |
 | `layout.header-title-row` | the `header` title row's content box and its markers | at the narrow viewport it is at or below 540px with `data-narrow` (540) and `data-tight` (480); at the wide viewport it carries neither |
@@ -179,7 +196,7 @@ The launcher owns `--patch` and hands everything from the first option it does n
 - `preview.pdf` reaches the PDF reader's own Worker realm, not only the page: the reader builds its Worker from `pdf.worker.min.mjs` alone ([runtime.ts](../../packages/client/ui-sidebar-documentpreview/src/client/pdf/runtime.ts)), so an install that stops at the page realm leaves the document unrendered and the check reports the body's own failure line. It also reads the canvas's own pixels, because a page surface can report itself ready over a canvas nothing was ever drawn on — which is the reading this check recorded on Chromium 90: one 400x213 canvas, surface ready, no failure line, and no ink.
 - `--pdf-preview` reads a document the lane did not create. It proves the reader paints those bytes on this engine, not that a model can write them, and the keyed step stays the reading for that.
 - `floor-lane-probe.txt`, `floor-lane-probe-b.txt`, and `floor-lane-probe.pdf` stay in the workspace after a keyed run. The lane does not remove them.
-- A green run says the facts above were read from this engine on this server. It says nothing about engines newer than the floor, which the repository's other browser lanes already cover.
+- A green run says the facts above were read from this engine on this server. It says nothing about any other engine: one run reads the engine `--engine-major` names, and a newer engine's own APIs have to be declared through `--engine-native` before its `floor.apis` reading means anything.
 
 ## Why this is a manual lane, not a CI job
 

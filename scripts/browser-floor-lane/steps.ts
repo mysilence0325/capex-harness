@@ -121,6 +121,13 @@ export interface StepOptions {
   readonly settleMs: number
   /** Chromium major version the floor names; another engine makes every check vacuous. */
   readonly engineMajor: number
+  /**
+   * Floor APIs the target engine ships natively, so the shell's install skips
+   * them. Empty on the floor itself, where the release lacks every entry; a
+   * newer engine names the ones its own version ships, because the API check
+   * otherwise reads each native implementation as an install that did not run.
+   */
+  readonly engineNative: readonly string[]
   /** Console errors, exceptions, and log errors the driver captured during the run. */
   readonly events: StepEvents
   /**
@@ -517,13 +524,65 @@ function engineCheck(reading: PageReading, expectedMajor: number): CheckOutcome 
   return { id: 'floor.engine', status: 'pass', detail: 'the page runs Chromium ' + String(major) + ', the release the floor names', evidence }
 }
 
+/** How one engine's floor-API readings answer the contract, split by the three outcomes. */
+export interface FloorApiVerdict {
+  /** Contract names the page did not resolve at all. */
+  readonly missing: readonly string[]
+  /** Contract names the shell's compat install supplied. */
+  readonly installed: readonly string[]
+  /** Contract names the engine's own implementation answered, sorted. */
+  readonly native: readonly string[]
+  /** The declaration the verdict was read against, sorted. */
+  readonly declared: readonly string[]
+  /** What is wrong with the contract's standing; empty means it holds. */
+  readonly faults: readonly string[]
+}
+
 /**
- * Whether every API the floor names is present and was installed rather than native.
+ * Faults in the floor contract's standing on one engine, read out of the probe's
+ * API readings: every API the floor names is present, every one the engine lacks
+ * was installed by the shell, and every one the engine ships natively is declared.
+ * @param readings - the probe payload's `floorApis` entries, one per contract name.
+ * @param declared - floor APIs the target engine ships natively; empty on the floor itself.
+ * @returns the readings split by outcome, and the faults; an empty fault list means the contract holds.
+ */
+export function judgeFloorApis(readings: readonly unknown[], declared: readonly string[]): FloorApiVerdict {
+  const declaredSorted = [...declared].sort()
+  const missing: string[] = []
+  const native: string[] = []
+  const installed: string[] = []
+  const faults: string[] = []
+  const unknownDeclared = declared.filter(name => !CLIENT_FLOOR_APIS.includes(name))
+  if (unknownDeclared.length > 0) faults.push('--engine-native names APIs outside the floor contract: ' + unknownDeclared.join(', '))
+  for (const raw of readings) {
+    if (!isJsonObject(raw)) continue
+    const name = textAt(raw, 'name') ?? '(unnamed)'
+    if (booleanAt(raw, 'present') !== true) missing.push(name)
+    else if (booleanAt(raw, 'native') === true) native.push(name)
+    else installed.push(name)
+  }
+  native.sort()
+  if (missing.length > 0) faults.push('absent: ' + missing.join(', '))
+  // A declaration outside the contract cannot be compared against the readings;
+  // the fault above already says what to fix.
+  if (unknownDeclared.length === 0 && native.join() !== declaredSorted.join()) {
+    faults.push('engine-native APIs read back as [' + native.join(', ') + '] but --engine-native declares ['
+      + declaredSorted.join(', ') + ']; copy the read-back list into the flag (or leave it empty on the floor itself)')
+  }
+  if (readings.length !== CLIENT_FLOOR_APIS.length) {
+    faults.push('read ' + String(readings.length) + ' of ' + String(CLIENT_FLOOR_APIS.length) + ' names')
+  }
+  return { missing, installed, native, declared: declaredSorted, faults }
+}
+
+/**
+ * Whether the floor contract holds on the engine under test.
  * @param reading - probe payload carrying the API readings.
  * @param applicable - whether the floor checks apply to this page.
+ * @param engineNative - floor APIs the target engine ships natively; empty on the floor itself.
  * @returns the check outcome.
  */
-function floorApiCheck(reading: PageReading, applicable: boolean): CheckOutcome {
+function floorApiCheck(reading: PageReading, applicable: boolean, engineNative: readonly string[]): CheckOutcome {
   if (!applicable) {
     return {
       id: 'floor.apis',
@@ -535,32 +594,31 @@ function floorApiCheck(reading: PageReading, applicable: boolean): CheckOutcome 
   if (!Array.isArray(readings)) {
     return { id: 'floor.apis', status: 'fail', detail: 'the probe returned no API readings' }
   }
-  const missing: string[] = []
-  const nativeInstalled: string[] = []
-  const installed: string[] = []
-  for (const raw of readings) {
-    if (!isJsonObject(raw)) continue
-    const name = textAt(raw, 'name') ?? '(unnamed)'
-    if (booleanAt(raw, 'present') !== true) missing.push(name)
-    else if (booleanAt(raw, 'native') === true) nativeInstalled.push(name)
-    else installed.push(name)
+  const verdict = judgeFloorApis(readings, engineNative)
+  const evidence = {
+    expected: CLIENT_FLOOR_APIS.length,
+    read: readings.length,
+    installed: verdict.installed,
+    missing: verdict.missing,
+    native: verdict.native,
+    declared: verdict.declared,
   }
-  const evidence = { expected: CLIENT_FLOOR_APIS.length, read: readings.length, installed, missing, native: nativeInstalled }
-  if (missing.length === 0 && nativeInstalled.length === 0 && readings.length === CLIENT_FLOOR_APIS.length) {
+  if (verdict.faults.length === 0) {
     return {
       id: 'floor.apis',
       status: 'pass',
-      detail: 'all ' + String(CLIENT_FLOOR_APIS.length) + ' floor APIs are present and none of them is the engine native implementation',
+      detail: 'all ' + String(CLIENT_FLOOR_APIS.length) + ' floor APIs are present: '
+        + String(verdict.installed.length) + ' installed by the shell, '
+        + String(verdict.native.length) + ' engine-native as declared',
       evidence,
     }
   }
-  const faults: string[] = []
-  if (missing.length > 0) faults.push('absent: ' + missing.join(', '))
-  if (nativeInstalled.length > 0) faults.push('native, so the install did not run: ' + nativeInstalled.join(', '))
-  if (readings.length !== CLIENT_FLOOR_APIS.length) {
-    faults.push('read ' + String(readings.length) + ' of ' + String(CLIENT_FLOOR_APIS.length) + ' names')
+  return {
+    id: 'floor.apis',
+    status: 'fail',
+    detail: 'the installed floor does not cover the contract: ' + verdict.faults.join('; '),
+    evidence,
   }
-  return { id: 'floor.apis', status: 'fail', detail: 'the installed floor does not cover the contract: ' + faults.join('; '), evidence }
 }
 
 /**
@@ -1259,7 +1317,7 @@ export async function runSteps(page: StepPage, options: StepOptions, runModel?: 
   await setViewport(options.narrowWidth)
   const chatNarrow = await readPage(page)
   outcomes.push(engineCheck(chatNarrow, options.engineMajor))
-  outcomes.push(floorApiCheck(chatNarrow, options.floorApisApplicable))
+  outcomes.push(floorApiCheck(chatNarrow, options.floorApisApplicable, options.engineNative))
   outcomes.push(iteratorGapCheck(chatNarrow, options.floorApisApplicable))
   outcomes.push(composerCheck(chatNarrow, 'narrow'))
   outcomes.push(titleRowCheck(chatNarrow, 'narrow'))
