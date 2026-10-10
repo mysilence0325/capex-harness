@@ -219,7 +219,7 @@ GET  /__mt/registry             列出全部（loopback 免密钥，远端需要
 
 | 维度 | 隔离方式 |
 |---|---|
-| 身份 | 网关按租户校验用户名/密码（scrypt），签发只属于该租户的会话 cookie |
+| 身份 | 网关按租户校验用户名/密码（scrypt），签发只属于该租户的会话 cookie。**一个租户恰好一个账号**：账号是进入这个空间的钥匙，空间本身才是隔离单元 |
 | 会话 | 每个租户一个容器，`DSH_HOME`、`workspace`、`profiles` 都是独立目录 |
 | DSH cookie | DSH 的浏览器 cookie 名由 Host authority 派生；网关对每个租户改写为 `dsh-<租户>.internal`（稳定名字，与运行位置无关），因此 **一个租户的 cookie 在另一个租户那里必然 401** |
 | 凭据 | 每个租户自己的 `.credentials.yaml`（各自随机签名密钥），模型 key 按租户注入 |
@@ -227,6 +227,8 @@ GET  /__mt/registry             列出全部（loopback 免密钥，远端需要
 | 网络 | 租户容器不发布任何端口，只有网关能被访问；出网必须经 `mt-egress-proxy`，私网目标被拒 |
 | 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.2） |
 | 审计 | 网关按请求写 `logs/access.jsonl`（租户、用户、方法、URL、状态码、耗时） |
+
+**设计前提（本部署的产品语义）**：一个租户 = 一个账号 = 一个独占空间。`bin/mt.sh add <租户> --user <用户>` 一次同时创建这两者；要再加一个互相隔离的空间，就再加一个**租户**，而不是给同一个租户加账号。注册表的结构允许一个租户挂多个用户，但那些账号会共用同一个容器、同一份 `home` 与 workspace（即同一个空间），彼此之间没有任何隔离——`bin/mt.sh doctor` 会点名这种偏离。
 
 ## 1.1 多机部署（节点代理 + 节点自建容器）
 

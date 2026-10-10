@@ -50,6 +50,23 @@ fi
 [ -f tenants.json ] && ok "tenants.json 存在" || bad "缺 tenants.json（bin/mt.sh add <租户> 创建）"
 TENANTS="$(grep -o '"id": *"[^"]*"' tenants.json 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')"
 [ -n "$TENANTS" ] && ok "注册了 $(echo "$TENANTS" | wc -l) 个租户: $(echo $TENANTS | tr '\n' ' ')" || bad "tenants.json 里没有租户"
+
+# 这套部署的模型是【一个租户 = 一个账号 = 一个独占空间】。注册表结构允许一个租户挂
+# 多个用户，但那不是这里的模型：多出来的账号会和原账号共用同一个容器、同一份 home 与
+# workspace，也就是共用同一个空间，而"谁做的"只能靠用户名去猜。手工编辑过的注册表
+# 不会报错，只会悄悄变成那个样子，所以这里点名。
+ODD_USERS="$(python3 - tenants.json <<'PY' 2>/dev/null || true
+import json, sys
+doc = json.load(open(sys.argv[1], encoding='utf-8'))
+odd = [f"{t['id']}({len(t.get('users') or [])})" for t in doc.get('tenants', []) if len(t.get('users') or []) != 1]
+print(' '.join(odd))
+PY
+)"
+if [ -n "${ODD_USERS// /}" ]; then
+  warn "有租户的账号数不是 1：$ODD_USERS（本部署是一个租户一个账号；要再加一个隔离空间就新增租户）"
+else
+  ok "每个租户恰好一个账号（一租户＝一账号＝一个独占空间）"
+fi
 [ -f docker-compose.yml ] && ok "docker-compose.yml 已生成" || warn "docker-compose.yml 未生成（bin/mt.sh render）"
 # 控制面只对"住在本机"的租户检查容器与 home；其余租户的运行时在别的节点上，
 # 由本机的节点代理创建，控制面能查的只有它的注册与可达性（下一节）。
