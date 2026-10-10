@@ -167,13 +167,52 @@ if (open < 0 || close < 0) { console.log("页面里没有 script 块"); } else {
   else
     bad "控制台脚本有语法错误，页面在浏览器里不会工作: $SERVED_ERR"
   fi
-  if docker exec mt-gateway node -e 'process.exit(require("/app/admin-page.js").consolePage("/__mt/admin", { user: "doctor", role: "admin" }).includes("adduser") ? 0 : 1)' >/dev/null 2>&1; then
-    ok "  控制台页带按用户操作（加用户/删除用户）"
-  else
-    warn "  控制台页没有用户管理入口（加用户只能走 bin/mt.sh adduser）"
-  fi
 else
   warn "网关没在运行，跳过控制台页面检查"
+fi
+
+# 租户网络本身：MAC 撞车与孤儿网络。
+#
+# Docker 按容器在某网络上的 IP 生成 MAC（02:42:<ip>）并一直保留。IP 会随重建变化，
+# 留下的旧 MAC 让网桥分不清两台容器。实测：mt-dsh-alpha 与模型网关在 mt-net-alpha 上
+# 都是 02:42:0a:62:8e:02，alpha 连不上模型网关（EHOSTUNREACH），另外三个租户却正常。
+head_ "租户网络"
+NET_PREFIX="${MT_NETWORK:-mt-net}"
+# 注册表里的租户是换行分隔的，拼成"两端带空格"的一行才好做子串匹配（多租户时
+# 用空格拼模式会一个都匹配不上，把正常网络全报成孤儿）。
+TENANTS_SPACE=" $(printf '%s' "$TENANTS" | tr '\n' ' ') "
+COLLIDE=""
+ORPHAN=""
+for n in $(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "^${NET_PREFIX}(-|$)" | sort); do
+  PAIRS=""
+  for c in $(docker network inspect "$n" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null); do
+    mac="$(docker inspect "$c" --format "{{with index .NetworkSettings.Networks \"$n\"}}{{.MacAddress}}{{end}}" 2>/dev/null)"
+    [ -n "$mac" ] && PAIRS="${PAIRS}${mac} ${c}"$'\n'
+  done
+  for m in $(printf '%s' "$PAIRS" | awk 'NF{print $1}' | sort | uniq -d); do
+    WHO="$(printf '%s' "$PAIRS" | awk -v m="$m" 'NF && $1 == m {printf "%s ", $2}')"
+    COLLIDE="${COLLIDE}"$'\n'"    ${n}: ${m} 同时属于 ${WHO}"
+  done
+  if [ "$n" != "$NET_PREFIX" ]; then
+    # 用 sed 取后缀：`${n#"$PREFIX"-}` 这种嵌套引号在 CentOS 7 的 bash 4.2 上不成立，
+    # 会把所有租户网络都当成孤儿。
+    SUFFIX="$(printf '%s' "$n" | sed "s/^${NET_PREFIX}-//")"
+    case "$TENANTS_SPACE" in
+      *" $SUFFIX "*) : ;;
+      *) ORPHAN="$ORPHAN $n" ;;
+    esac
+  fi
+done
+if [ -n "$COLLIDE" ]; then
+  bad "同一张网络上有容器 MAC 相同（网桥分不清它们，会随机连不上）：$COLLIDE
+   修法：重建其中一个容器（bin/mt.sh restart 不会换 MAC，需要 docker-compose up -d --force-recreate <service>）"
+else
+  ok "租户网络上没有 MAC 冲突"
+fi
+if [ -n "${ORPHAN// /}" ]; then
+  warn "注册表里没有对应租户的网络还在:$ORPHAN（删租户现在会连带删除；历史残留可 docker network rm）"
+else
+  ok "没有多余的租户网络"
 fi
 
 head_ "防火墙与网络"
@@ -337,17 +376,35 @@ if [ "$MG_STATE" = running ]; then
     bad "  网关没有上游凭据：在 .env 设置 MT_UPSTREAM_API_KEY 后 bin/mt.sh up"
   fi
   # 伪造 key 必须被拒——否则网关成了任何人可用的中转。
-  FORGED="$(docker exec "$(docker ps --filter name=mt-dsh- --format '{{.Names}}' | head -1)" node -e '
+  #
+  # 探测容器按注册表顺序挑一个【在跑的】租户，而不是 docker ps 的第一行：
+  # 新增/删除租户时会有容器正在建或正在删，挑到它就得到 "unreachable"，
+  # 那不是拦截失败，是探针自己踩空了。另外新增租户会重建模型网关（它要接入
+  # 新租户的网络），这几秒里连真请求也会失败，所以失败等 5 秒再判一次。
+  PROBE_CONTAINER=""
+  for t in $TENANTS; do
+    if [ "$(docker inspect "mt-dsh-$t" --format '{{.State.Status}}' 2>/dev/null)" = running ]; then
+      PROBE_CONTAINER="mt-dsh-$t"
+      break
+    fi
+  done
+  FORGED=""
+  for _ in 1 2; do
+    [ -n "$PROBE_CONTAINER" ] || break
+    FORGED="$(docker exec "$PROBE_CONTAINER" node -e '
     fetch("http://mt-model-gateway:8080/anthropic/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": "sk-mt-forged" },
       body: "{}",
     }).then((r) => console.log(String(r.status))).catch(() => console.log("unreachable"))
   ' 2>/dev/null | tr -d '\r')"
+    [ "$FORGED" = "401" ] && break
+    sleep 5
+  done
   if [ "$FORGED" = "401" ]; then
     ok "  未知 key 被拒（401）"
   else
-    bad "  未知 key 未被拒绝：${FORGED:-无响应}"
+    bad "  未知 key 未被拒绝：${FORGED:-无响应}（刚新增过租户时会重建模型网关，那几秒里请求本就不通）"
   fi
 else
   bad "模型网关容器状态: $MG_STATE（bin/mt.sh up）"

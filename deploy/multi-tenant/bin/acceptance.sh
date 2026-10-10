@@ -155,7 +155,7 @@ CONSOLE_HTML="$([ "$CODE" = "skip" ] && echo '' || curl -sS -b "$JAR" http://127
 if [ "$CODE" = "skip" ]; then
   skip "控制台页的按钮与筛选控件"
 else
-  for needle in tenantExport tenantImport hist-tenant hist-q new-user addUser; do
+  for needle in tenantExport tenantImport hist-tenant hist-q new-user; do
     printf '%s' "$CONSOLE_HTML" | grep -q "$needle" && pass "控制台页含 $needle" || fail "控制台页缺 $needle"
   done
 fi
@@ -185,32 +185,49 @@ else:
 done
 fi
 
-# 给已有租户加用户：控制台与命令行以前都没有这个能力（只有建租户时能带第一个用户）。
-# 这里真的加一个、再删掉，并确认它出现在状态里 —— 页面里有个按钮不算验证。
+# 建租户 / 删租户：管理员在控制台上最常做的两件事。真的建一个、等它就绪、再连数据删掉，
+# 并确认注册表、容器、数据目录都回到原样 —— 只看接口返回 ok 不算（删租户曾经返回
+# ok:false 而后台其实删干净了：节点代理先摘掉注册表条目，控制面再读就以为不存在）。
 if [ "$CODE" = "skip" ]; then
-  skip "控制台加用户/删用户（没有管理员会话）"
+  skip "控制台建租户/删租户（没有管理员会话）"
 else
-  PROBE_TENANT="$(printf '%s' "$TENANTS" | awk '{print $1}')"
-  PROBE_USER="acc-probe-$(date -u +%H%M%S)"
-  ADD="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
-    -d "{\"tenant\":\"$PROBE_TENANT\",\"action\":\"adduser\",\"user\":\"$PROBE_USER\"}" \
+  PROBE_TENANT="accpt$(date -u +%H%M%S)"
+  POST_TENANT="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+    -d "{\"tenant\":\"$PROBE_TENANT\",\"action\":\"add\",\"user\":\"acctpuser\",\"title\":\"验收探针\"}" \
     http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null)"
-  printf '%s' "$ADD" | grep -q '"ok":true' && pass "控制台给 $PROBE_TENANT 加用户 $PROBE_USER" \
-    || fail "控制台加用户失败：$(printf '%s' "$ADD" | head -c 200)"
-  printf '%s' "$ADD" | grep -q '"password"' && pass "加用户回执带初始密码" || fail "加用户没有返回初始密码"
-  # 网关每 2 秒热加载一次注册表，所以这里的轮询是必须的：立刻读会读到旧快照，
-  # 把"还没刷新"报成"没加上"。
-  SEEN=no
-  for _ in 1 2 3 4 5 6; do
-    sleep 2
-    curl -sS -b "$JAR" http://127.0.0.1:8099/__mt/admin/api/state 2>/dev/null | grep -q "$PROBE_USER" && { SEEN=yes; break; }
+  printf '%s' "$POST_TENANT" | grep -q '"ok":true' && pass "控制台新建租户 $PROBE_TENANT（带首个用户）" \
+    || fail "控制台新建租户失败：$(printf '%s' "$POST_TENANT" | sed 's/"password":"[^"]*"/"password":"<hidden>"/g' | head -c 200)"
+  printf '%s' "$POST_TENANT" | grep -q '"password"' && pass "新建租户回执带初始密码" || fail "新建租户没有返回初始密码"
+  READY=no
+  for _ in $(seq 1 20); do
+    sleep 3
+    curl -sS -b "$JAR" http://127.0.0.1:8099/__mt/admin/api/state 2>/dev/null | python3 -c "
+import json, sys
+try:
+    rows = json.load(sys.stdin).get('tenants', [])
+except Exception:
+    sys.exit(0)
+row = [t for t in rows if t.get('id') == '$PROBE_TENANT']
+print('ready' if row and row[0].get('ready') else '')
+" | grep -q ready && { READY=yes; break; }
   done
-  [ "$SEEN" = "yes" ] && pass "新用户出现在控制台状态里（网关热加载注册表）" || fail "新用户始终没有出现在控制台状态里"
-  DEL="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
-    -d "{\"tenant\":\"$PROBE_TENANT\",\"action\":\"removeuser\",\"user\":\"$PROBE_USER\"}" \
+  [ "$READY" = "yes" ] && pass "新租户在 60 秒内就绪（容器起来了并被注册）" || fail "新租户始终没有就绪"
+  LONG="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
+    -d "{\"tenant\":\"$PROBE_TENANT\",\"action\":\"remove\",\"purge\":true}" \
     http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null)"
-  printf '%s' "$DEL" | grep -q '"ok":true' && pass "控制台删掉探测用户（自清理）" \
-    || fail "删用户失败，$PROBE_USER 还在注册表里：$(printf '%s' "$DEL" | head -c 200)"
+  printf '%s' "$LONG" | grep -q '"ok":true' && pass "控制台删除租户（含数据）报成功" \
+    || fail "删除租户报了失败，但其实可能已经删掉：$(printf '%s' "$LONG" | head -c 200)"
+  sleep 2
+  [ -d "tenants/$PROBE_TENANT" ] && fail "租户数据目录还在：tenants/$PROBE_TENANT" || pass "租户数据目录已清除"
+  docker ps -a --format '{{.Names}}' | grep -q "mt-dsh-$PROBE_TENANT" && fail "容器残留：mt-dsh-$PROBE_TENANT" || pass "容器已移除"
+  grep -q "\"$PROBE_TENANT\"" tenants.json && fail "注册表里还有该租户" || pass "注册表已摘除"
+  # .env 里的租户键曾留在原地，doctor 会一直报"已删租户的残留键"。
+  PROBE_ENV_PREFIX="MT_$(printf '%s' "$PROBE_TENANT" | tr '[:lower:]' '[:upper:]')_"
+  grep -q "^${PROBE_ENV_PREFIX}" .env && fail "该租户的 .env 键还在：$(grep -c "^${PROBE_ENV_PREFIX}" .env) 行" \
+    || pass "该租户在 .env 里的键已清掉"
+  # 该租户的网络也要一起收掉，否则会留下挂着模型网关端点的孤儿网络。
+  docker network inspect "${MT_NETWORK:-mt-net}-$PROBE_TENANT" >/dev/null 2>&1 \
+    && fail "该租户的网络还在：${MT_NETWORK:-mt-net}-$PROBE_TENANT" || pass "该租户的网络已删除"
 fi
 rm -f "$JAR"
 

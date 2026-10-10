@@ -870,22 +870,6 @@ const kickSessions = async (tenant, user) => {
   notice(answer.message || answer.error || '完成', answer.ok !== true)
   await load()
 }
-// 给已有租户加一个用户。新用户和原有用户共用这个租户的运行时与工作区 ——
-// 租户才是隔离单元，用户只是能登进这个单元的人。
-const addUser = async (tenant) => {
-  const name = prompt('给租户 ' + tenant + ' 加一个用户。\\n\\n用户名可用小写字母、数字、点、下划线和短横线，不能与已有用户重名。')
-  if (name === null || name.trim() === '') return
-  const answer = await post('api/tenant', { tenant, action: 'adduser', user: name.trim() })
-  if (answer.password) notice('已给 ' + tenant + ' 加用户 ' + name.trim() + '。初始密码：' + answer.password + '（只显示这一次，请立即交给该用户）', false)
-  else notice(answer.error || '加用户失败', true)
-  await load()
-}
-const removeUser = async (tenant, user) => {
-  if (!confirm('从 ' + tenant + ' 删除用户 ' + user + '？注册表条目删除后他立刻无法登录，已登录的会话同时失效。')) return
-  const answer = await post('api/tenant', { tenant, action: 'removeuser', user })
-  notice(answer.message || answer.error || '完成', answer.ok !== true)
-  await load()
-}
 const addTenant = async () => {
   const id = $('new-id').value.trim()
   const user = $('new-user').value.trim()
@@ -985,24 +969,17 @@ function render() {
       tenant.agent
         ? '<button onclick="action(\\'' + tenant.id + '\\', \\'stop\\')">停止</button>'
         : '<button disabled title="该租户不是通过节点代理注册的，无法在此操作容器">停止</button>',
+      '<button onclick="resetPassword(\\'' + tenant.id + '\\', \\'' + tenant.users[0] + '\\')">改密码</button>',
+      '<button onclick="kickSessions(\\'' + tenant.id + '\\', \\'' + tenant.users[0] + '\\')" title="让已登录的浏览器失效，不改密码">踢下线</button>',
       '<button class="danger" onclick="removeTenant(\\'' + tenant.id + '\\')">删除</button>',
     ].join(' ')
-    // 每个用户一行：租户是【一个】DSH 实例，这些用户共用它，所以按用户的动作要跟着
-    // 用户名走。以前改密码/踢下线只作用于 users[0]，第二个用户在界面上根本够不着。
-    const accounts = (tenant.users || []).map((name) => '<div class="acct">' + escapeHtml(name)
-      + ' <button onclick="resetPassword(\\'' + tenant.id + '\\', \\'' + name + '\\')">改密码</button>'
-      + ' <button onclick="kickSessions(\\'' + tenant.id + '\\', \\'' + name + '\\')" title="让该用户已登录的浏览器失效，不改密码">踢下线</button>'
-      + ((tenant.users || []).length > 1
-        ? ' <button class="danger" onclick="removeUser(\\'' + tenant.id + '\\', \\'' + name + '\\')" title="从注册表删除该用户，他已有的会话同时失效">删</button>' : '')
-      + '</div>').join('')
-      + '<button class="primary" onclick="addUser(\\'' + tenant.id + '\\')">加用户</button>'
     const agentNote = tenant.agent ? '' : ' <span class="tag muted" title="没有节点代理，容器操作需在部署机上执行">无代理</span>'
     return '<tr>' +
       '<td><input type="checkbox"' + (selected.has(tenant.id) ? ' checked' : '') + ' onclick="toggleSelect(\\'' + tenant.id + '\\', this.checked)"></td>' +
       '<td><b>' + tenant.id + '</b><br><span class="muted">' + (tenant.title || '') + '</span></td>' +
       '<td>' + tenant.status + agentNote + '</td>' +
       '<td><code>' + entry + '</code></td>' +
-      '<td>' + accounts + '</td>' +
+      '<td>' + tenant.users.join(', ') + '</td>' +
       '<td>' + usageText + limitsText + '</td>' +
       '<td class="row">' + buttons + '</td>' +
       '</tr>'

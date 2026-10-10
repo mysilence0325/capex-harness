@@ -18,8 +18,6 @@
 #   bin/mt.sh list               list tenants from the registry
 #   bin/mt.sh add <id> [...]     add a tenant (see bin/registry.js)
 #   bin/mt.sh passwd <id> <user> set a tenant password (and end that user's sessions)
-#   bin/mt.sh adduser <id> <user>  add a user to an existing tenant (prints the password)
-#   bin/mt.sh removeuser <id> <user>  remove a user (their sessions end with them)
 #   bin/mt.sh kick <id> [user]   end a tenant's or one user's sessions without changing the password
 #   bin/mt.sh limit <id> [--rpm n] [--daily-tokens n] [--clear]   model ceilings for one tenant
 #   bin/mt.sh registry-push      push the images to an internal registry (for offline machines)
@@ -557,6 +555,19 @@ cmd_remove() {
   [ -n "$container" ] || container="${MT_CONTAINER_NAME_PREFIX:-mt-}dsh-$id"
 
   node_run bin/registry.js remove "$id" || return 1
+
+  # 该租户在 .env 里的模型凭据键要一起清掉：留着就是"已删租户的残留键"，
+  # doctor 会一直报，而没人会记得手工删。命名规则跟 bin/render.js 的 envKeyFor 一致
+  # （id 全大写、短横线换成下划线）。
+  env_prefix="MT_$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]' | sed 's/-/_/g')_"
+  if grep -q "^${env_prefix}" .env 2>/dev/null; then
+    PRUNE_TMP="$(mktemp)"
+    chmod 600 "$PRUNE_TMP"
+    grep -v "^${env_prefix}" .env > "$PRUNE_TMP" && cat "$PRUNE_TMP" > .env
+    rm -f "$PRUNE_TMP"
+    echo "    已清掉 .env 里该租户的键（${env_prefix}*）"
+  fi
+
   node_run bin/render.js >/dev/null
 
   # 直接按容器名删，不走 compose：重渲染后目标 service 已从 compose 文件里消失。
@@ -568,6 +579,19 @@ cmd_remove() {
     rm -rf "tenants/${id}"
   else
     echo "    数据保留在 tenants/${id}/（要删除加 --purge）"
+  fi
+
+  # 该租户的网络要一起收掉：重新渲染后 compose 不再引用它，但 Docker 不会自己删，
+  # 而模型网关仍接在上面（它接入了每一张租户网络），于是会留下一个没有租户、却挂着
+  # 网关端点的孤儿网络。顺序很重要：必须等容器删掉之后再断网关、再删网络。
+  tenant_net="${MT_NETWORK:-mt-net}-${id}"
+  if docker network inspect "$tenant_net" >/dev/null 2>&1; then
+    docker network disconnect --force "$tenant_net" "${MT_CONTAINER_NAME_PREFIX:-mt-}model-gateway" >/dev/null 2>&1 || true
+    if docker network rm "$tenant_net" >/dev/null 2>&1; then
+      echo "    已删除该租户的网络 ${tenant_net}"
+    else
+      echo "    网络 ${tenant_net} 仍被占用（下次 bin/mt.sh up 会把网关重新接好）"
+    fi
   fi
   echo "    网关会在 2 秒内摘掉该租户，无需重启"
   return 0
@@ -706,10 +730,6 @@ case "${1:-}" in
   list)    node_run bin/registry.js list ;;
   add)     shift; cmd_add "$@" ;;
   passwd)  shift; node_run bin/registry.js passwd "$@"; node_run bin/render.js ;;
-  # 给【已有租户】加用户/删用户：只动注册表。租户是一个隔离单元，它的用户共用
-  # 同一个运行时，所以这里不需要 render、也不需要重启容器。
-  adduser) shift; node_run bin/registry.js adduser "$@" ;;
-  removeuser) shift; node_run bin/registry.js removeuser "$@" ;;
   kick)    shift; node_run bin/registry.js kick "$@" ;;   # 让某租户（或某用户）已登录的会话失效
   limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额
   registry-push) shift; bash bin/registry-push.sh "$@" ;;  # 把镜像推进内网仓库（离线环境用）

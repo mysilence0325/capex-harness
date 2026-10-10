@@ -347,8 +347,6 @@ bin/mt.sh logs alpha               # 看某个租户的运行日志
 bin/mt.sh add delta --user dave    # 开通新租户（一条命令走完全流程，见下）
 bin/mt.sh remove delta             # 摘除租户（保留数据）；--purge 连数据一起删
 bin/mt.sh passwd alpha alice       # 重置密码（会打印新密码）
-bin/mt.sh adduser alpha bob2       # 给已有租户加用户（会打印初始密码）
-bin/mt.sh removeuser alpha bob2    # 删用户（他的会话同时失效）
 bin/mt.sh key alpha sk-xxxx        # 写入该租户的模型 key，然后 bin/mt.sh up
 bin/mt.sh smoke --tenant alpha --user alice --password <pw>   # 隔离性冒烟测试
 bin/mt.sh accept --tenant alpha --user alice --password <pw>  # 端到端验收（含一次真实模型调用）
@@ -494,7 +492,8 @@ bin/mt.sh model        # 渲染 + 应用到所有租户 + 重启
 - **没有租户自助管理**：新增租户由运维执行 `bin/mt.sh add`。
 - **配额是容器级的**（内存/CPU/PID），磁盘配额需要宿主的 project quota 或独立卷。
 - **模型凭据默认不进入租户容器**：真 key 只注入 `mt-model-gateway`，租户拿的是按租户生成的占位 key（见 §0.0 与验收报告 §12）。要按租户单独计费时才用 `bin/mt.sh key <租户> <key>`。
-- **一个租户 = 一个 DSH 实例**：同一租户下的多个用户（`bin/mt.sh adduser`）共用该租户的会话空间、工作区与设置，他们之间没有隔离；隔离单元是租户本身。
+- **一个租户 = 一个账号 = 一个 DSH 实例**：`bin/mt.sh add` 建租户时带的就是它唯一的登录账号。一个团队多人共用一个租户时，他们共用该租户的会话空间、工作区与设置，彼此之间没有隔离——隔离单元是租户本身。
+- **租户容器的 MAC 是固定的**（`bin/render.js` 按租户 id 生成 `02:d5:…`）。Docker 默认按容器 IP 生成 MAC 且 IP 变化后继续沿用，旧 MAC 留在网桥里会造成两台容器在二层互相抢包——实测过某个租户因此完全连不上模型网关，`doctor` 的"租户网络"一节现在会报这种冲突。
 - **宿主的 `ip_forward` 与 `bridge-nf-call-iptables` 已被打开**（实测值均为 1），与本文早期版本"刻意不改"的说法不同。后果是从局域网可以直接访问宿主上其它 stack 已发布的端口（实测 `3080`、`13000`、`18081`、`18082`、`19090`、`19093` 均可达）。这两项是宿主全局设置，`bin/doctor.sh` 会报出事实；关掉 `bridge-nf-call-iptables` 会让租户→宿主的隔离规则失效，所以本部署默认保持开启。
 - **`model.env` 变了必须让 compose 重建容器**（内容参与服务哈希，`bin/mt.sh up` 会重建；只 `docker restart` 不会）。
 

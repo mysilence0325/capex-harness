@@ -8,8 +8,6 @@
  * Usage:
  *   node bin/registry.js list
  *   node bin/registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--no-edge-port] [--password <pw>] [--node <name>]
- *   node bin/registry.js adduser <id> <user> [--password <pw>]
- *   node bin/registry.js removeuser <id> <user>
  *   node bin/registry.js passwd <id> <user> [--password <pw>]
  *   node bin/registry.js kick <id> [user]
  *   node bin/registry.js remove <id>
@@ -17,9 +15,6 @@
  *
  * `add` allocates the internal port and, unless --no-edge-port is given, a
  * dedicated entry port automatically, so bin/mt.sh add needs only an id.
- *
- * `adduser` adds an account to a tenant that already exists. The tenant is the
- * isolation unit: its users share one DSH instance, one home and one workspace.
  */
 
 'use strict'
@@ -178,55 +173,6 @@ switch (command) {
     break
   }
 
-  case 'adduser': {
-    // An account on a tenant that already exists. The tenant is the isolation unit:
-    // its users share one runtime, one home and one workspace, so this changes who
-    // may sign in, not what they reach.
-    const tenant = requireTenant(args[0])
-    const name = args[1]
-    if (!/^[A-Za-z0-9._-]{1,32}$/u.test(name ?? '')) {
-      console.error('usage: registry.js adduser <tenant> <user> [--password <pw>]')
-      process.exit(1)
-    }
-    if (tenant.users.some((entry) => entry.name === name)) {
-      console.error(`tenant ${tenant.id} already has user ${name}`)
-      process.exit(1)
-    }
-    const password = flag(args, 'password') ?? crypto.randomBytes(9).toString('base64url')
-    tenant.users.push({ name, passwordHash: hashPassword(password) })
-    save()
-    console.log(`added user ${name} to tenant ${tenant.id}`)
-    console.log(`  password: ${password}`)
-    const clash = registry.tenants.find((entry) => entry !== tenant
-      && entry.users.some((candidate) => candidate.name === name))
-    if (clash !== undefined) {
-      console.warn(`  warning: user "${name}" also exists in tenant ${clash.id}.`)
-      console.warn(`  The shared login entry resolves the tenant by username, so a shared name`)
-      console.warn(`  must log in through its own dedicated entry (edge port or hostname).`)
-    }
-    break
-  }
-
-  case 'removeuser': {
-    // The last account is kept on purpose: a tenant nobody can sign into is what
-    // `remove` (plus its own two-step confirmation) is for.
-    const tenant = requireTenant(args[0])
-    const name = args[1]
-    if (!tenant.users.some((entry) => entry.name === name)) {
-      console.error(`tenant ${tenant.id} has no user ${String(name)}`)
-      process.exit(1)
-    }
-    if (tenant.users.length <= 1) {
-      console.error(`tenant ${tenant.id} has only one user left; deactivate the tenant with: registry.js remove ${tenant.id}`)
-      process.exit(1)
-    }
-    tenant.users = tenant.users.filter((entry) => entry.name !== name)
-    save()
-    console.log(`removed user ${name} from tenant ${tenant.id}`)
-    console.log('该用户已有的会话随条目一起失效。')
-    break
-  }
-
   case 'passwd': {
     const tenant = requireTenant(args[0])
     const user = tenant.users.find((entry) => entry.name === args[1])
@@ -317,6 +263,6 @@ switch (command) {
   }
 
   default:
-    console.error('usage: registry.js <list|add|adduser|removeuser|passwd|kick|limit|remove|ensure-model-keys> [...]')
+    console.error('usage: registry.js <list|add|passwd|remove> [...]')
     process.exit(2)
 }

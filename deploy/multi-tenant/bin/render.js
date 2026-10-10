@@ -44,6 +44,30 @@ if (tenants.length === 0) {
 const envKeyFor = (tenant, suffix) =>
   `MT_${tenant.id.toUpperCase().replaceAll('-', '_')}_${suffix}`
 
+/**
+ * A tenant container's fixed MAC address.
+ *
+ * Docker derives a container's MAC on a network from the address it was given
+ * (`02:42:` + the IP), and keeps that MAC when the address later changes. The
+ * stale MAC stays in the bridge's forwarding table, so a container that receives
+ * that address next is indistinguishable from it. Measured here: `mt-dsh-alpha`
+ * and the model gateway both held `02:42:0a:62:8e:02` on `mt-net-alpha`, and
+ * alpha could no longer reach the gateway at all (`EHOSTUNREACH`) while the other
+ * three tenants were fine.
+ *
+ * The value is derived from the tenant id and deliberately outside Docker's
+ * generated prefixes (`02:42:0a:62:xx` for 10.98.x.x, `02:42:ac:xx` for 172.x),
+ * so it cannot collide with an automatically assigned one.
+ *
+ * @param tenant - the tenant record.
+ * @returns a locally administered MAC address.
+ */
+function tenantMac(tenant) {
+  const digest = crypto.createHash('sha256').update(tenant.id).digest()
+  const byte = (at) => digest[at].toString(16).padStart(2, '0')
+  return `02:d5:${byte(0)}:${byte(1)}:${byte(2)}:${byte(3)}`
+}
+
 // ---------------------------------------------------------------------------
 // validation
 // ---------------------------------------------------------------------------
@@ -596,6 +620,7 @@ ${seccompTenants().has(tenant.id) ? `
     container_name: ${NAME_PREFIX}dsh-${tenant.id}
     restart: unless-stopped
     networks: [${networkOf(tenant)}]
+    mac_address: ${tenantMac(tenant)}
     # A node agent discovers tenant runtimes by this label, not by container
     # name: an orchestrator renames containers (a Swarm task is
     # <stack>_<service>.<slot>.<id>) while a label survives.
