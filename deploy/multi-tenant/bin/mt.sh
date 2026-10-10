@@ -692,7 +692,7 @@ case "${1:-}" in
   smoke)   shift; cmd_smoke "$@" ;;
   accept)  shift; cmd_accept "$@" ;;
   doctor)  bash bin/doctor.sh ;;
-  isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status）
+  isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status/install-boot）
   register)
     # 不带租户 = 注册全部。以前是打印用法然后退出 0 —— 看起来像成功，
     # 实际什么都没做。我在恢复步骤里正是这么用的，结果注册表留在了已经停掉的

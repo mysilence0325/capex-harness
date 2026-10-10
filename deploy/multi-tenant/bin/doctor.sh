@@ -339,12 +339,25 @@ BRIDGE="$(docker network inspect mt-net --format '{{index .Options "com.docker.n
 if [ -z "$BRIDGE" ] || [ "$BRIDGE" = "<no value>" ]; then
   BRIDGE="br-$(docker network inspect mt-net --format '{{.Id}}' 2>/dev/null | cut -c1-12)"
 fi
-DIRECT_RULES="$(firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep -c 'mt-tenant-isolation' || true)"
-if [ "${DIRECT_RULES:-0}" -ge 2 ]; then
+  # 两个后端都要认：CentOS 上是 firewalld 的 direct 规则，Ubuntu（装不了 firewalld）上是
+  # iptables 专用链。只按 firewalld 判断会在 Ubuntu 上把"已经隔离好了"报成未启用。
+  DIRECT_RULES="$(firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep -c 'mt-tenant-isolation' || true)"
+  # 一律带 -w：iptables 与 firewalld/docker 会抢 xtables 锁，不等就会随机拿到空结果。
+  IPT_RULES="$(iptables -w -S MT_TENANT_ISOLATION 2>/dev/null | grep -c -- "-i " || true)"
+  IPT_JUMPED=no
+  iptables -w -S INPUT 2>/dev/null | grep -q -- "-j MT_TENANT_ISOLATION" && IPT_JUMPED=yes
+  if [ "${DIRECT_RULES:-0}" -lt 2 ] && [ "${IPT_RULES:-0}" -ge 2 ] && [ "$IPT_JUMPED" = yes ]; then
+    ok "隔离规则已生效（iptables 链 MT_TENANT_ISOLATION，${IPT_RULES} 条接口规则）"
+    if [ -f /etc/systemd/system/mt-tenant-isolation.service ]; then
+      ok "  有开机单元：重启后会自动重建（iptables 规则本身重启会丢）"
+    else
+      warn "  没有开机单元：重启后租户又能访问宿主端口（bin/isolate.sh install-boot）"
+    fi
+  elif [ "${DIRECT_RULES:-0}" -ge 2 ]; then
   if firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep 'mt-tenant-isolation' | grep -q -- "-i ${BRIDGE} "; then
     ok "隔离规则已生效，作用于当前网桥 ${BRIDGE}"
     # `iptables -L -n` 不显示 in 接口列，要用 -S 才能看到 -i 参数。
-    if iptables -S INPUT_direct 2>/dev/null | grep -q -- "-i ${BRIDGE}"; then
+    if iptables -w -S INPUT_direct 2>/dev/null | grep -q -- "-i ${BRIDGE}"; then
       ok "  规则已在运行时加载"
     else
       bad "  规则未加载到运行时：firewall-cmd --reload"
@@ -362,9 +375,11 @@ if [ -n "${FIRST_TENANT:-}" ] && [ -n "$LAN_IP" ]; then
   REACHED="$(docker exec -e PROBE_HOST="$LAN_IP" -e PROBE_PORT="${MT_EGRESS_PORT:-3128}" "mt-dsh-${FIRST_TENANT}" node -e '
     const net = require("node:net")
     // 探一个宿主上公开但不属于本部署的端口：既有单租户部署的 3080。
-    const s = net.connect(3080, process.env.PROBE_HOST, () => { console.log("reached"); s.destroy() })
-    s.on("error", () => console.log("blocked"))
-    setTimeout(() => { s.destroy(); console.log("blocked") }, 3000)
+      // 打印一次就退出：留着定时器会再打印一行，比较结果时就变成了两行（实测踩过）。
+      const done = (text) => { console.log(text); process.exit(0) }
+      const s = net.connect(3080, process.env.PROBE_HOST, () => { s.destroy(); done("reached") })
+      s.on("error", () => done("blocked"))
+      setTimeout(() => { s.destroy(); done("blocked") }, 3000)
   ' 2>/dev/null | tr -d '\r')"
   if [ "$REACHED" = blocked ]; then
     ok "  实测 ${FIRST_TENANT}: 访问宿主其它端口被拒"
