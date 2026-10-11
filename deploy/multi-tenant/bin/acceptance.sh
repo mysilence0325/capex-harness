@@ -89,9 +89,19 @@ printf '验收对象: %s（入口 %s）\n租户: %s\n' "$PWD" "$EDGE" "$TENANTS"
 
 # ---------------------------------------------------------------- 部署健康
 head_ "部署健康"
-N="$(docker ps --filter name=mt- --format '{{.Names}}' | wc -l)"
-assert_eq "9" "$N" "9 个部署容器在运行"
-SINK="$(docker ps --filter name=dsh-alert-sink --format '{{.Names}}' | wc -l)"
+# 期望值按配置推导，不写死：容器名前缀是可配的（同机第二套部署、演练会换），租户数
+# 更是随部署而变——写死 9 会在"不是 4 个租户"的机器上误报，而那正是真实部署。
+PREFIX_CFG="$(grep '^MT_CONTAINER_NAME_PREFIX=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+PREFIX_CFG="${PREFIX_CFG:-mt-}"
+PREFIX="$PREFIX_CFG"
+SINK_CFG="$(grep '^MT_ALERT_SINK_CONTAINER=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+SINK_CFG="${SINK_CFG:-dsh-alert-sink}"
+TENANT_COUNT="$(printf '%s' "$TENANTS" | wc -w)"
+# 与租户无关的部署容器：网关、模型网关、出口代理、定时备份、节点代理
+BASE_CONTAINERS=5
+N="$(docker ps --filter "name=^${PREFIX_CFG}" --format '{{.Names}}' | wc -l)"
+assert_eq "$((BASE_CONTAINERS + TENANT_COUNT))" "$N" "$((BASE_CONTAINERS + TENANT_COUNT)) 个部署容器在运行（${BASE_CONTAINERS} 固定 + ${TENANT_COUNT} 租户）"
+SINK="$(docker ps --filter "name=^${SINK_CFG}" --format '{{.Names}}' | wc -l)"
 assert_eq "1" "$SINK" "告警接收器在运行"
 
 for t in $TENANTS; do
@@ -234,7 +244,7 @@ print('ready' if row and row[0].get('ready') else '')
     || fail "删除租户报了失败，但其实可能已经删掉：$(printf '%s' "$LONG" | head -c 200)"
   sleep 2
   [ -d "tenants/$PROBE_TENANT" ] && fail "租户数据目录还在：tenants/$PROBE_TENANT" || pass "租户数据目录已清除"
-  docker ps -a --format '{{.Names}}' | grep -q "mt-dsh-$PROBE_TENANT" && fail "容器残留：mt-dsh-$PROBE_TENANT" || pass "容器已移除"
+  docker ps -a --format '{{.Names}}' | grep -q "${PREFIX}dsh-$PROBE_TENANT" && fail "容器残留：mt-dsh-$PROBE_TENANT" || pass "容器已移除"
   grep -q "\"$PROBE_TENANT\"" tenants.json && fail "注册表里还有该租户" || pass "注册表已摘除"
   # .env 里的租户键曾留在原地，doctor 会一直报"已删租户的残留键"。
   PROBE_ENV_PREFIX="MT_$(printf '%s' "$PROBE_TENANT" | tr '[:lower:]' '[:upper:]')_"
@@ -248,14 +258,41 @@ rm -f "$JAR"
 
 # ---------------------------------------------------------------- 隔离与策略
 head_ "隔离与策略"
-N=0
-for t in $TENANTS; do
-  docker inspect "mt-dsh-$t" --format '{{range .HostConfig.SecurityOpt}}{{.}}{{end}}' 2>/dev/null | grep -q seccomp && N=$((N + 1))
+# 加固策略按租户启用（见 security/README.md）：只有 `MT_SECCOMP_TENANTS` 里列出的租户带那份
+# 追加拒绝的策略，留空则全部用 Docker 默认策略——"先放一个租户看它跑得正常再放开下一个"是刻意的。
+# 所以这里断言"**配了就必须真的生效**"，并把未加固的租户点名报出来：那是选择，但必须看得见。
+SECCOMP_CFG="$(grep '^MT_SECCOMP_TENANTS=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr ',' ' ')"
+ON_PROFILE=""
+for t in $SECCOMP_CFG; do
+  if printf '%s\n' "$TENANTS" | grep -qw "$t"; then
+    ON_PROFILE="$ON_PROFILE $t"
+  else
+    warn_skip="MT_SECCOMP_TENANTS 里的 $t 不在租户注册表里（配置残留，render 会忽略它）"
+    skip "$warn_skip"
+  fi
 done
-assert_eq "$(printf '%s' "$TENANTS" | wc -w)" "$N" "全部租户都应用了 seccomp 策略"
+if [ -z "${ON_PROFILE// /}" ]; then
+  skip "seccomp 加固（MT_SECCOMP_TENANTS 为空：全部租户按设计用 Docker 默认策略）"
+else
+  SEEN=0; MISSING=""
+  for t in $ON_PROFILE; do
+    if docker inspect "${PREFIX_CFG}dsh-$t" --format '{{range .HostConfig.SecurityOpt}}{{.}}{{end}}' 2>/dev/null | grep -q seccomp; then
+      SEEN=$((SEEN + 1))
+    else
+      MISSING="$MISSING $t"
+    fi
+  done
+  assert_eq "$(printf '%s' "$ON_PROFILE" | wc -w)" "$SEEN" "加固列表里的租户都应用了 seccomp 策略"
+  [ -z "${MISSING// /}" ] || fail "这些租户配了加固却没生效：$MISSING（bin/mt.sh up 重新渲染并重建）"
+  STILL_DEFAULT=""
+  for t in $TENANTS; do
+    printf '%s\n' " $ON_PROFILE " | grep -qw "$t" || STILL_DEFAULT="$STILL_DEFAULT $t"
+  done
+  pass "未列入加固列表的租户（按设计用默认策略）：${STILL_DEFAULT:-无}"
+fi
 
 # 租户容器不该能连宿主上的运维端口。
-CAN_REACH="$(docker exec "mt-dsh-$(printf '%s' "$TENANTS" | awk '{print $1}')" sh -c "timeout 4 sh -c 'echo > /dev/tcp/$IP/8099' 2>/dev/null && echo yes || echo no" 2>/dev/null | tr -d '\r')"
+CAN_REACH="$(docker exec "${PREFIX}dsh-$(printf '%s' "$TENANTS" | awk '{print $1}')" sh -c "timeout 4 sh -c 'echo > /dev/tcp/$IP/8099' 2>/dev/null && echo yes || echo no" 2>/dev/null | tr -d '\r')"
 assert_eq "no" "${CAN_REACH:-no}" "租户连不上宿主的运维端口"
 
 # ---------------------------------------------------------------- 网络限速
@@ -380,7 +417,7 @@ else
   [ -n "$SECRET" ] && pass "setup 给出密钥" || fail "setup 没有给出密钥"
   if [ -n "$SECRET" ]; then
     # 代码从【镜像里那份 mfa.js】算出来，顺带证明容器里那份是对的。
-    code_for() { docker exec mt-gateway node -e 'console.log(require("/app/mfa.js").totp(process.argv[1]))' "$1" 2>/dev/null | tr -d '\r'; }
+    code_for() { docker exec ${PREFIX}gateway node -e 'console.log(require("/app/mfa.js").totp(process.argv[1]))' "$1" 2>/dev/null | tr -d '\r'; }
     login_with() { curl -sS -o /dev/null -w '%{http_code}' --data-urlencode "user=$T" --data-urlencode "password=$PW" --data-urlencode "code=$1" http://127.0.0.1:8099/__mt/admin/login; }
 
     assert_eq "303" "$(login_with '')" "未确认时仍可登录（不会把人锁在外面）"
@@ -428,7 +465,7 @@ else
   # 时间运算一律交给容器里的 node：这台宿主上的 python3 是 3.6，没有
   # datetime.fromisoformat。我因为这个空跑过两次断言，而且都读成了"服务器不一致"。
   node_time() {
-    docker exec mt-gateway node -e "$1" "$2" "${3:-0}" 2>/dev/null | tr -d '\r'
+    docker exec ${PREFIX}gateway node -e "$1" "$2" "${3:-0}" 2>/dev/null | tr -d '\r'
   }
 
   hist '{"action":"ops-history","limit":200}' > /tmp/hist_all.json
@@ -651,7 +688,7 @@ blocks = re.findall(r'<script[^>]*>(.*?)</script>', html, re.S)
 sys.stdout.write(blocks[0] if blocks else '')
 PY
     if [ -s /tmp/served.js ]; then
-      PARSED="$(docker exec -i mt-gateway sh -c 'cat > /tmp/served.js && node --check /tmp/served.js 2>&1 | head -3; rm -f /tmp/served.js' < /tmp/served.js)"
+      PARSED="$(docker exec -i ${PREFIX}gateway sh -c 'cat > /tmp/served.js && node --check /tmp/served.js 2>&1 | head -3; rm -f /tmp/served.js' < /tmp/served.js)"
       [ -z "$PARSED" ] && pass "服务端送出的脚本能解析" || fail "服务端送出的脚本有语法错误：$PARSED"
     else
       fail "页面里没有 script 块（脚本根本不会被调用）"

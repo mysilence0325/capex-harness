@@ -28,6 +28,10 @@ BASE="http://127.0.0.1:${EDGE_PORT}"
 
 if command -v docker-compose >/dev/null 2>&1; then COMPOSE=(docker-compose); else COMPOSE=(docker compose); fi
 
+# 容器名前缀与网络名是可配的（同机第二套部署、演练），脚本必须只碰自己那一套。
+PREFIX="${MT_CONTAINER_NAME_PREFIX:-mt-}"
+NET="${MT_NETWORK:-mt-net}"
+
 TENANT=""; USER=""; PASSWORD=""; PEER=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,7 +72,7 @@ rpc() { docker run --rm --network host -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bi
 restore() {
   echo "==> 恢复 ${TENANT} 的模型配置"
   docker run --rm -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bin/render.js --only "$TENANT" >/dev/null 2>&1
-  docker restart "mt-dsh-${TENANT}" >/dev/null 2>&1
+  docker restart "${PREFIX}dsh-${TENANT}" >/dev/null 2>&1
   # 验收用的假模型不留在生产栈里运行。
   docker rm -f mt-mock-model >/dev/null 2>&1 || true
 }
@@ -94,30 +98,30 @@ echo "== 0. 准备：让 model.env 生效并启动验收用假模型 =="
 DOCKER_BUILDKIT=0 "${COMPOSE[@]}" -f docker-compose.yml -f docker-compose.mock.yml up -d --build mock-model >/dev/null 2>&1
 # 假模型默认只接在 mt-net 上；租户有自己的网桥时（MT_TENANT_NETWORKS）它在另一个
 # 网络里，必须把假模型也接过去，否则租户根本连不到它，测出来的是"假故障"。
-if docker network inspect "mt-net-${TENANT}" >/dev/null 2>&1; then
+if docker network inspect "${NET}-${TENANT}" >/dev/null 2>&1; then
   # 别名必须显式给：接一个新网络不会把原网络上的服务名 `mock-model` 带过去，
   # 租户会按 `mock-model` 去解析，只接容器的话它在新网络上叫 mt-mock-model。
-  docker network connect --alias mock-model "mt-net-${TENANT}" mt-mock-model >/dev/null 2>&1 || true
+  docker network connect --alias mock-model "${NET}-${TENANT}" mt-mock-model >/dev/null 2>&1 || true
   echo "  假模型已接入租户网络 mt-net-${TENANT}（别名 mock-model）"
 fi
 for _ in $(seq 1 30); do
-  if docker run --rm --network mt-net "$NODE_IMAGE" node -e '
+  if docker run --rm --network ${NET} "$NODE_IMAGE" node -e '
       fetch("http://mock-model:8080/v1/models").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))
     ' >/dev/null 2>&1; then break; fi
   sleep 2
 done
-echo "  假模型就绪: $(docker run --rm --network mt-net "$NODE_IMAGE" node -e 'fetch("http://mock-model:8080/v1/models").then((r) => r.json()).then((j) => console.log(j.data.map((m) => m.id).join(", ")))' 2>/dev/null)"
+echo "  假模型就绪: $(docker run --rm --network ${NET} "$NODE_IMAGE" node -e 'fetch("http://mock-model:8080/v1/models").then((r) => r.json()).then((j) => console.log(j.data.map((m) => m.id).join(", ")))' 2>/dev/null)"
 
 echo "== 1. 把管理员模型目录装配给 ${TENANT} =="
 docker run --rm -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bin/render.js --only "$TENANT" --model-block mock-model/model.patch.yml
-docker restart "mt-dsh-${TENANT}" >/dev/null
+docker restart "${PREFIX}dsh-${TENANT}" >/dev/null
 # 控制面只认注册进来的地址，重启后必须重新注册，否则这里会测出假故障。
 bash bin/mt.sh register "$TENANT" >/dev/null 2>&1 || true
 if wait_tenant_ready "$TENANT" 60; then
   check "重启后 ${TENANT} 恢复就绪" "yes" "yes"
 else
   check "重启后 ${TENANT} 恢复就绪" "no" "yes"
-  docker logs --tail 20 "mt-dsh-${TENANT}" 2>&1
+  docker logs --tail 20 "${PREFIX}dsh-${TENANT}" 2>&1
   exit 1
 fi
 # 让网关的启动 token 缓存（10 秒）过期，避免用到重启前的旧 token。

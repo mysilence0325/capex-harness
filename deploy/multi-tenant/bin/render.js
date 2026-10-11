@@ -430,12 +430,14 @@ const TLS_READY = fs.existsSync(TLS_CERT_FILE) && fs.existsSync(TLS_KEY_FILE)
  * it: `mock-model` is the acceptance harness's stand-in provider, and
  * `mt-model-gateway` is where tenant model calls actually go.
  */
-const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1,mock-model,mt-model-gateway'
+// 容器名前缀是可配的（同机第二套部署、演练会换），所以这两个名字必须跟着它走：
+// 写死 mt-model-gateway 时，第二套部署的租户会去解析**第一套**的容器名，连不上模型网关。
+const DEFAULT_NO_PROXY = `localhost,127.0.0.1,::1,mock-model,${NAME_PREFIX}model-gateway`
 /** Port the egress proxy listens on. Read lazily: `.env` is parsed further down. */
 const egressPort = () => Number(envValues.get('MT_EGRESS_PORT') ?? '3128')
 
 /** Where tenants send model requests: the gateway that holds the real credential. */
-const MODEL_GATEWAY_URL = 'http://mt-model-gateway:8080'
+const MODEL_GATEWAY_URL = `http://${NAME_PREFIX}model-gateway:8080`
 
 // ---------------------------------------------------------------------------
 // compose file

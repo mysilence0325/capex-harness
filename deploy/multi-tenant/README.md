@@ -219,6 +219,30 @@ GET  /__mt/registry             列出全部（loopback 免密钥，远端需要
    老租户下次渲染时自动补上，不需要 `--force-patch`；
 3. 在该节点执行 `bin/mt.sh register <租户> --endpoint=… --node=<节点名>`。
 
+## 0.5 离线部署包（内网、无公网的机器）
+
+目标机在内网、装不了包，也不该去公网拉镜像。把"跑起来需要的一切"打成一个可自校验的包：
+
+```bash
+# ① 在有那三个镜像的机器上打（node 基础镜像 / 载体 / 我们的运行时）
+bin/make-offline-bundle.sh --payload /tmp/clean/deploy-multi-tenant \
+  --overlay /path/image-overlay-<时间戳>.tar.gz --out /data \
+  --commit "$(git rev-parse HEAD)" --volume-size 1500M
+
+# ② 目标机：校验、合并分卷、解包、安装
+sha256sum -c SHA256SUMS.parts
+cat dsh-offline-*.tar.part* > dsh-offline-<时间戳>.tar && tar xf dsh-offline-<时间戳>.tar
+cd dsh-offline-<时间戳> && ./install-offline.sh --dest /data1/dsh-mt
+```
+
+包里是：三个镜像、**干净的**部署目录（`git archive` 导出，不含 `.env`/`state/`/`tenants.json`）、
+前端覆盖层、`MANIFEST.json` 与校验和，以及目标机入口 `install-offline.sh`
+（校验文件 → `docker load` 并逐个核对镜像 id → 铺开部署目录 → 生成 `.env`，然后打印下一步）。
+`--payload` 必须是不带运行数据的干净副本：脚本会拒绝运行实例的文件，免得把口令与状态打进包。
+
+现场逐步流程（前置检查、配置定稿、建租户、启动与验证、接前置代理与 Key）见
+[离线部署手册.md](离线部署手册.md)。
+
 ## 1. 隔离模型
 
 | 维度 | 隔离方式 |

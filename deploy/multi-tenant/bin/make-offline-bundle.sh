@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# 组装离线部署包：三个镜像 + 干净的部署目录 + 前端覆盖层 + 清单 + 校验和 + 分卷。
+#
+#   bin/make-offline-bundle.sh --payload /tmp/payload/deploy-multi-tenant \
+#     --overlay /home/dsh-mt/image-overlay-20261010T182508.tar.gz \
+#     --out /home/dsh-mt --commit "$(git rev-parse HEAD)"
+#
+# 只做四件事：把镜像导出成 tar.gz、把给定目录原样收进 deploy/、写清单与校验和、切分卷。
+# 它**不碰**部署实例：--payload 必须是没有 .env/state/tenants.json 的干净副本（见下面的检查），
+# 免得把运行中的口令与状态打进包里。
+set -euo pipefail
+
+die() { echo "$*" >&2; exit 1; }
+
+PAYLOAD=""
+OVERLAY=""
+OUT="$(pwd)"
+VOLUME_SIZE="1500M"
+SITE="15.11.70.37"
+BASE_PATH="/ai/harness"
+KEY_LOGIN_FROM="15.11.40.44"
+UPSTREAM="http://15.11.40.44:3100"
+COMMIT=""
+NODE_IMAGE="node:22-bookworm-slim"
+CARRIER_IMAGE="dsh-web:0.2.0-rc.2"
+RUNTIME_IMAGE=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --payload)         PAYLOAD="${2:-}"; shift 2 ;;
+    --overlay)         OVERLAY="${2:-}"; shift 2 ;;
+    --out)             OUT="${2:-}"; shift 2 ;;
+    --volume-size)     VOLUME_SIZE="${2:-}"; shift 2 ;;
+    --site)            SITE="${2:-}"; shift 2 ;;
+    --base-path)       BASE_PATH="${2:-}"; shift 2 ;;
+    --key-login-from)  KEY_LOGIN_FROM="${2:-}"; shift 2 ;;
+    --upstream)        UPSTREAM="${2:-}"; shift 2 ;;
+    --commit)          COMMIT="${2:-}"; shift 2 ;;
+    --node-image)      NODE_IMAGE="${2:-}"; shift 2 ;;
+    --carrier-image)   CARRIER_IMAGE="${2:-}"; shift 2 ;;
+    --runtime-image)   RUNTIME_IMAGE="${2:-}"; shift 2 ;;
+    -h|--help)
+      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) die "未知参数: $1" ;;
+  esac
+done
+
+[ -n "$PAYLOAD" ] || die "缺少 --payload <干净的 deploy/multi-tenant 目录>"
+[ -d "$PAYLOAD" ] || die "找不到 --payload 目录: $PAYLOAD"
+command -v docker >/dev/null 2>&1 || die "找不到 docker（打包机必须能跑 docker save）"
+command -v split >/dev/null 2>&1 || die "找不到 split"
+command -v sha256sum >/dev/null 2>&1 || die "找不到 sha256sum"
+
+# 干净的副本：这些是运行实例的东西，进包就是泄密或让目标机状态错乱。
+for forbidden in .env local.env model.env tenants.json tenants state logs backups \
+                 .acceptance-credentials.json entry-urls.txt docker-compose.yml; do
+  [ -e "$PAYLOAD/$forbidden" ] && die "--payload 里出现了运行实例的文件: $forbidden（请用 git archive 导出的干净副本）"
+done
+
+if [ -z "$RUNTIME_IMAGE" ]; then
+  RUNTIME_IMAGE="$(grep -E '^DSH_IMAGE=' "$PAYLOAD/.env.example" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  [ -n "$RUNTIME_IMAGE" ] || die "推导不出运行时镜像，请用 --runtime-image 指定"
+fi
+for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do
+  docker image inspect "$image" >/dev/null 2>&1 || die "本机没有镜像 $image（docker images 看一下）"
+done
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+NAME="dsh-offline-$STAMP"
+BUNDLE="$OUT/$NAME"
+[ -e "$BUNDLE" ] && die "输出目录已存在: $BUNDLE"
+mkdir -p "$BUNDLE/images" "$BUNDLE/deploy"
+
+image_field() { printf '%s' "$1" | sed 's/[/:]/_/g'; }
+
+echo "==> 导出镜像（gzip -1：这几块内容压缩比有限，快速打包比极限压缩重要）"
+for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do
+  file="$(image_field "$image").tar.gz"
+  start="$(date +%s)"
+  docker save "$image" | gzip -1 > "$BUNDLE/images/$file"
+  printf '    %-40s %5sMB  %ss\n' "$file" "$(( $(stat -c%s "$BUNDLE/images/$file") / 1024 / 1024 ))" "$(( $(date +%s) - start ))"
+done
+
+echo "==> 收进部署目录（原样复制 --payload；构建产物不进包）"
+( cd "$PAYLOAD" && tar --exclude='image-overlay*' --exclude='*.log' --exclude='__pycache__' -cf - . ) \
+  | ( cd "$BUNDLE/deploy" && tar -xf - )
+[ -f "$BUNDLE/deploy/离线部署手册.md" ] || die "payload 里没有 离线部署手册.md——包不完整"
+
+if [ -n "$OVERLAY" ]; then
+  [ -f "$OVERLAY" ] || die "找不到 --overlay 文件: $OVERLAY"
+  mkdir -p "$BUNDLE/overlay"
+  cp "$OVERLAY" "$BUNDLE/overlay/"
+  echo "==> 覆盖层: $(basename "$OVERLAY")"
+fi
+
+echo "==> 写清单"
+{
+  printf '{\n'
+  printf '  "bundle": "%s",\n' "$NAME"
+  printf '  "createdAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "commit": "%s",\n' "${COMMIT:-unknown}"
+  printf '  "site": "%s",\n' "$SITE"
+  printf '  "basePath": "%s",\n' "$BASE_PATH"
+  printf '  "keyLoginFrom": "%s",\n' "$KEY_LOGIN_FROM"
+  printf '  "upstream": "%s",\n' "$UPSTREAM"
+  printf '  "deployDir": "deploy",\n'
+  first=1
+  for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do
+    file="$(image_field "$image").tar.gz"
+    id="$(docker image inspect "$image" --format '{{.Id}}')"
+    [ "$first" -eq 1 ] || printf ',\n'
+    first=0
+    printf '  "image_%s": { "ref": "%s", "id": "%s", "file": "images/%s" }' "$(image_field "$image")" "$image" "$id" "$file"
+  done
+  printf '\n}\n'
+} > "$BUNDLE/MANIFEST.json"
+
+# 安装脚本读清单里那几个唯一字段，用 grep/sed 比引一个 JSON 解析器可靠（目标机不保证有 python3）。
+for key in site basePath keyLoginFrom upstream deployDir; do
+  grep -q "\"$key\"" "$BUNDLE/MANIFEST.json" || die "清单缺少字段 $key"
+done
+for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do
+  grep -q "\"image_$(image_field "$image")\"" "$BUNDLE/MANIFEST.json" || die "清单缺少镜像字段"
+done
+
+cat > "$BUNDLE/先读我.txt" <<TXT
+DSH 多租户离线部署包 $NAME
+
+一、先校验（在目标机上，包已解开时）：
+      sha256sum -c SHA256SUMS
+   如果你拿到的是分卷，先合并：
+      cat dsh-offline-*.tar.part* > dsh-offline-$STAMP.tar
+      sha256sum -c SHA256SUMS.parts        # 逐卷校验
+      tar xf dsh-offline-$STAMP.tar
+
+二、再安装（在解开的 $NAME/ 目录里）：
+      ./install-offline.sh --dest /data/dsh-mt
+   它做四件事：校验文件、导入三个镜像、把 deploy/ 铺到 --dest、生成 .env（并告诉你还差什么）。
+
+三、然后照手册走：
+      deploy/离线部署手册.md       ← 从第 4 节"配置"开始，一步一条命令、每步有期望输出
+
+本包目标站点：$SITE，入口前缀 $BASE_PATH，模型端点 $UPSTREAM
+不含真模型密钥（现场粘贴）、不含租户名单（deploy/tenants.csv.example 是模板）。
+TXT
+
+echo "==> 包内校验和（相对包根，安装脚本直接 sha256sum -c 用）"
+( cd "$BUNDLE" && find . -type f ! -name SHA256SUMS -print0 | sort -z \
+    | xargs -0 sha256sum | sed 's|\./||' > SHA256SUMS )
+
+echo "==> 打 tar（不再压缩：成员已经是 gzip）并分卷 $VOLUME_SIZE"
+( cd "$OUT" && tar -cf "$NAME.tar" "$NAME" )
+( cd "$OUT" && split -b "$VOLUME_SIZE" -d -a 2 "$NAME.tar" "$NAME.tar.part" )
+( cd "$OUT" && sha256sum "$NAME".tar.part* > SHA256SUMS.parts )
+rm -f "$OUT/$NAME.tar"
+
+echo
+echo "==> 完成：$OUT"
+ls -1 "$OUT" | grep "$NAME" | sed 's/^/    /'
+echo "    体积：$(du -sh "$BUNDLE" | cut -f1)（未压缩）"
+echo
+echo "下一步（把包搬到目标机）："
+echo "    1) 全部 dsh-offline-*.tar.part*、SHA256SUMS.parts、SHA256SUMS 一起拷贝过去"
+echo "    2) 目标机: cat dsh-offline-*.tar.part* > $NAME.tar && tar xf $NAME.tar"
+echo "    3) 目标机: cd $NAME && ./install-offline.sh --dest /data/dsh-mt"

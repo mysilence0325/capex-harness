@@ -118,8 +118,8 @@ DSH_COOKIE="$(awk '/dsh-auth/ { print $6"="$7 }' "$JAR" | tail -1)"
 if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
   # 探针要放进本租户自己的网络里：租户被单独隔离时（MT_TENANT_NETWORKS），
   # 从 mt-net 出发根本到不了它，测出来会是"探针自己不通"而不是隔离。
-  PROBE_NET="mt-net-${TENANT}"
-  docker network inspect "$PROBE_NET" >/dev/null 2>&1 || PROBE_NET="mt-net"
+  PROBE_NET="${MT_NETWORK:-mt-net}-${TENANT}"
+  docker network inspect "$PROBE_NET" >/dev/null 2>&1 || PROBE_NET="${MT_NETWORK:-mt-net}"
   OUT="$(docker run --rm --network "$PROBE_NET" \
     -e "COOKIE=$DSH_COOKIE" -e "OWN=dsh-${TENANT}:${TENANT_PORT}:dsh-${TENANT}.internal" \
     -e "OTHER=dsh-${PEER}:${PEER_PORT}:dsh-${PEER}.internal" \

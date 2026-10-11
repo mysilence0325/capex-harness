@@ -20,6 +20,11 @@ fi
 # shellcheck disable=SC1091
 . bin/lib-http.sh
 
+# 容器名前缀与网络名都是可配的：同机可以跑第二套部署（演练、测试），而 doctor 必须
+# 检查**自己这一套**——写死 mt- 时会去查另一套的容器，结论全是错的。
+PREFIX="${MT_CONTAINER_NAME_PREFIX:-mt-}"
+NET="${MT_NETWORK:-mt-net}"
+
 OK=0; WARN=0; BAD=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; OK=$((OK + 1)); }
 warn() { printf '  \033[33m!\033[0m %s\n' "$1"; WARN=$((WARN + 1)); }
@@ -89,9 +94,9 @@ fi
 
 head_ "租户运行时"
 for t in $LOCAL_TENANTS; do
-  state="$(docker inspect "mt-dsh-$t" --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+  state="$(docker inspect "${PREFIX}dsh-$t" --format '{{.State.Status}}' 2>/dev/null || echo missing)"
   case "$state" in
-    running) ok "$t 容器运行中（镜像 $(docker inspect "mt-dsh-$t" --format '{{.Config.Image}}')）" ;;
+    running) ok "$t 容器运行中（镜像 $(docker inspect "${PREFIX}dsh-$t" --format '{{.Config.Image}}')）" ;;
     missing) bad "$t 容器不存在" ;;
     *)       bad "$t 容器状态: $state" ;;
   esac
@@ -114,7 +119,7 @@ for t in $LOCAL_TENANTS; do
 done
 
 head_ "控制面"
-gstate="$(docker inspect mt-gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+gstate="$(docker inspect ${PREFIX}gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
 [ "$gstate" = running ] && ok "网关容器运行中" || bad "网关容器状态: $gstate"
 # 监听表只取一次：`ss | grep -q` 在 pipefail 下会因 SIGPIPE 被误判为没有监听。
 LISTEN="$(ss -ltn 2>/dev/null)"
@@ -159,7 +164,7 @@ else
 fi
 # .env 里写了前缀但容器没拿到，是"改完配置没有重建/up"这一类：入口页看着对，实际仍是旧行为。
 if [ -n "$BASE_PATH" ]; then
-  IN_CONTAINER="$(docker inspect mt-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+  IN_CONTAINER="$(docker inspect ${PREFIX}gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | grep -E '^MT_BASE_PATH=' | head -1 | cut -d= -f2-)"
   [ "$IN_CONTAINER" = "$BASE_PATH" ] && ok "网关容器已带 MT_BASE_PATH=$BASE_PATH" \
     || bad "网关容器里 MT_BASE_PATH='${IN_CONTAINER:-（空）}'，.env 里是 '$BASE_PATH'（bin/mt.sh up 重渲染，网关镜像改了还要先 build）"
@@ -187,7 +192,7 @@ else
       fi
       ;;
   esac
-  IN_CONTAINER_FROM="$(docker inspect mt-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+  IN_CONTAINER_FROM="$(docker inspect ${PREFIX}gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | grep -E '^MT_KEY_LOGIN_FROM=' | head -1 | cut -d= -f2-)"
   [ "$IN_CONTAINER_FROM" = "$KEY_FROM" ] && ok "网关容器已带 MT_KEY_LOGIN_FROM" \
     || bad "网关容器里 MT_KEY_LOGIN_FROM='${IN_CONTAINER_FROM:-（空）}'，.env 里是 '${KEY_FROM}'（bin/mt.sh up 重渲染）"
@@ -230,7 +235,7 @@ else
   done
 fi
 # 控制面不该再需要 Docker：一旦挂上了 socket，"攻破网关 = 拿到宿主" 就回来了。
-if docker inspect mt-gateway --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'docker.sock'; then
+if docker inspect ${PREFIX}gateway --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'docker.sock'; then
   bad "网关仍挂载 Docker socket（等于宿主 root 等价物）"
 else
   ok "网关未挂载 Docker socket"
@@ -245,7 +250,7 @@ done
 # 内容全都是好的。这里解析服务端【真正会送出】的那段脚本，不需要登录。
 head_ "控制台页面"
 if [ "$gstate" = running ]; then
-  SERVED_ERR="$(docker exec mt-gateway node -e '
+  SERVED_ERR="$(docker exec ${PREFIX}gateway node -e '
 const vm = require("node:vm")
 const html = require("/app/admin-page.js").consolePage("/__mt/admin", { user: "doctor", role: "admin" })
 const open = html.indexOf("<script>")
@@ -269,7 +274,7 @@ fi
 # 留下的旧 MAC 让网桥分不清两台容器。实测：mt-dsh-alpha 与模型网关在 mt-net-alpha 上
 # 都是 02:42:0a:62:8e:02，alpha 连不上模型网关（EHOSTUNREACH），另外三个租户却正常。
 head_ "租户网络"
-NET_PREFIX="${MT_NETWORK:-mt-net}"
+NET_PREFIX="$NET"
 # 注册表里的租户是换行分隔的，拼成"两端带空格"的一行才好做子串匹配（多租户时
 # 用空格拼模式会一个都匹配不上，把正常网络全报成孤儿）。
 TENANTS_SPACE=" $(printf '%s' "$TENANTS" | tr '\n' ' ') "
@@ -361,7 +366,7 @@ else
 fi
 
 head_ "租户出网"
-EGRESS_STATE="$(docker inspect mt-egress-proxy --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+EGRESS_STATE="$(docker inspect ${PREFIX}egress-proxy --format '{{.State.Status}}' 2>/dev/null || echo missing)"
 if [ "$EGRESS_STATE" = running ]; then
   ok "出口代理容器运行中（端口 ${MT_EGRESS_PORT:-3128}，宿主的公网出口）"
 else
@@ -377,7 +382,7 @@ FIRST_TENANT="$(printf '%s\n' "$TENANTS" | head -1)"
 PROBE_INTERNAL="$(printf '%s' "${MT_EGRESS_PROXY:-}" | sed 's|^http[s]*://||; s|:.*$||')"
 if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTERNAL" ]; then
   egress_probe() {
-    docker exec -e PROBE_INTERNAL="$PROBE_INTERNAL" "mt-dsh-${FIRST_TENANT}" node -e '
+    docker exec -e PROBE_INTERNAL="$PROBE_INTERNAL" "${PREFIX}dsh-${FIRST_TENANT}" node -e '
     const proxy = process.env.HTTPS_PROXY
     const internal = process.env.PROBE_INTERNAL
     if (!proxy) { console.log("no-proxy-in-container"); process.exit(0) }
@@ -415,9 +420,9 @@ fi
 head_ "租户对宿主的访问"
 # 与 bin/isolate.sh 用同一套解析：优先渲染时固定的网桥名，否则退回 br-<网络id>。
 # 两边必须一致，否则 doctor 会在规则完全正常时报"网桥不对"。
-BRIDGE="$(docker network inspect mt-net --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null | tr -d '\r')"
+BRIDGE="$(docker network inspect ${NET} --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null | tr -d '\r')"
 if [ -z "$BRIDGE" ] || [ "$BRIDGE" = "<no value>" ]; then
-  BRIDGE="br-$(docker network inspect mt-net --format '{{.Id}}' 2>/dev/null | cut -c1-12)"
+  BRIDGE="br-$(docker network inspect ${NET} --format '{{.Id}}' 2>/dev/null | cut -c1-12)"
 fi
   # 两个后端都要认：CentOS 上是 firewalld 的 direct 规则，Ubuntu（装不了 firewalld）上是
   # iptables 专用链。只按 firewalld 判断会在 Ubuntu 上把"已经隔离好了"报成未启用。
@@ -452,7 +457,7 @@ fi
 # 目标地址运行时推导（宿主自己的局域网 IP），不写死任何 IP。
 LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1)"
 if [ -n "${FIRST_TENANT:-}" ] && [ -n "$LAN_IP" ]; then
-  REACHED="$(docker exec -e PROBE_HOST="$LAN_IP" -e PROBE_PORT="${MT_EGRESS_PORT:-3128}" "mt-dsh-${FIRST_TENANT}" node -e '
+  REACHED="$(docker exec -e PROBE_HOST="$LAN_IP" -e PROBE_PORT="${MT_EGRESS_PORT:-3128}" "${PREFIX}dsh-${FIRST_TENANT}" node -e '
     const net = require("node:net")
     // 探一个宿主上公开但不属于本部署的端口：既有单租户部署的 3080。
       // 打印一次就退出：留着定时器会再打印一行，比较结果时就变成了两行（实测踩过）。
@@ -505,7 +510,7 @@ if [ -f "$CERT" ] && [ -f state/tls/server.key ]; then
   else
     bad "证书已过期：$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
   fi
-  if docker inspect mt-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -q '^MT_TLS_CERT='; then
+  if docker inspect ${PREFIX}gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -q '^MT_TLS_CERT='; then
     ok "  网关以 HTTPS 提供公开端口"
     if printf '%s\n' "$LISTEN" | grep -q ":${MT_HTTP_PORT:-8099} "; then
       ok "  运维明文端口 ${MT_HTTP_PORT:-8099} 在监听（仅 loopback，供本机脚本用）"
@@ -520,10 +525,10 @@ else
 fi
 
 head_ "模型接入"
-MG_STATE="$(docker inspect mt-model-gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+MG_STATE="$(docker inspect ${PREFIX}model-gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
 if [ "$MG_STATE" = running ]; then
   ok "模型网关容器运行中"
-  UP_LEN="$(docker exec mt-model-gateway sh -c 'printf %s "${#MT_UPSTREAM_KEY}"' 2>/dev/null || echo 0)"
+  UP_LEN="$(docker exec ${PREFIX}model-gateway sh -c 'printf %s "${#MT_UPSTREAM_KEY}"' 2>/dev/null || echo 0)"
   if [ "${UP_LEN:-0}" -gt 0 ]; then
     ok "  网关持有真凭据（长度 ${UP_LEN}）"
   else
@@ -537,16 +542,16 @@ if [ "$MG_STATE" = running ]; then
   # 新租户的网络），这几秒里连真请求也会失败，所以失败等 5 秒再判一次。
   PROBE_CONTAINER=""
   for t in $TENANTS; do
-    if [ "$(docker inspect "mt-dsh-$t" --format '{{.State.Status}}' 2>/dev/null)" = running ]; then
-      PROBE_CONTAINER="mt-dsh-$t"
+    if [ "$(docker inspect "${PREFIX}dsh-$t" --format '{{.State.Status}}' 2>/dev/null)" = running ]; then
+      PROBE_CONTAINER="${PREFIX}dsh-$t"
       break
     fi
   done
   FORGED=""
   for _ in 1 2; do
     [ -n "$PROBE_CONTAINER" ] || break
-    FORGED="$(docker exec "$PROBE_CONTAINER" node -e '
-    fetch("http://mt-model-gateway:8080/anthropic/v1/messages", {
+    FORGED="$(docker exec -e MT_MODEL_URL="http://${PREFIX}model-gateway:8080" "$PROBE_CONTAINER" node -e '
+    fetch(process.env.MT_MODEL_URL + "/anthropic/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "x-api-key": "sk-mt-forged" },
       body: "{}",
@@ -570,8 +575,8 @@ if [ -n "$REAL_KEY" ]; then
   REAL_TAIL="${REAL_KEY: -8}"
   LEAKED=""
   for t in $TENANTS; do
-    if docker exec "mt-dsh-$t" sh -c 'env' 2>/dev/null | grep -q "$REAL_TAIL" \
-      || docker inspect "mt-dsh-$t" 2>/dev/null | grep -q "$REAL_TAIL"; then
+    if docker exec "${PREFIX}dsh-$t" sh -c 'env' 2>/dev/null | grep -q "$REAL_TAIL" \
+      || docker inspect "${PREFIX}dsh-$t" 2>/dev/null | grep -q "$REAL_TAIL"; then
       LEAKED="$LEAKED $t"
     fi
   done
@@ -587,15 +592,15 @@ fi
 # 每个租户应持有占位 key，且 base URL 指向网关。
 KEY_OK=0; KEY_BAD=0; KEY_MISSING=0
 for t in $TENANTS; do
-  KEY_HEAD="$(docker exec "mt-dsh-$t" sh -c 'printf %s "${DEEPSEEK_API_KEY:-}"' 2>/dev/null | cut -c1-6)"
-  BASE="$(docker exec "mt-dsh-$t" sh -c 'printf %s "${DEEPSEEK_BASE_URL:-}"' 2>/dev/null)"
+  KEY_HEAD="$(docker exec "${PREFIX}dsh-$t" sh -c 'printf %s "${DEEPSEEK_API_KEY:-}"' 2>/dev/null | cut -c1-6)"
+  BASE="$(docker exec "${PREFIX}dsh-$t" sh -c 'printf %s "${DEEPSEEK_BASE_URL:-}"' 2>/dev/null)"
   case "$KEY_HEAD" in
     sk-mt-) KEY_OK=$((KEY_OK + 1)) ;;
     "") KEY_MISSING=$((KEY_MISSING + 1)); warn "  $t 没有 DEEPSEEK_API_KEY：bin/mt.sh up 会补发占位 key" ;;
     *) KEY_BAD=$((KEY_BAD + 1)); bad "  $t 的 DEEPSEEK_API_KEY 不是占位 key" ;;
   esac
   case "$BASE" in
-    http://mt-model-gateway:*|"") ;;
+    http://${PREFIX}model-gateway:*|"") ;;
     *) KEY_BAD=$((KEY_BAD + 1)); bad "  $t 的 DEEPSEEK_BASE_URL 未指向模型网关：$BASE" ;;
   esac
 done
