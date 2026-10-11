@@ -115,33 +115,33 @@ fi
 
 echo "== 6. 租户 DSH cookie 不可跨运行时复用 =="
 DSH_COOKIE="$(awk '/dsh-auth/ { print $6"="$7 }' "$JAR" | tail -1)"
-if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
-  # 探针要放进本租户自己的网络里：租户被单独隔离时（MT_TENANT_NETWORKS），
-  # 从 mt-net 出发根本到不了它，测出来会是"探针自己不通"而不是隔离。
-  PROBE_NET="${MT_NETWORK:-mt-net}-${TENANT}"
-  docker network inspect "$PROBE_NET" >/dev/null 2>&1 || PROBE_NET="${MT_NETWORK:-mt-net}"
-  OUT="$(docker run --rm --network "$PROBE_NET" \
-    -e "COOKIE=$DSH_COOKIE" -e "OWN=dsh-${TENANT}:${TENANT_PORT}:dsh-${TENANT}.internal" \
-    -e "OTHER=dsh-${PEER}:${PEER_PORT}:dsh-${PEER}.internal" \
-    "$IMAGE" node -e '
-      // node:http (not fetch) because fetch drops an explicit Host header.
-      const http = require("node:http")
-      // Each runtime is addressed with the authority the control plane uses;
-      // DSH derives its cookie name from that string, so probing with any other
-      // Host would just report a name mismatch instead of testing isolation.
-      const ask = (target) => new Promise((resolve) => {
-        const [host, port, authority] = target.split(":")
-        const request = http.request(
-          { host, port, path: "/", method: "GET", headers: { host: authority, cookie: process.env.COOKIE } },
-          (response) => { response.resume(); resolve(response.statusCode) },
-        )
-        request.on("error", () => resolve("unreachable"))
-        request.end()
-      })
-      Promise.all([ask(process.env.OWN), ask(process.env.OTHER)]).then(([a, b]) => console.log(`${a} ${b}`))
-    ' 2>/dev/null)"
-  OWN_RESULT="${OUT%% *}"
-  OTHER_RESULT="${OUT##* }"
+if [ -n "$DSH_COOKIE" ] && [ -n "$PEER" ]; then
+  # 探针走运行时表里的 endpoint（本机租户是 <宿主>:3199/proxy/<租户>，容器 bridge 地址
+  # 也能直接连），带着本租户的 DSH cookie 去问，并带上控制面用的 authority——DSH 从
+  # Host 推 cookie 名，换一个 Host 只会测出"名字不匹配"而不是隔离。
+  #
+  # 旧写法要在本机的 docker 里起探针容器、按容器名寻址：遇到住在别的机器上的租户只能报
+  # unreachable，把"测不了"当成"隔离开了"。走 endpoint 之后同一段检查对两种位置都成立。
+  REG_ENTRY() {
+    awk -v t="\"$1\"" '
+      index($0, t ": {") { inside = 1 }
+      inside && /"endpoint"/  { ep = $2 }
+      inside && /"authority"/ { au = $2; gsub(/[",]/, "", ep); gsub(/[",]/, "", au); print ep, au; exit }
+    ' state/runtimes.json 2>/dev/null
+  }
+  ASK_RUNTIME() {
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+      -H "Host: $2" -H "Cookie: ${DSH_COOKIE}" "${1%/}/" 2>/dev/null || true)"
+    if [ -n "$code" ] && [ "$code" != "000" ]; then printf '%s' "$code"; else printf 'unreachable'; fi
+  }
+  read -r OWN_EP OWN_AUTH <<< "$(REG_ENTRY "$TENANT")"
+  read -r OTHER_EP OTHER_AUTH <<< "$(REG_ENTRY "$PEER")"
+  if [ -z "$OWN_EP" ] || [ -z "$OTHER_EP" ]; then
+    echo "  (运行时表里缺少 ${TENANT} 或 ${PEER} 的注册条目，跳过)"
+  else
+  OWN_RESULT="$(ASK_RUNTIME "$OWN_EP" "$OWN_AUTH")"
+  OTHER_RESULT="$(ASK_RUNTIME "$OTHER_EP" "$OTHER_AUTH")"
   check "同一 cookie：本租户返回 200" "$OWN_RESULT" "200"
   # 两种结果都算通过，且第二种更强：对端在别的网桥上时连不到（网络层隔离），
   # 在同一个网桥上时连得上但 cookie 一定被 401 拒。
@@ -150,17 +150,42 @@ if [ -n "$DSH_COOKIE" ] && [ -n "$PEER_PORT" ]; then
     unreachable) check "他租户在网络层就不可达（比 401 更强）" "$OTHER_RESULT" "unreachable" ;;
     *) printf '  \033[31mFAIL\033[0m 他租户的响应既不是 401 也不是不可达：%s\n' "$OTHER_RESULT"; FAIL=$((FAIL + 1)) ;;
   esac
+  fi
 else
   echo "  (缺少 cookie 或对端租户，跳过)"
 fi
 
 echo "== 7. 每个租户独立 DSH_HOME 与独立会话密钥 =="
+# home 在租户运行时所在的那台机器上。控制面上跑冒烟时，远端租户的 home 不在本机——
+# "文件不存在"是位置问题，不是隔离问题，所以按位置分开报，别把它算成失败。
+NODE_OF_TENANT() {
+  # tenants.json 是数组，每项有自己的 "id"；runtimes.json 才以租户 id 作键。
+  awk -v t="\"$1\"" '
+    /"id": / { inside = (index($0, t) > 0) ? 1 : 0; next }
+    inside && /"node"/ { n = $2; gsub(/[",]/, "", n); print n; exit }
+  ' tenants.json 2>/dev/null
+}
+CRED_LOCAL() {
+  local n; n="$(NODE_OF_TENANT "$1")"
+  [ -n "$n" ] || n=local
+  [ "$n" = "${MT_NODE_NAME:-local}" ]
+}
 ALPHA_CRED="tenants/${TENANT}/home/.credentials.yaml"
-check "${TENANT} 有独立凭据文件" "$([ -f "$ALPHA_CRED" ] && echo yes || echo no)" "yes"
+if CRED_LOCAL "$TENANT"; then
+  check "${TENANT} 有独立凭据文件" "$([ -f "$ALPHA_CRED" ] && echo yes || echo no)" "yes"
+else
+  echo "  (${TENANT} 住在节点 $(NODE_OF_TENANT "$TENANT")：home 在那边，这条要在那台机器上跑)"
+fi
 if [ -n "$PEER" ]; then
   PEER_CRED="tenants/${PEER}/home/.credentials.yaml"
-  check "${PEER} 有独立凭据文件" "$([ -f "$PEER_CRED" ] && echo yes || echo no)" "yes"
-  check "两个租户的签名密钥不同" "$(cmp -s "$ALPHA_CRED" "$PEER_CRED" && echo same || echo differ)" "differ"
+  if CRED_LOCAL "$PEER"; then
+    check "${PEER} 有独立凭据文件" "$([ -f "$PEER_CRED" ] && echo yes || echo no)" "yes"
+  else
+    echo "  (${PEER} 住在节点 $(NODE_OF_TENANT "$PEER")：home 在那边，这条要在那台机器上跑)"
+  fi
+  if [ -f "$ALPHA_CRED" ] && [ -f "$PEER_CRED" ]; then
+    check "两个租户的签名密钥不同" "$(cmp -s "$ALPHA_CRED" "$PEER_CRED" && echo same || echo differ)" "differ"
+  fi
 fi
 
 rm -f "$JAR" /tmp/mt-login.html /tmp/mt-app.html

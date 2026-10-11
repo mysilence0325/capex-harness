@@ -37,6 +37,10 @@ docker info >/dev/null 2>&1 && ok "docker 守护进程在运行" || bad "docker 
 if command -v docker-compose >/dev/null 2>&1; then ok "docker-compose $(docker-compose version --short 2>/dev/null)"
 elif docker compose version >/dev/null 2>&1; then ok "docker compose 插件"
 else bad "既没有 docker-compose 也没有 compose 插件"; fi
+# 有几处 JSON 检查用 python3 解析（注册表里的账号数、运行时表的节点集合）。缺了它这些
+# 检查会静默跳过——"没报错"会被读成"没问题"，所以在这里明说一次。
+if command -v python3 >/dev/null 2>&1; then ok "python3 $(python3 -V 2>&1 | awk '{print $2}')（少数 JSON 检查需要它）"
+else warn "没有 python3：注册表账号数、运行时表节点集合这类检查会跳过（结论仍然可信，覆盖少一点）"; fi
 
 head_ "配置"
 [ -f .env ] && ok ".env 存在" || bad "缺 .env（cp .env.example .env）"
@@ -80,16 +84,71 @@ fi
 # 控制面只对"住在本机"的租户检查容器与 home；其余租户的运行时在别的节点上，
 # 由本机的节点代理创建，控制面能查的只有它的注册与可达性（下一节）。
 NODE_OF() { grep -A6 "\"id\": \"$1\"" tenants.json 2>/dev/null | grep -o '"node": *"[^"]*"' | head -1 | cut -d'"' -f4; }
+# 本机在这套部署里的角色。同一个词（local）在两处含义不同：注册表里 `node: local`
+# 指的是**控制面那台**；而这台机器自己是不是控制面由 MT_NODE_NAME 决定。节点上把
+# "node=local" 当成"本机"是错的，那会让节点去查控制面才有的容器、home 与网关。
+THIS_NODE="${MT_NODE_NAME:-local}"
+if [ "$THIS_NODE" = local ]; then
+  ROLE=control
+elif [ "${MT_CONTROL_PLANE_STANDBY:-}" = "1" ]; then
+  ROLE=standby
+else
+  ROLE=node
+fi
+if [ "$ROLE" = control ] || [ "$ROLE" = standby ]; then HAS_GATEWAY=yes; else HAS_GATEWAY=no; fi
 LOCAL_TENANTS=""
 REMOTE_TENANTS=""
 for t in $TENANTS; do
-  case "$(NODE_OF "$t")" in
-    ""|local) LOCAL_TENANTS="$LOCAL_TENANTS $t" ;;
-    *)        REMOTE_TENANTS="$REMOTE_TENANTS $t" ;;
-  esac
+  tnode="$(NODE_OF "$t")"
+  [ -n "$tnode" ] || tnode=local
+  if [ "$tnode" = "$THIS_NODE" ]; then
+    LOCAL_TENANTS="$LOCAL_TENANTS $t"
+  else
+    REMOTE_TENANTS="$REMOTE_TENANTS $t"
+  fi
 done
+# 节点渲染用的是它自己那份 tenants.json 副本（控制面下发，口令哈希已剥掉）。副本过期
+# 时本机容器集合与控制面的期望不一致：少建的租户在控制面上永远不注册，多留的容器占着
+# 端口与磁盘。所以节点上以控制面的表为准核对，并点名不一致——只报"本机副本过期"，
+# 让操作者跑一次 bin/mt.sh up 就够了。
+if [ "$HAS_GATEWAY" != yes ] && [ -f state/register.key ] && [ -n "${MT_CONTROL_PLANE:-}" ]; then
+  CP_DOC="$(curl -fsSk --max-time 10 -H "x-mt-registry-key: $(tr -d '\r\n' < state/register.key)" \
+    "${MT_CONTROL_PLANE%/}/__mt/registry/tenants" 2>/dev/null || true)"
+  if [ -n "$CP_DOC" ]; then
+    CP_TENANTS="$(printf '%s' "$CP_DOC" | grep -o '"id": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')"
+    if [ "$(printf '%s\n' $CP_TENANTS | sort | tr '\n' ' ')" != "$(printf '%s\n' $TENANTS | sort | tr '\n' ' ')" ]; then
+      warn "本机 tenants.json 与控制面不一致（本机: $(printf '%s\n' $TENANTS | sort | tr '\n' ' ')|控制面: $(printf '%s\n' $CP_TENANTS | sort | tr '\n' ' ')）：bin/mt.sh up 会先刷新再渲染"
+      TENANTS="$CP_TENANTS"
+      LOCAL_TENANTS=""
+      REMOTE_TENANTS=""
+      for t in $TENANTS; do
+        tn="$(printf '%s' "$CP_DOC" | grep -A6 "\"id\": \"$t\"" | grep -o '"node": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+        [ -n "$tn" ] || tn=local
+        if [ "$tn" = "$THIS_NODE" ]; then
+          LOCAL_TENANTS="$LOCAL_TENANTS $t"
+        else
+          REMOTE_TENANTS="$REMOTE_TENANTS $t"
+        fi
+      done
+    fi
+  fi
+fi
 if [ -n "$REMOTE_TENANTS" ]; then
-  ok "远端租户（运行时在别的节点，由节点代理创建）:$REMOTE_TENANTS"
+  ok "远端租户（运行时不在本机）:$REMOTE_TENANTS"
+  printf '      它们的容器、home、限额与隔离要在运行它们的机器上查：在那台上跑 bin/mt.sh doctor\n'
+
+  # 节点是用控制面的密钥注册的（bin/node-install.sh 取回 state/{register,ops}.key）。
+  # 控制面这边重新生成过密钥（重建 state/keys.json）之后，节点手上还是旧的那把，注册
+  # 会被 401 拒绝，而现象只是"那台节点的租户在控制面上一直没注册"或"重启后统一入口
+  # 一直 303"——从现象追不到密钥。只报"比最近一次成功注册还新的拒绝"：密钥取回之后
+  # 节点每 15 秒重报一次，这条警告自己就会消失。
+  LAST_REJECT="$(grep -h 'registry-key-rejected' logs/access.jsonl* 2>/dev/null | tail -1 | grep -o '"ts": *"[^"]*"' | cut -d'"' -f4)"
+  LAST_REG="$(grep -o '"registeredAt": *"[^"]*"' state/runtimes.json 2>/dev/null | cut -d'"' -f4 | sort | tail -1)"
+  if [ -n "$LAST_REJECT" ] && { [ -z "$LAST_REG" ] || [[ "$LAST_REJECT" > "$LAST_REG" ]]; }; then
+    warn "  节点注册密钥被拒过（最后一次 $LAST_REJECT）：到那台节点重跑 bin/node-install.sh --fetch-from <控制面> 取回新密钥"
+  else
+    ok "  节点注册密钥没有被拒的记录"
+  fi
 fi
 
 head_ "租户运行时"
@@ -119,19 +178,38 @@ for t in $LOCAL_TENANTS; do
 done
 
 head_ "控制面"
-gstate="$(docker inspect ${PREFIX}gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
-[ "$gstate" = running ] && ok "网关容器运行中" || bad "网关容器状态: $gstate"
 # 监听表只取一次：`ss | grep -q` 在 pipefail 下会因 SIGPIPE 被误判为没有监听。
 LISTEN="$(ss -ltn 2>/dev/null)"
 GW_BASE="http://127.0.0.1:${MT_EDGE_PORT:-8090}"
 if [ -f state/tls/server.crt ]; then GW_BASE="http://127.0.0.1:${MT_HTTP_PORT:-8099}"; fi
-HEALTH="$(curl -fsS "$GW_BASE/__mt/health" 2>/dev/null || true)"
-if [ -n "$HEALTH" ]; then
-  READY="$(printf '%s' "$HEALTH" | tr -d ' \n' | grep -o '"ready":true' | wc -l)"
-  TOTAL="$(printf '%s' "$HEALTH" | tr -d ' \n' | grep -o '"id":"' | wc -l)"
-  [ "$READY" = "$TOTAL" ] && ok "全部租户就绪 ($READY/$TOTAL)" || bad "仅 $READY/$TOTAL 个租户就绪"
+gstate="$(docker inspect ${PREFIX}gateway --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+if [ "$HAS_GATEWAY" = yes ]; then
+  [ "$gstate" = running ] && ok "网关容器运行中" || bad "网关容器状态: $gstate"
+  HEALTH="$(curl -fsS "$GW_BASE/__mt/health" 2>/dev/null || true)"
+  if [ -n "$HEALTH" ]; then
+    READY="$(printf '%s' "$HEALTH" | tr -d ' \n' | grep -o '"ready":true' | wc -l)"
+    TOTAL="$(printf '%s' "$HEALTH" | tr -d ' \n' | grep -o '"id":"' | wc -l)"
+    [ "$READY" = "$TOTAL" ] && ok "全部租户就绪 ($READY/$TOTAL)" || bad "仅 $READY/$TOTAL 个租户就绪"
+  else
+    bad "健康接口无响应（本机 curl $GW_BASE/__mt/health）"
+  fi
 else
-  bad "健康接口无响应（本机 curl $GW_BASE/__mt/health）"
+  # 节点没有网关。它要保证的是"节点代理在跑、知道向谁注册、密钥对得上"——
+  # 这三样里任何一样不对，本机的租户在控制面上都不会出现（登录 503）。
+  astate="$(docker inspect ${PREFIX}node-agent --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+  [ "$astate" = running ] && ok "节点代理运行中（发现本机租户并注册到控制面）" || bad "节点代理状态: $astate（bin/mt.sh agent up）"
+  RKEY_A="$(tr -d '\r\n' < state/register.key 2>/dev/null || true)"
+  if [ -z "${MT_CONTROL_PLANE:-}" ] || [ -z "$RKEY_A" ]; then
+    bad "控制面地址或注册密钥缺失：bin/node-install.sh --node ${THIS_NODE} --fetch-from <控制面>"
+  else
+    CP_CODE="$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 10 -H "x-mt-registry-key: $RKEY_A" "${MT_CONTROL_PLANE%/}/__mt/registry" 2>/dev/null || true)"
+    case "$CP_CODE" in
+      200) ok "控制面可达且认这把注册密钥（${MT_CONTROL_PLANE}）" ;;
+      401) bad "控制面拒绝了本机的注册密钥（401）：state/register.key 与控制面不一致，重跑 bin/node-install.sh --fetch-from <控制面>" ;;
+      "")  bad "控制面连不上（${MT_CONTROL_PLANE}）：查网络与防火墙" ;;
+      *)   bad "控制面返回 $CP_CODE（${MT_CONTROL_PLANE}）" ;;
+    esac
+  fi
 fi
 
 # 子路径接入：浏览器入口常常是前置代理上的 https://<域名>/<前缀>，而本机端口只是
@@ -139,6 +217,11 @@ fi
 # 代理的根路径上（那里没有我们），页面看起来正常却登不进去——这类故障在浏览器里才暴露，
 # 所以在这里用一条不需要口令的请求把它钉住。
 head_ "子路径接入"
+# 节点没有网关，也没有浏览器入口：子路径、登录表单、cookie Path 都是网关那边的事。
+# 在节点上照跑只会得到一串"入口页取不到"的假失败（它本来就不提供入口）。
+if [ "$HAS_GATEWAY" != yes ]; then
+  printf '    本机是节点 %s：网关与浏览器入口在提供入口的那台机器上，这些检查在它上面做\n' "$THIS_NODE"
+else
 BASE_PATH="${MT_BASE_PATH:-}"
 BASE_PATH="${BASE_PATH%/}"
 # 必须问公开入口，而不是上面那个 loopback 运维端口：运维端口不属于浏览器入口，
@@ -171,9 +254,13 @@ if [ -n "$BASE_PATH" ]; then
 else
   ok "没配 MT_BASE_PATH：入口挂在根路径（直接访问本机端口）"
 fi
+fi
 # Key 免口令登录：身份网关校验证书后把用户名写进一个 cookie，本网关只认它，而且
 # 只认配置里那些地址送来的它（否则网段里谁都能自造一条 cookie 冒名登录）。
 head_ "Key 免口令登录"
+if [ "$HAS_GATEWAY" != yes ]; then
+  printf '    本机是节点 %s：Key 免口令登录在网关那一台，这里不检查\n' "$THIS_NODE"
+else
 KEY_FROM="${MT_KEY_LOGIN_FROM:-}"
 KEY_SECRET="${MT_KEY_LOGIN_SECRET:-}"
 KEY_COOKIE="${MT_KEY_LOGIN_COOKIE:-KOAL_CERT_E}"
@@ -202,6 +289,7 @@ else
     || bad "登录页没有 Key 入口：Key 登录开着，用户却看不到这条路径"
   printf '%s' "$KEY_PAGE" | grep -q "action=\"${BASE_PATH}/__mt/login\"" \
     && ok "登录页仍然保留口令方式" || bad "登录页只剩下 Key 一条路，口令登录不见了"
+fi
 fi
 
 # 沙箱：DSH 的选择链是 bwrap → Landlock，两条都不行时租户的每条命令都会以
@@ -234,10 +322,28 @@ esac
 
 head_ "运行时注册"
 # 控制面不再看 Docker，只代理注册进来的地址。没有注册 = 该租户登录后必然 503。
-REGISTRY="$(curl -fsS "$GW_BASE/__mt/registry" 2>/dev/null || true)"
-if [ -z "$REGISTRY" ]; then
-  bad "注册表接口无响应（$GW_BASE/__mt/registry）"
+# 节点上没有网关：注册表在控制面那一台，用注册密钥从远端读（这个接口对非回环调用者
+# 要求注册密钥）。节点读不到控制面时，下面每条注册检查都会失败——那正是它要说的事。
+REG_URL=""
+REGISTRY=""
+if [ "$HAS_GATEWAY" = yes ]; then
+  REG_URL="$GW_BASE/__mt/registry"
+  REGISTRY="$(curl -fsS "$REG_URL" 2>/dev/null || true)"
 else
+  RKEY="$(tr -d '\r\n' < state/register.key 2>/dev/null || true)"
+  if [ -z "${MT_CONTROL_PLANE:-}" ]; then
+    bad "节点没有配 MT_CONTROL_PLANE：代理不知道向谁注册（bin/node-install.sh）"
+  elif [ -z "$RKEY" ]; then
+    bad "缺 state/register.key：节点注册要用控制面的密钥（bin/node-install.sh --fetch-from <控制面>）"
+  else
+    REG_URL="${MT_CONTROL_PLANE%/}/__mt/registry"
+    REGISTRY="$(curl -fsSk --max-time 10 -H "x-mt-registry-key: $RKEY" "$REG_URL" 2>/dev/null || true)"
+  fi
+fi
+if [ -z "$REGISTRY" ]; then
+  [ -n "$REG_URL" ] && bad "注册表接口无响应（$REG_URL）"
+else
+  [ "$HAS_GATEWAY" = yes ] || ok "控制面注册表可读（$REG_URL）"
   REG_COUNT="$(printf '%s' "$REGISTRY" | tr -d ' \n' | grep -o '"endpoint":"' | wc -l)"
   TENANT_COUNT="$(printf '%s\n' "$TENANTS" | grep -c . || true)"
   if [ "${REG_COUNT:-0}" = "${TENANT_COUNT:-0}" ]; then
@@ -254,6 +360,12 @@ else
     fi
     EP="$(printf '%s' "$ENTRY" | grep -o '"endpoint":"[^"]*"' | cut -d'"' -f4)"
     NODE="$(printf '%s' "$ENTRY" | grep -o '"node":"[^"]*"' | cut -d'"' -f4)"
+    # 只探测住在**本机**的租户：别的节点上的运行时本机多半连不上（那里的防火墙
+    # 只放行网关），那是正常状态，不该报成故障。
+    if [ "$NODE" != "$THIS_NODE" ]; then
+      ok "  $t -> 节点 $NODE（不在本机，注册存在即可）"
+      continue
+    fi
     CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 4 "$EP/" 2>/dev/null || true)"
     if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then
       ok "  $t -> $EP （节点 $NODE，HTTP $CODE）"
@@ -262,22 +374,31 @@ else
     fi
   done
 fi
-# 控制面不该再需要 Docker：一旦挂上了 socket，"攻破网关 = 拿到宿主" 就回来了。
-if docker inspect ${PREFIX}gateway --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'docker.sock'; then
-  bad "网关仍挂载 Docker socket（等于宿主 root 等价物）"
-else
-  ok "网关未挂载 Docker socket"
-fi
+if [ "$HAS_GATEWAY" = yes ]; then
+  # 控制面不该再需要 Docker：一旦挂上了 socket，"攻破网关 = 拿到宿主" 就回来了。
+  if docker inspect ${PREFIX}gateway --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | grep -q 'docker.sock'; then
+    bad "网关仍挂载 Docker socket（等于宿主 root 等价物）"
+  else
+    ok "网关未挂载 Docker socket"
+  fi
 
-for p in 8090 8091 8092 8093; do
-  if printf '%s\n' "$LISTEN" | grep -q ":$p "; then ok "端口 $p 在监听"; else warn "端口 $p 未监听"; fi
-done
+  for p in 8090 8091 8092 8093; do
+    if printf '%s\n' "$LISTEN" | grep -q ":$p "; then ok "端口 $p 在监听"; else warn "端口 $p 未监听"; fi
+  done
+else
+  # 节点上必须监听的是节点代理端口：网关要把浏览器的租户请求转发到
+  # http://<本机>:3199/proxy/<租户>。
+  APORT="${MT_AGENT_PORT:-3199}"
+  if printf '%s\n' "$LISTEN" | grep -q ":$APORT "; then ok "节点代理端口 $APORT 在监听"; else bad "节点代理端口 $APORT 未监听（bin/mt.sh agent up）"; fi
+fi
 
 # 控制台页面能不能用，不看状态码也不看页面里有没有那些控件：整页脚本一旦有语法
 # 错误，浏览器里表格永远停在"加载中"、所有按钮都不响应，而接口、状态码、页面
 # 内容全都是好的。这里解析服务端【真正会送出】的那段脚本，不需要登录。
 head_ "控制台页面"
-if [ "$gstate" = running ]; then
+if [ "$HAS_GATEWAY" != yes ]; then
+  printf '    本机是节点 %s：管理控制台在网关那一台（/__mt/admin），这里不检查\n' "$THIS_NODE"
+elif [ "$gstate" = running ]; then
   SERVED_ERR="$(docker exec ${PREFIX}gateway node -e '
 const vm = require("node:vm")
 const html = require("/app/admin-page.js").consolePage("/__mt/admin", { user: "doctor", role: "admin" })
@@ -380,7 +501,21 @@ fi
 
 head_ "防火墙与网络"
 PORTS="$(firewall-cmd --list-ports 2>/dev/null || true)"
-if [ -n "$PORTS" ]; then
+# 节点不用开网关端口，它要开的是"网关能连到本机代理"。放行没做对时，节点侧一切正常
+# （它能连出去注册），只有控制面那台登录会 502 —— 实测过，从现象追不到防火墙。
+if [ "$HAS_GATEWAY" != yes ]; then
+  APORT="${MT_AGENT_PORT:-3199}"
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    RICH="$(firewall-cmd --list-rich-rules 2>/dev/null || true)"
+    if printf '%s\n' "$PORTS" | grep -q "${APORT}/tcp" || printf '%s' "$RICH" | grep -q "port=\"${APORT}\""; then
+      ok "防火墙放行到节点代理端口 ${APORT}/tcp"
+    else
+      warn "防火墙没放行 ${APORT}/tcp：网关转发租户请求会被拒（bin/node-install.sh --allow-from <网关地址> 补规则）"
+    fi
+  else
+    warn "本机没跑 firewalld：自行确认网关能连 ${APORT}/tcp（bin/node-install.sh --allow-from <网关地址>）"
+  fi
+elif [ -n "$PORTS" ]; then
   for p in 8090 8091 8092 8093; do
     echo "$PORTS" | grep -q "$p/tcp" && ok "防火墙放行 $p/tcp" || warn "防火墙未放行 $p/tcp"
   done
@@ -405,7 +540,10 @@ if [ -n "${MT_EGRESS_PROXY:-}" ]; then
 else
   warn "MT_EGRESS_PROXY 未设置：bridge 容器没有外网路由，租户将无法调用模型（bin/mt.sh up 会自动补）"
 fi
-FIRST_TENANT="$(printf '%s\n' "$TENANTS" | head -1)"
+# 出口与隔离的实测要在**本机**的租户容器里做：远端租户的容器不在本机，
+# 拿它当探针只会得到"容器不存在"这种与结论无关的错误。
+# 注意 Local_TENANTS 是**空格分隔的一行**（不是多行）：要拆词，不能直接 printf '%s\n'。
+FIRST_TENANT="$(printf '%s\n' $LOCAL_TENANTS | head -1)"
 # 用出口代理自己的宿主地址当"内网目标"：它必然是私网地址，且不必写死任何 IP。
 PROBE_INTERNAL="$(printf '%s' "${MT_EGRESS_PROXY:-}" | sed 's|^http[s]*://||; s|:.*$||')"
 if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTERNAL" ]; then
@@ -538,7 +676,9 @@ if [ -f "$CERT" ] && [ -f state/tls/server.key ]; then
   else
     bad "证书已过期：$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
   fi
-  if docker inspect ${PREFIX}gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -q '^MT_TLS_CERT='; then
+  if [ "$HAS_GATEWAY" != yes ]; then
+    printf '    本机是节点 %s：证书由提供入口的网关使用，本机不据此提供 TLS\n' "$THIS_NODE"
+  elif docker inspect ${PREFIX}gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -q '^MT_TLS_CERT='; then
     ok "  网关以 HTTPS 提供公开端口"
     if printf '%s\n' "$LISTEN" | grep -q ":${MT_HTTP_PORT:-8099} "; then
       ok "  运维明文端口 ${MT_HTTP_PORT:-8099} 在监听（仅 loopback，供本机脚本用）"
@@ -569,7 +709,7 @@ if [ "$MG_STATE" = running ]; then
   # 那不是拦截失败，是探针自己踩空了。另外新增租户会重建模型网关（它要接入
   # 新租户的网络），这几秒里连真请求也会失败，所以失败等 5 秒再判一次。
   PROBE_CONTAINER=""
-  for t in $TENANTS; do
+  for t in $LOCAL_TENANTS; do
     if [ "$(docker inspect "${PREFIX}dsh-$t" --format '{{.State.Status}}' 2>/dev/null)" = running ]; then
       PROBE_CONTAINER="${PREFIX}dsh-$t"
       break
@@ -590,6 +730,10 @@ if [ "$MG_STATE" = running ]; then
   done
   if [ "$FORGED" = "401" ]; then
     ok "  未知 key 被拒（401）"
+  elif [ -z "$PROBE_CONTAINER" ]; then
+    # 本机没有在跑的租户容器可用作探针（节点上租户都在别处，或刚建好还没起来）。
+    # 这不是"网关没拦"，是这台机器上没法从租户侧发起请求。
+    warn "  本机没有在跑的租户容器可作探针，跳过伪造 key 检查（网关侧拦截已随其它检查覆盖）"
   else
     bad "  未知 key 未被拒绝：${FORGED:-无响应}（刚新增过租户时会重建模型网关，那几秒里请求本就不通）"
   fi
@@ -602,7 +746,7 @@ REAL_KEY="$(grep -E '^MT_UPSTREAM_API_KEY=.+' .env 2>/dev/null | tail -1 | cut -
 if [ -n "$REAL_KEY" ]; then
   REAL_TAIL="${REAL_KEY: -8}"
   LEAKED=""
-  for t in $TENANTS; do
+  for t in $LOCAL_TENANTS; do
     if docker exec "${PREFIX}dsh-$t" sh -c 'env' 2>/dev/null | grep -q "$REAL_TAIL" \
       || docker inspect "${PREFIX}dsh-$t" 2>/dev/null | grep -q "$REAL_TAIL"; then
       LEAKED="$LEAKED $t"
@@ -619,7 +763,7 @@ fi
 
 # 每个租户应持有占位 key，且 base URL 指向网关。
 KEY_OK=0; KEY_BAD=0; KEY_MISSING=0
-for t in $TENANTS; do
+for t in $LOCAL_TENANTS; do
   KEY_HEAD="$(docker exec "${PREFIX}dsh-$t" sh -c 'printf %s "${DEEPSEEK_API_KEY:-}"' 2>/dev/null | cut -c1-6)"
   BASE="$(docker exec "${PREFIX}dsh-$t" sh -c 'printf %s "${DEEPSEEK_BASE_URL:-}"' 2>/dev/null)"
   case "$KEY_HEAD" in

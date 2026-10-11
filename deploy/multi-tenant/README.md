@@ -255,7 +255,7 @@ cd dsh-offline-<时间戳> && ./install-offline.sh --dest /data1/dsh-mt
 | 凭据 | 每个租户自己的 `.credentials.yaml`（各自随机签名密钥），模型 key 按租户注入 |
 | 执行 | 每租户一个容器（独立 PID/挂载/网络命名空间）+ 内存/CPU/PID 限额；宿主内核 3.10 无法跑 DSH 自带文件沙箱，容器即边界 |
 | 网络 | 租户容器不发布任何端口，只有网关能被访问；出网必须经 `mt-egress-proxy`，私网目标被拒 |
-| 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.2） |
+| 宿主端口 | **默认不设防，必须显式收紧**：Docker 把网桥放进 firewalld 的 `docker` 区域，而该区域是 `target: ACCEPT`，容器因此能直达宿主上任何监听端口（Harbor、Nexus、Nacos、Prometheus、Grafana…）。`bin/mt.sh isolate apply` 给自己的网桥加 direct 规则，只放行出口代理端口（见 §1.3） |
 | 审计 | 网关按请求写 `logs/access.jsonl`（租户、用户、方法、URL、状态码、耗时） |
 
 **设计前提（本部署的产品语义）**：一个租户 = 一个账号 = 一个独占空间。`bin/mt.sh add <租户> --user <用户>` 一次同时创建这两者；要再加一个互相隔离的空间，就再加一个**租户**，而不是给同一个租户加账号。注册表的结构允许一个租户挂多个用户，但那些账号会共用同一个容器、同一份 `home` 与 workspace（即同一个空间），彼此之间没有任何隔离——`bin/mt.sh doctor` 会点名这种偏离。
@@ -269,26 +269,38 @@ cd dsh-offline-<时间戳> && ./install-offline.sh --dest /data1/dsh-mt
 
 ```bash
 bin/mt.sh add gamma2 --user gina --node node2   # 只登记，不会在本机建容器
-bin/mt.sh render                                 # 不会为它生成 compose 服务
 ```
 
-`node` 不是 `local` 的租户，控制面不建 home、不建容器、不生成专用入口；它只保留登录与路由所需的
-注册表条目。查状态用 `bin/mt.sh runtimes`（等节点上报后出现）。
+`node` 不是 `local` 的租户，控制面不建 home、不建容器；它只保留登录与路由所需的注册表条目，
+然后**让那台机器的代理去开通**（控制台"创建并开通"走的是同一条路：`/provision`）。那台机器上
+还没有任何代理上报过时，命令会直接告诉你去那台机器上跑一次 `bin/mt.sh up`——新节点的第一次
+是这样开通的，之后就都由控制面代劳。查状态用 `bin/mt.sh runtimes`。
 
-### 节点：自己把分配给它的租户拉起来
+### 加一台节点：一条命令接线
 
 ```bash
-# 项目目录（bin/ gateway/ egress-proxy/ model-gateway/ node-agent/）放到节点上，
-# 然后从控制面取两份东西：租户注册表、注册密钥。
-scp <控制面>:/home/dsh-mt/tenants.json        /home/dsh-node/tenants.json
-scp <控制面>:/home/dsh-mt/state/registry.key  /home/dsh-node/state/registry.key
+# 节点上（先把部署目录放过去：离线包 install-offline.sh，或从控制面同步同一份代码）
+bin/node-install.sh --node node2 --control-plane https://192.168.122.137:8090 \
+  --fetch-from 192.168.122.137 --allow-from 192.168.122.137,192.168.122.139
+bin/mt.sh up && bin/mt.sh agent up
 
-cd /home/dsh-node
-MT_NODE_NAME=node2 bin/mt.sh up      # 只渲染/创建属于 node2 的租户 + 本机出口代理与模型网关
+# 控制面上
+bin/mt.sh add gamma2 --user gina --node node2
+bin/mt.sh runtimes                   # 等节点上报后出现 gamma2 -> node2
 ```
 
-节点侧的 `up` 会为这些租户生成 home 与 profile patch（含 `webserver.port` 与
-`connection.trustedHosts`），然后建容器——**控制面从头到尾没有碰过它们的容器**。
+`node-install.sh` 做的是接线，可重复执行：写 `.env` 里的角色与地址（`MT_NODE_NAME`、
+`MT_NODE_ADDRESS`、`MT_CONTROL_PLANE`、CA），从控制面取回 `state/{register,ops,registry}.key`
+与 CA，拉一份租户注册表，并放行**网关**访问本机节点代理端口（见下）。
+
+节点侧的 `up` 会先从控制面刷新注册表副本，再为分配给它的租户生成 home 与 profile patch
+（含 `webserver.port` 与 `connection.trustedHosts`），然后建容器——**控制面从头到尾没有碰过
+它们的容器**。
+
+**必须放行 3199**：浏览器的租户请求是网关转发到 `http://<节点>:3199/proxy/<租户>` 的，而
+CentOS 的 firewalld 默认只放行 ssh。漏了这条，节点侧一切正常（它能连出去注册），只有用户
+登录时看到 502 `connect EHOSTUNREACH`——实测踩过，从节点上查不出来。`--allow-from` 要给**每一台
+网关**（主 + 备用），不是整个网段：这个端口不做租户级鉴权，能连上就能代理某个租户。
 
 同一台机器上模拟多个节点时需要区分，这三个变量就是为此（真实分机不需要）：
 
@@ -301,14 +313,9 @@ MT_NODE_NAME=node2 bin/mt.sh up      # 只渲染/创建属于 node2 的租户 + 
 ### 节点代理：发现 → 上报 → 转发
 
 ```bash
-docker build -t mt-node-agent:local ./node-agent
-docker run -d --name mt-node-agent --network host --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /home/dsh-node/state:/key:ro -v /home/dsh-node/ca.crt:/ca/ca.crt:ro \
-  -e MT_NODE_NAME=node2 -e MT_NODE_ADDRESS=<本机局域网IP> \
-  -e MT_CONTROL_PLANE=https://<控制面>:8090 -e MT_CONTROL_PLANE_CA=/ca/ca.crt \
-  -e MT_REGISTRY_KEY_FILE=/key/registry.key -e MT_NETWORK=mt-net \
-  mt-node-agent:local
+bin/mt.sh agent up        # compose 里有 node-agent 就用它；纯网关主机上按同样的配置 docker run
+bin/mt.sh agent status
+bin/mt.sh agent allow 192.168.122.139   # 加/换网关后放行它访问本机 3199（见上）
 ```
 
 代理做三件事：**发现**本机租户容器（按 `mt.tenant` 标签，不看容器名）、**上报**给控制面
@@ -321,7 +328,70 @@ docker run -d --name mt-node-agent --network host --restart unless-stopped \
 **端点可以带路径**：代理注册的是 `http://<节点>:3199/proxy/<租户>`，控制面会把这段前缀
 拼在转发路径前面——少了它请求会打到代理根路径（404）。
 
-## 1.2 限制租户对宿主端口的访问
+**控制面自己那台的租户也走这条路**：注册的端点是 `http://<控制面>:3199/proxy/<租户>`，不是容器
+在 bridge 上的地址。bridge 地址只有本机可达，控制面高可用切换之后备用网关连不上它，那些租户会
+全部 502——这是"网关坏了切过去"最容易漏掉的一半。
+
+### 节点上的密钥：与控制面同一份
+
+节点的注册密钥、运维密钥、以及网关用的 `state/keys.json` 都取自控制面（`node-install.sh
+--fetch-from`）。**控制器上重跑 `bin/mt.sh keys` 或重建过 `state/keys.json` 之后，各节点要重新
+取一次**，否则注册会被 401 拒绝；症状只是"那台节点的租户在控制面上一直没注册"，或租户重启后
+统一入口一直 303。`bin/doctor.sh` 会在控制面上把这种拒绝点名（只报"比最近一次成功注册还新的
+拒绝"，取回密钥后 15 秒内自行消失）。
+
+节点渲染**不会**自己生成密钥：它在 `up` 时发现缺文件就直接失败，告诉你先跑 `node-install.sh`。
+（早期版本会生成一套本地随机密钥，于是每次 `up` 都悄悄把取回的密钥覆盖掉——注册永远 401。）
+
+### 迁移一个租户到另一台节点
+
+```bash
+bin/mt.sh move gamma2 --to node3          # 停源端容器 → 搬数据 → 改注册表 node → 目标机 up
+```
+
+前置条件（脚本会检查并给出提示）：目标节点已经有运行时上报过（否则用 `--to-host <IP>` 指定），
+两台机器同路径（不同则用 `--remote-root`）。迁移期间该租户短暂不可用（实测 42 秒，其中大部分是
+目标机上的一次 `up`）。源端的容器会被删掉，**数据仍留在源端 `tenants/<租户>/`**：回滚就是把
+`bin/mt.sh registry set-node <租户> <原节点>` 改回去、再在原节点 `up` 一次。
+
+## 1.2 控制面高可用（两台网关 + 前端 upstream）
+
+一台机器上的网关坏了、或要停机维护时，用户不该跟着停。做法是**两台网关跑同一套部署、共用同一份
+状态**，前端 nginx 把请求发给主网关，它不答话时自动转到备用网关。
+
+```bash
+# 备用网关那台（同时也可以跑它自己的节点角色：--node 会给它一个节点名）
+bin/node-install.sh --standby --node node3 --control-plane https://<主网关>:8090 \
+  --fetch-from <主网关> --allow-from <主网关>,<备用网关>
+bin/mt.sh up                                       # 网关（MT_EDGE_LISTEN=0）+ 出口代理 + 模型网关
+bin/mt.sh ha-sync --from <主网关> --install-timer  # 每 60 秒单向同步一份状态
+
+# 前端机器：nginx 片段见 ha/nginx.conf（upstream 两台、备份标记、proxy_next_upstream）
+```
+
+`ha-sync` 同步的固定集合：`tenants.json` 与 `state/{session.key,keys.json,registry.key,register.key,
+ops.key,admin.json,admin.key,runtimes.json,bandwidth.json,quota.json,tls/}`。**不含 `logs/`**：两台
+网关各写自己的审计，切换之后历史分成两段（这是刻意的，别把两段读成"丢了一段"）。
+
+备用网关的行为：只服务共享入口（`MT_EDGE_LISTEN=0`，不开每租户的专属入口端口——那些只在主网关
+上），不渲染租户、不跑定时备份；但它**会**跑本机节点代理，所以同一台机器可以同时是备用网关和
+一个节点（`--node node3`）。
+
+实测（三台 VM，2026-10-11）：
+
+| 动作 | 结果 |
+|---|---|
+| 停主网关 | 入口 **0.28 秒**后恢复（前端把这一条请求直接转到备用网关） |
+| 已登录用户 | 会话继续有效（`session.key` 同步过去了，cookie 不需要重新登录） |
+| 远端租户 | 照常登录（备用网关的 `runtimes.json` 是同步来的，地址没变） |
+| 启动主网关 | **0.51 秒**后回切（`fail_timeout=5s` 到期后前端重新探测） |
+| 专属入口端口 | 切换期间不可用（只在主网关监听）；共享入口按会话路由，不受影响 |
+| 审计日志 | 分成两段（主网关一段、备用网关一段） |
+
+**节点要提前放行备用网关**（`bin/mt.sh agent allow <备用网关>`），否则切换过去之后备用网关连不上
+节点上的租户——表现同样是 502，而主网关一切正常。
+
+## 1.3 限制租户对宿主端口的访问
 
 ```bash
 bin/mt.sh isolate status     # 查看状态（doctor 每次也会实测）

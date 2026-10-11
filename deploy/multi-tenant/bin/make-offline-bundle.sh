@@ -61,11 +61,21 @@ done
 # 运行时镜像必须是**本地源码构建的那一个**（镜像里有 /opt/dsh-local-build/SOURCE 标记，
 # doctor 也是这么认的）。刻意不读 .env.example 的 DSH_IMAGE：那里是示例值（发行版载体），
 # 照着它打出来的包会让目标机跑另一份代码——而且从包里看不出来。
+if [ -z "$RUNTIME_IMAGE" ] && [ -f .env ]; then
+  # 现场机器上正在用的那一块（.env 的 DSH_IMAGE）优先：它是本机 doctor/acceptance 验过的
+  # 那一个。这里读的是运行实例的 .env，不是 .env.example 的示例值。
+  candidate="$(grep -E '^DSH_IMAGE=' .env | tail -1 | cut -d= -f2- | tr -d ' \r')"
+  if [ -n "$candidate" ] && docker image inspect "$candidate" >/dev/null 2>&1; then
+    RUNTIME_IMAGE="$candidate"
+  fi
+fi
 if [ -z "$RUNTIME_IMAGE" ]; then
   # `|| true`：没有匹配时 grep 会失败，而 set -o pipefail + set -e 会让脚本在给出
   # 下面那条提示之前就静默退出（提示正是要告诉人"先去发布一个镜像"）。
+  # 排除派生镜像（`<tag>-sandbox` 之类）：它们的底座就是包里那块基础镜像，目标机的
+  # install-offline.sh 自己会派生一次；带派生镜像进包会让目标机派生成 `<tag>-sandbox-sandbox`。
   RUNTIME_IMAGE="$(docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' \
-    | grep -E '^dsh-web:local-' | sort -k2 | tail -1 | awk '{print $1}' || true)"
+    | grep -E '^dsh-web:local-[0-9]' | grep -v -- '-sandbox' | sort -k2 | tail -1 | awk '{print $1}' || true)"
   [ -n "$RUNTIME_IMAGE" ] || die "本机没有 dsh-web:local-* 镜像（先用 bin/publish-image.sh 发布），或用 --runtime-image 指定"
 fi
 for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do

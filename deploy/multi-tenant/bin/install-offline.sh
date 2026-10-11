@@ -141,7 +141,11 @@ echo "== 5/5 沙箱：把 bubblewrap 补进运行时镜像"
 # 运行时镜像里没有 bubblewrap（基础镜像没装），而 DSH 的沙箱链首选就是 bwrap。
 # 离线包带了一个 47 KB 的 deb；这里从刚导入的运行时镜像派生一层把它装进去，
 # 于是"用不用 bwrap"变成一条配置（MT_SANDBOX_BWRAP=1）而不是一次重建。
-if ls "$DEST"/sandbox-debs/*.deb >/dev/null 2>&1; then
+# 已经派生过的镜像（tag 以 -sandbox 结尾）不再派生第二层：从旧包（包里带的就是派生镜像）
+# 装出来的机器会得到 <tag>-sandbox-sandbox，两层内容一样，白白多占 850 MB。
+if [ "$RUNTIME_IMAGE" != "${RUNTIME_IMAGE%-sandbox}" ]; then
+  echo "    运行时镜像已经是带 bubblewrap 的那一块（$RUNTIME_IMAGE），跳过派生"
+elif ls "$DEST"/sandbox-debs/*.deb >/dev/null 2>&1; then
   SANDBOX_IMAGE="${RUNTIME_IMAGE}-sandbox"
   BUILD_DIR="$(mktemp -d)"
   mkdir -p "$BUILD_DIR/debs" && cp "$DEST"/sandbox-debs/*.deb "$BUILD_DIR/debs/"

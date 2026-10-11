@@ -46,6 +46,20 @@ EDGE="$(grep '^MT_EDGE_PORT=' .env 2>/dev/null | cut -d= -f2)"; EDGE="${EDGE:-80
 MT_BASE="$(grep '^MT_BASE_PATH=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"; MT_BASE="${MT_BASE%/}"
 TENANTS="$(grep -o '"id": *"[a-z0-9-]*"' tenants.json 2>/dev/null | sed 's/.*"\([a-z0-9-]*\)"$/\1/' | tr '\n' ' ')"
 
+# 本机租户 / 远端租户：多机之后"所有租户"与"本机的租户"不是一回事。容器、限额、
+# seccomp、隔离、占位 key 这些只能在本机租户上查；远端租户由它所在的节点负责
+# （在那边跑 bin/mt.sh doctor）。
+NODE_OF() { grep -A6 "\"id\": \"$1\"" tenants.json 2>/dev/null | grep -o '"node": *"[^"]*"' | head -1 | cut -d'"' -f4; }
+LOCAL_TENANTS=""
+REMOTE_TENANTS=""
+for t in $TENANTS; do
+  case "$(NODE_OF "$t")" in
+    ""|local) LOCAL_TENANTS="$LOCAL_TENANTS $t" ;;
+    *)        REMOTE_TENANTS="$REMOTE_TENANTS $t" ;;
+  esac
+done
+LOCAL_TENANT_COUNT="$(printf '%s' "$LOCAL_TENANTS" | wc -w)"
+
 # 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）；有 curl 时它什么都不做。
 # shellcheck disable=SC1091
 . bin/lib-http.sh
@@ -96,7 +110,9 @@ PREFIX_CFG="${PREFIX_CFG:-mt-}"
 PREFIX="$PREFIX_CFG"
 SINK_CFG="$(grep '^MT_ALERT_SINK_CONTAINER=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
 SINK_CFG="${SINK_CFG:-dsh-alert-sink}"
-TENANT_COUNT="$(printf '%s' "$TENANTS" | wc -w)"
+# 本机容器数 = 与租户无关的 5 个 + **本机**租户数。远端租户的容器在别的机器上，
+# 算进来只会让这条断言在多机部署上必然失败。
+TENANT_COUNT="$LOCAL_TENANT_COUNT"
 # 与租户无关的部署容器：网关、模型网关、出口代理、定时备份、节点代理
 BASE_CONTAINERS=5
 N="$(docker ps --filter "name=^${PREFIX_CFG}" --format '{{.Names}}' | wc -l)"
@@ -120,7 +136,11 @@ for t in $TENANTS; do
       # 条数在"通过"**前面**：`结果：16 通过，0 失败` —— 用 sed 取，别用前缀/后缀截断
       # （`${R#*通过}` 拿到的是"通过"之后，取不出数字）。
       PASSED="$(printf '%s' "$R" | sed -n 's/.*结果：\([0-9][0-9]*\) 通过.*/\1/p')"
-      if [ -n "$PASSED" ] && [ "$PASSED" -ge 15 ]; then pass "$t 冒烟 $R"; else fail "$t 冒烟条数偏少：$R"; fi ;;
+      # 下限按租户住哪儿分：本机租户多两条 home/凭据文件检查（那些文件在本机），
+      # 远端租户的 home 在它那台机器上，那两条改由节点上的 doctor 覆盖（远端 14 条）。
+      SMOKE_FLOOR=16
+      case " $REMOTE_TENANTS " in *" $t "*) SMOKE_FLOOR=14 ;; esac
+      if [ -n "$PASSED" ] && [ "$PASSED" -ge "$SMOKE_FLOOR" ]; then pass "$t 冒烟 $R"; else fail "$t 冒烟条数偏少（下限 $SMOKE_FLOOR）：$R"; fi ;;
     *) fail "$t 冒烟 $R" ;;
   esac
 done
@@ -265,7 +285,10 @@ SECCOMP_CFG="$(grep '^MT_SECCOMP_TENANTS=' .env 2>/dev/null | tail -1 | cut -d= 
 ON_PROFILE=""
 for t in $SECCOMP_CFG; do
   if printf '%s\n' "$TENANTS" | grep -qw "$t"; then
-    ON_PROFILE="$ON_PROFILE $t"
+    # 远端租户的容器不在这台机器上：它的加固要在它所在的节点上查（那边跑 doctor/验收）。
+    if printf '%s\n' "$LOCAL_TENANTS" | grep -qw "$t"; then
+      ON_PROFILE="$ON_PROFILE $t"
+    fi
   else
     warn_skip="MT_SECCOMP_TENANTS 里的 $t 不在租户注册表里（配置残留，render 会忽略它）"
     skip "$warn_skip"
@@ -292,7 +315,7 @@ else
 fi
 
 # 租户容器不该能连宿主上的运维端口。
-CAN_REACH="$(docker exec "${PREFIX}dsh-$(printf '%s' "$TENANTS" | awk '{print $1}')" sh -c "timeout 4 sh -c 'echo > /dev/tcp/$IP/8099' 2>/dev/null && echo yes || echo no" 2>/dev/null | tr -d '\r')"
+CAN_REACH="$(docker exec "${PREFIX}dsh-$(printf '%s' "$LOCAL_TENANTS" | awk '{print $1}')" sh -c "timeout 4 sh -c 'echo > /dev/tcp/$IP/8099' 2>/dev/null && echo yes || echo no" 2>/dev/null | tr -d '\r')"
 assert_eq "no" "${CAN_REACH:-no}" "租户连不上宿主的运维端口"
 
 # ---------------------------------------------------------------- 网络限速
@@ -363,7 +386,7 @@ else
   NZ="$(printf '%s' "$DISK" | awk '$2 != 0' | grep -c '^mt_tenant_disk_used_bytes')"
   assert_eq "$ALL" "$NZ" "磁盘用量指标全部非零（$NZ/$ALL）—— 0 会看起来像正常值"
   # 与真实目录对账：同量级即可（指标按文件大小，du 按分配的块，本来就略有出入）
-  for t in $TENANTS; do
+  for t in $LOCAL_TENANTS; do
     M="$(printf '%s' "$DISK" | awk -v t="$t" '$0 ~ "tenant=\"" t "\"" {print $2}')"
     D="$(du -sb "tenants/$t" 2>/dev/null | awk '{print $1}')"
     if [ -z "$M" ] || [ -z "$D" ]; then skip "$t 无法对账"; continue; fi
@@ -392,9 +415,27 @@ fi
 # ---------------------------------------------------------------- 多节点与注册
 head_ "注册与节点"
 NODES="$(python3 -c "import json;d=json.load(open('state/runtimes.json'))['runtimes'];print(','.join(sorted({d[t]['node'] for t in d})))" 2>/dev/null)"
-assert_eq "local" "$NODES" "注册表里的节点只有 local"
+# 运行时表里的节点集合必须**恰好**等于各租户 node 字段的集合：多一个说明有节点上报了
+# 不属于它的租户（迁移遗留），少一个说明那台的代理没在注册——那台机器上的用户会 503。
+EXPECT_NODES="$(python3 -c "
+import json
+print(','.join(sorted({t.get('node', 'local') for t in json.load(open('tenants.json'))['tenants']})))
+" 2>/dev/null)"
+assert_eq "$EXPECT_NODES" "$NODES" "运行时表的节点集合与注册表一致"
 REGN="$(python3 -c "import json;print(len(json.load(open('state/runtimes.json'))['runtimes']))" 2>/dev/null)"
 assert_eq "$(printf '%s' "$TENANTS" | wc -w)" "$REGN" "每个租户都有注册条目"
+# 远端租户的 endpoint 必须真的从那台机器答话——注册成功但地址写错时，只有这条能发现。
+for t in $REMOTE_TENANTS; do
+  EP="$(python3 -c "
+import json
+print(json.load(open('state/runtimes.json'))['runtimes'].get('$t', {}).get('endpoint', ''))
+" 2>/dev/null)"
+  CODE="$(http "$EP/" 2>/dev/null || true)"
+  case "$CODE" in
+    ""|000) fail "远端租户 $t 的 endpoint 不可达：${EP:-（运行时表里没有它）}" ;;
+    *)      pass "远端租户 $t 的 endpoint 可达：$EP（HTTP $CODE）" ;;
+  esac
+done
 STRAY="$(docker ps -a --filter 'label=mt.tenant' --format '{{.Names}}' | while read -r n; do printf '%s' "$TENANTS" | grep -qw "$(docker inspect "$n" --format '{{index .Config.Labels "mt.tenant"}}')" || echo "$n"; done | wc -l)"
 assert_eq "0" "$STRAY" "没有已删租户的容器残留"
 
@@ -624,6 +665,36 @@ else
 fi
 
 # ---------------------------------------------------------------- 控制台登录的落地页
+head_ "多节点（租户住在别的机器上）"
+# 多机真正的验收点：一个住在**别的节点**的租户，经同一个统一入口登录，落到它自己那台
+# 机器上的运行时里。注册、路由、cookie（authority 与运行位置无关）、代理转发这一段
+# 只要有一处不对，这条就会失败——而单机的检查全都看不出来。
+if [ -z "${REMOTE_TENANTS// /}" ]; then
+  skip "多节点（本部署没有远端租户，单机形态）"
+else
+  RT=""; RU=""; RP=""
+  for t in $REMOTE_TENANTS; do
+    _u="$(cred tenants "$t" user)"; _p="$(cred tenants "$t" password)"
+    if [ -n "$_u" ] && [ -n "$_p" ]; then RT="$t"; RU="$_u"; RP="$_p"; break; fi
+  done
+  if [ -z "$RT" ]; then
+    skip "多节点登录（$CREDS 里没有远端租户的口令；远端租户：$REMOTE_TENANTS）"
+  elif [ "$QUICK" = yes ]; then
+    skip "多节点登录（--quick 跳过）"
+  else
+    RJAR="$(mktemp)"; RPAGE="$(mktemp)"
+    assert_eq "303" "$(curl -sSk -o /dev/null -c "$RJAR" -w '%{http_code}' --max-time 20 \
+      --data-urlencode "tenant=$RT" --data-urlencode "user=$RU" --data-urlencode "password=$RP" \
+      "$PUBLIC_SCHEME://127.0.0.1:8090${MT_BASE}/__mt/login" 2>/dev/null)" \
+      "$RT（远端节点上）经统一入口登录"
+    assert_eq "200" "$(curl -sSk -o "$RPAGE" -b "$RJAR" -w '%{http_code}' --max-time 30 \
+      "$PUBLIC_SCHEME://127.0.0.1:8090${MT_BASE}/" 2>/dev/null)" "远端租户登录后进入自己的 DSH"
+    grep -q '<base href="./"' "$RPAGE" && pass "远端租户的 DSH 文档带 <base href=\"./\">" \
+      || fail "远端租户的 DSH 文档没有相对基准"
+    rm -f "$RJAR" "$RPAGE"
+  fi
+fi
+
 head_ "控制台登录：表单提交到哪、落在哪一页"
 if [ "$QUICK" = yes ]; then
   skip "控制台登录落地页（--quick 跳过）"

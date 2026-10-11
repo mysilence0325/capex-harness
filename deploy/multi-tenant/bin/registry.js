@@ -459,7 +459,29 @@ switch (command) {
     break
   }
 
+  case 'set-node': {
+    // 把租户改派到另一台节点。搬家的脚本（bin/mt.sh move）用它，手工改 tenants.json
+    // 也能达到同样效果，但那会让"忘了改注册表"变成一个安静的故障：控制面继续把用户
+    // 往旧机器上转，而旧机器上已经什么都没有。
+    const tenant = requireTenant(args[0])
+    const node = (args[1] ?? '').trim()
+    if (node === '') {
+      console.error('usage: registry.js set-node <id> <node>')
+      process.exit(1)
+    }
+    if (tenant.node === node) {
+      console.log(`tenant ${tenant.id} already runs on ${node}`)
+      break
+    }
+    const previous = String(tenant.node ?? 'local')
+    tenant.node = node
+    save()
+    console.log(`tenant ${tenant.id}: node ${previous} -> ${node}`)
+    console.log('  在目标节点上跑一次 bin/mt.sh up，并让它的节点代理上报（代理每 15 秒重报一次）')
+    break
+  }
+
   default:
-    console.error('usage: registry.js <list|add|add-batch|passwd|kick|remove|ensure-model-keys> [...]')
+    console.error('usage: registry.js <list|add|add-batch|passwd|kick|remove|set-node|ensure-model-keys> [...]')
     process.exit(2)
 }

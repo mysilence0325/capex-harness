@@ -45,6 +45,10 @@
 #   bin/mt.sh register <id>      register a tenant runtime with the control plane
 #   bin/mt.sh unregister <id>    make the control plane forget a tenant runtime
 #   bin/mt.sh runtimes           list the runtimes the control plane knows about
+#   bin/mt.sh agent up|down|status     节点代理（节点与控制面共用一条命令）
+#   bin/mt.sh agent allow <网关地址>    放行网关访问本机代理端口（换网关/加备用网关后要跑）
+#   bin/mt.sh ha-sync --from <主网关>   控制面 HA：从主网关单向同步状态（--install-timer 装定时器）
+#   bin/mt.sh move <租户> --to <节点>   把一个租户搬到另一台节点（数据+注册表+目标机 up）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -112,6 +116,10 @@ require_render() {
 
 cmd_up() {
   local this_node="${MT_NODE_NAME:-local}"
+  # 节点先刷新注册表副本，再渲染：控制面刚建的远端租户要这一份才出现在 compose 里。
+  if [ "$this_node" != local ]; then
+    sync_registry_from_control_plane | sed 's/^/    /'
+  fi
   # 老租户可能还没有占位 key；先补发，否则渲染出来的租户没有模型凭据。
   node_run bin/registry.js ensure-model-keys | sed "s/^/    /"
   node_run bin/render.js "${1:-}"
@@ -119,11 +127,20 @@ cmd_up() {
   # 经典构建器：本机 Docker Hub 不可达，buildkit 会去远端解析基础镜像元数据而失败，
   # 经典构建器直接使用本地已有的 node:22-bookworm-slim。
   # 网关只在控制面上有；worker 节点的 compose 里没有这个 service，构建它会失败。
-  if [ "$this_node" = local ]; then
-    DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build gateway egress-proxy model-gateway
-  else
-    DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build egress-proxy model-gateway
+  # 备用网关也要构建网关镜像（它渲染的 compose 里有 gateway 这个 service）；
+  # 有租户的节点只有 egress-proxy / model-gateway / node-agent。
+  #
+  # 逐个 service 先显式构建（用经典构建器），再 up：让 compose 自己在 up 里构建
+  # 会走 BuildKit，于是每台新机器都要去 Docker Hub 解析基础镜像元数据然后失败。
+  local build_services=(egress-proxy model-gateway)
+  if [ "$this_node" = local ] || [ "${MT_CONTROL_PLANE_STANDBY:-}" = "1" ]; then
+    build_services=(gateway "${build_services[@]}")
   fi
+  # node-agent 只在非备用主机的 compose 里出现（备用网关不持有租户，不需要它）。
+  if grep -q '^  node-agent:' docker-compose.yml 2>/dev/null; then
+    build_services+=("node-agent")
+  fi
+  DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build "${build_services[@]}"
   "${COMPOSE[@]}" up -d
   # 网络建立后才能探测到网关地址；首次运行或网段变化时补上租户出口代理。
   ensure_egress_proxy
@@ -139,6 +156,8 @@ cmd_up() {
     # 控制面：注册本机租户（网关只认注册表里的地址，容器重建后必须重报）。
     wait_gateway || true
     register_all_tenants
+  elif [ "${MT_CONTROL_PLANE_STANDBY:-}" = "1" ]; then
+    echo "==> 本机是备用网关：只服务共享入口（MT_EDGE_LISTEN=0），不持有租户、不注册"
   else
     # 节点：不自己注册，交给本机节点代理——它随容器变化持续重报，而 up 只跑一次。
     echo "==> 本节点是 ${this_node}：运行时由节点代理上报（在控制面用 bin/mt.sh runtimes 查看）"
@@ -172,6 +191,31 @@ registry_key() {
   local file="${MT_REGISTRY_KEY_FILE:-state/registry.key}"
   if [ -f "$file" ]; then
     tr -d '\r\n' < "$file" || true
+  fi
+  return 0
+}
+
+# 节点：把控制面的租户注册表拉一份到本机。节点渲染的是这份副本（render.js 按
+# MT_NODE_NAME 过滤），所以"控制面新建了分配给本机的租户"要先刷新副本才看得见。
+#
+# 控制面自己不走这里：它手上就是权威注册表，而 /__mt/registry/tenants 发出来的是
+# 面向节点的副本（口令哈希被剥掉），拉回来会把权威文件覆盖掉。
+#
+# 拉不到不算错：控制面暂时不可达时，节点不该连自己原有的租户都起不来。
+sync_registry_from_control_plane() {
+  local control="${MT_CONTROL_PLANE:-}"
+  [ -n "$control" ] || return 0
+  [ -f state/register.key ] || return 0
+  local key tmp=".tenants.json.new"
+  key="$(tr -d '\r\n' < state/register.key)"
+  http GET "${control%/}/__mt/registry/tenants" \
+    --header "x-mt-registry-key: ${key}" --insecure --max-time 20 > "$tmp" 2>/dev/null || true
+  if [ -s "$tmp" ] && grep -q '"tenants"' "$tmp"; then
+    mv "$tmp" tenants.json
+    echo "    已从控制面刷新租户注册表"
+  else
+    rm -f "$tmp"
+    echo "    !! 拉取租户注册表失败（控制面不可达或密钥不对）：用本机现有副本继续"
   fi
   return 0
 }
@@ -233,7 +277,18 @@ register_tenant() {
       echo "    !! ${id}: 注册表里没有 internalPort" >&2
       return 1
     fi
-    endpoint="http://${ip}:${port}"
+    # 端点优先走本机节点代理（http://<本机地址>:3199/proxy/<租户>），而不是容器在
+    # mt-net 上的 bridge 地址。bridge 地址只有本机可达，于是控制面高可用切换之后，
+    # 备用网关（另一台机器）连不上这些租户——"网关坏了切过去"就只保住住在其它节点上
+    # 的租户，而控制面自己这台上跑的那些全 502。走代理之后任何能连到本机 3199 的
+    # 网关都能代理它们，和节点上的租户是同一条路径、同一套配置。
+    local agent_ep="" node_addr=""
+    node_addr="${MT_NODE_ADDRESS:-}"
+    [ -n "$node_addr" ] || node_addr="$(lan_ip)"
+    if [ -n "$node_addr" ] && [ "$(docker inspect "$(agent_container)" --format '{{.State.Status}}' 2>/dev/null || true)" = running ]; then
+      agent_ep="http://${node_addr}:${MT_AGENT_PORT:-3199}/proxy/${id}"
+    fi
+    endpoint="${agent_ep:-http://${ip}:${port}}"
     # 本机注册：等 DSH 打印出启动 token 再上报，否则激活会失败。
     # 拿不到 token 就不上报——控制面会拒绝没有 token 的注册（它没法用）。
     # （远端节点用节点代理，或显式传 --endpoint/--token。）
@@ -270,7 +325,9 @@ register_tenant() {
 register_all_tenants() {
   echo "==> 注册运行时地址到控制面"
   local ids id ok=0 failed=0
-  ids="$(node_run -e 'const r=require("/w/tenants.json");process.stdout.write((r.tenants??[]).map(t=>t.id).join(" "))' 2>/dev/null | tr -d '\r')"
+  # 只注册**本机**的租户。远端租户由它那台的节点代理上报；在这里也去注册，只会因为
+  # 本地没有对应容器而逐个报失败——多机时每次 up 都刷一排红字，把真正的错误淹掉。
+  ids="$(node_run -e 'const r=require("/w/tenants.json");const me=process.argv[1];process.stdout.write((r.tenants??[]).filter(t=>(t.node??"local")===me).map(t=>t.id).join(" "))' "${MT_NODE_NAME:-local}" 2>/dev/null | tr -d '\r')"
   for id in $ids; do
     if register_tenant "$id"; then
       ok=$((ok + 1))
@@ -296,6 +353,259 @@ wait_gateway() {
   done
   echo "    !! 控制面 60 秒内没有答话（$(gw_base)/__mt/health）：bin/mt.sh logs gateway 看日志" >&2
   return 1
+}
+
+# 本机节点代理的容器名（与 render.js 的 node-agent service 一致）。
+agent_container() { echo "${MT_CONTAINER_NAME_PREFIX:-mt-}node-agent"; }
+
+# 本机的局域网地址：节点代理用它拼"控制面该来哪儿找我"的端点，控制面自己注册租户时
+# 也用它（端点走代理而不是容器 bridge 地址）。排除 docker/virbr/lo，与 node-install.sh
+# 的探测口径一致。
+lan_ip() {
+  { command -v ip >/dev/null 2>&1 &&
+    ip -4 -o addr show scope global 2>/dev/null \
+      | awk '$2 !~ /^(docker|br-|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1 ; } || true
+}
+
+# 节点代理：up / down / status。
+#
+# 控制面与「有租户的节点」的 compose 里都有 node-agent 这个 service，优先用 compose 起它
+# （配置在 compose 里，一处维护）；纯网关主机（备用）没有这个 service，就按同样的配置
+# docker run 一个——省得现场再手抄一遍 README §1.1 里那段 docker run。
+cmd_agent() {
+  local action="${1:-status}"
+  local name; name="$(agent_container)"
+  case "$action" in
+    allow)
+      # 放行某个地址访问本机节点代理端口。为什么需要：浏览器的租户请求是**网关**转发到
+      # http://<本机>:3199/proxy/<租户> 的，而 CentOS 的 firewalld 默认只放行 ssh。
+      # 单机部署时网关与本机是同一台，连的是回环；控制面高可用之后，备用网关在另一台
+      # 机器上，不提前放行它，切换过去就是 502 connect EHOSTUNREACH（实测过）。
+      shift
+      [ "$#" -gt 0 ] || { echo "用法: bin/mt.sh agent allow <网关地址[,网关地址...]>" >&2; return 2; }
+      if ! command -v firewall-cmd >/dev/null 2>&1 || ! firewall-cmd --state >/dev/null 2>&1; then
+        echo "本机没在跑 firewalld：请自行放行 $* → 本机 ${MT_AGENT_PORT:-3199}/tcp"
+        return 0
+      fi
+      local list="$1" ip
+      for ip in $(printf '%s' "$list" | tr ',' ' '); do
+        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=${ip} port port=${MT_AGENT_PORT:-3199} protocol=tcp accept" >/dev/null 2>&1 || true
+        echo "    放行 ${ip} -> ${MT_AGENT_PORT:-3199}/tcp"
+      done
+      firewall-cmd --reload >/dev/null 2>&1 || echo "    !! reload 失败，规则要等下次 reload 才生效" >&2
+      ;;
+    up)
+      if [ -f docker-compose.yml ] && "${COMPOSE[@]}" config --services 2>/dev/null | grep -qx node-agent; then
+        echo "==> 用 compose 启动节点代理（service node-agent）"
+        "${COMPOSE[@]}" up -d node-agent
+      else
+        echo "==> 这个 hosts 的 compose 里没有 node-agent，按同样的配置 docker run"
+        DOCKER_BUILDKIT=0 "${COMPOSE[@]}" build node-agent >/dev/null 2>&1 || true
+        docker rm -f "$name" >/dev/null 2>&1 || true
+        docker run -d --name "$name" --restart unless-stopped --network host --pid host --privileged \
+          -v /var/run/docker.sock:/var/run/docker.sock:ro \
+          -v "$ROOT/state:/key:ro" -v "$ROOT:$ROOT" \
+          -v /usr/bin/docker:/usr/bin/docker:ro \
+          -e "MT_NODE_NAME=${MT_NODE_NAME:-local}" -e "MT_NODE_ADDRESS=${MT_NODE_ADDRESS:-}" \
+          -e "MT_CONTROL_PLANE=${MT_CONTROL_PLANE:-}" -e "MT_CONTROL_PLANE_CA=${MT_CONTROL_PLANE_CA:-}" \
+          -e MT_REGISTRY_KEY_FILE=/key/registry.key -e MT_OPS_KEY_FILE=/key/ops.key \
+          -e MT_REGISTER_KEY_FILE=/key/register.key \
+          -e "MT_REGISTRY_SYNC=$([ "${MT_NODE_NAME:-local}" = local ] && echo 0 || echo 1)" \
+          -e "MT_NETWORK=${MT_NETWORK:-mt-net}" \
+          -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
+          -e "MT_PROJECT_DIR=$ROOT" -e "MT_DATA_ROOT=$ROOT" \
+          -e "MT_AGENT_PORT=${MT_AGENT_PORT:-3199}" -e "TZ=${TZ:-Asia/Shanghai}" \
+          mt-node-agent:local
+      fi
+      ;;
+    down)   docker rm -f "$name" ;;
+    status|*) docker ps -a --filter "name=^${name}$" --format '{{.Names}}\t{{.Status}}' ;;
+  esac
+}
+
+# 控制面 HA 的状态集合：会话签名密钥、分用途密钥、注册表、运行时表、限速/配额意图、证书。
+# 不含 logs/：两台网关各自写自己的审计，切换后历史分成两段（这是刻意的，写在文档里）。
+HA_FILES=(tenants.json state/session.key state/keys.json state/registry.key state/register.key
+          state/ops.key state/admin.json state/admin.key state/runtimes.json state/bandwidth.json
+          state/quota.json state/tls)
+
+# 从主网关单向拉一份状态到本机（备网关）。角色互换时把 --from 换成新的主网关即可。
+cmd_ha_sync() {
+  local from="" install_timer=no
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from)          from="${2:-}"; shift 2 ;;
+      --install-timer) install_timer=yes; shift ;;
+      *)               shift ;;
+    esac
+  done
+  [ -n "$from" ] || { echo "用法: bin/mt.sh ha-sync --from <主网关地址> [--install-timer]" >&2; return 2; }
+  [ "$from" != "$(hostname)" ] || { echo "不能从自己同步" >&2; return 2; }
+
+  # 用 tar 过 ssh，不用 rsync（目标机不一定装了它）；--ignore-failed-read 让"某个文件
+  # 还没生成"（比如全新备用机还没有 runtimes.json）不致命。
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${from}" \
+    "cd '${MT_HA_REMOTE_ROOT:-$ROOT}' && tar --ignore-failed-read -cf - ${HA_FILES[*]} 2>/dev/null" \
+    | tar -xf - -C "$ROOT" || { echo "!! 从 ${from} 同步失败（免密 ssh 通吗？）" >&2; return 1; }
+  echo "已从 ${from} 同步：${HA_FILES[*]}"
+
+  if [ "$install_timer" = yes ]; then
+    cat > /etc/systemd/system/dsh-mt-ha-sync.service <<UNIT
+[Unit]
+Description=DSH multi-tenant: pull control-plane state from the active gateway
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$ROOT
+ExecStart=$ROOT/bin/mt.sh ha-sync --from $from
+UNIT
+    cat > /etc/systemd/system/dsh-mt-ha-sync.timer <<UNIT
+[Unit]
+Description=DSH multi-tenant: periodic control-plane state pull
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+
+[Install]
+WantedBy=timers.target
+UNIT
+    systemctl daemon-reload && systemctl enable --now dsh-mt-ha-sync.timer \
+      && echo "已安装并启用 dsh-mt-ha-sync.timer（每 60 秒）" \
+      || echo "!! systemd 单元没装上（容器里跑？这两条要在宿主机上执行）" >&2
+  fi
+}
+
+# 从控制面的注册表接口取"某个节点的运行时 endpoint"（用来定位那台机器）。
+node_endpoint() {
+  local node="$1"
+  http GET "$(gw_base)/__mt/registry" --max-time 10 2>/dev/null > "$ROOT/.ha-runtimes.json" || true
+  node_run -e '
+    const step = process.argv[1]
+    // /__mt/registry 的应答是 {"runtimes": {<租户>: {...}}}；少解一层就会
+    // 把整个表当成一条记录，于是"找不到这个节点的运行时"永远成立。
+    let rows = {}
+    try {
+      const doc = require("/w/.ha-runtimes.json")
+      rows = doc.runtimes ?? doc
+    } catch { rows = {} }
+    const out = []
+    for (const entry of Object.values(rows)) {
+      if (String(entry?.node ?? "local") !== step) continue
+      if (typeof entry?.endpoint === "string") out.push(entry.endpoint)
+    }
+    process.stdout.write(out.join(" "))
+  ' "$node" 2>/dev/null | tr -d '\r'
+  rm -f "$ROOT/.ha-runtimes.json"
+}
+
+# 某个节点上代理的地址（`bin/mt.sh add` 用它开通远端租户）。
+#
+# 注册表里只有"租户 → 运行时 endpoint"，没有节点级的代理表，所以只能从同节点已注册
+# 的运行时反推：代理固定监听 3199，endpoint 是 http://<节点地址>:3199/proxy/<租户>，
+# 去掉 /proxy/… 就是代理自己。节点上一个租户都还没上报过时回答为空——那台机器要么
+# 还没装代理，要么还没跑过 up，这时只能去它上面开通（新节点的第一次就是这种情况）。
+node_agent_url() {
+  local node="$1" endpoint
+  endpoint="$(node_endpoint "$node" | tr ' ' '\n' | grep -m1 . || true)"
+  [ -n "$endpoint" ] || return 0
+  printf '%s' "$endpoint" | sed -E 's#/proxy/.*$##'
+}
+
+# 把一个租户从一台节点搬到另一台：停源端容器 → 搬数据 → 改注册表的 node → 目标节点 up。
+#
+# 为什么要脚本：手工做这四步时最常错的是"忘了改注册表"（于是控制面一直把用户往旧机器上转）
+# 与"忘了在目标机上 up"（于是数据到了但没人跑它）。前置检查也在这里：目标节点必须已知
+# （注册表里有它的运行记录）除非 --force；数据目录用 --remote-root 指明（两台同路径可省）。
+cmd_move() {
+  local tenant="" to="" to_host="" force=no remote_root="" keep_source=no
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --to)           to="${2:-}"; shift 2 ;;
+      --to-host)      to_host="${2:-}"; shift 2 ;;
+      --remote-root)  remote_root="${2:-}"; shift 2 ;;
+      --force)        force=yes; shift ;;
+      --keep-source)  keep_source=yes; shift ;;
+      *)              [ -z "$tenant" ] && tenant="$1"; shift ;;
+    esac
+  done
+  remote_root="${remote_root:-$ROOT}"
+  [ -n "$tenant" ] && [ -n "$to" ] || {
+    echo "用法: bin/mt.sh move <租户> --to <节点名> [--to-host <IP>] [--remote-root <路径>] [--keep-source] [--force]" >&2
+    return 2
+  }
+
+  local from_node
+  from_node="$(node_run -e 'const r=require("/w/tenants.json");const t=(r.tenants??[]).find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.node??"local"))' "$tenant" 2>/dev/null | tr -d '\r')"
+  [ -n "$from_node" ] || { echo "注册表里没有租户 $tenant" >&2; return 1; }
+  [ "$from_node" != "$to" ] || { echo "$tenant 已经在 $to 上了" >&2; return 1; }
+
+  if [ -z "$to_host" ]; then
+    to_host="$(node_endpoint "$to" | tr ' ' '\n' | head -1 | sed -E 's#^https?://([^:/]+).*#\1#')"
+  fi
+  [ -n "$to_host" ] || {
+    echo "注册表里没有节点 $to 的运行记录（它还没上报过任何租户）：用 --to-host <IP> 指定，或先在它上面建一个租户让代理上报" >&2
+    return 1
+  }
+  local from_host="$to_host"
+  if [ "$from_node" != local ]; then
+    from_host="$(node_endpoint "$from_node" | tr ' ' '\n' | head -1 | sed -E 's#^https?://([^:/]+).*#\1#')"
+    [ -n "$from_host" ] || { echo "找不到节点 $from_node 的地址（它没有注册运行时？）" >&2; return 1; }
+  fi
+
+  echo "==> 停 ${from_node} 上的容器"
+  if [ "$from_node" = local ]; then
+    docker stop "$(docker ps -q --filter "label=mt.tenant=$tenant")" >/dev/null 2>&1 || true
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${from_host}" \
+      "docker stop \$(docker ps -q --filter 'label=mt.tenant=${tenant}') >/dev/null 2>&1 || true" || true
+  fi
+
+  echo "==> 搬数据 $tenant：${from_node} → ${to}"
+  if [ "$from_node" = local ]; then
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${to_host}" "cd '$remote_root' && mkdir -p tenants" \
+      && tar -cf - -C "$ROOT" "tenants/${tenant}" \
+      | ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${to_host}" "cd '$remote_root' && tar -xf -" \
+      || { echo "!! 数据搬运失败" >&2; return 1; }
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${from_host}" "cd '$remote_root' && tar -cf - tenants/${tenant}" \
+      | ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${to_host}" "cd '$remote_root' && tar -xf -" \
+      || { echo "!! 数据搬运失败" >&2; return 1; }
+  fi
+
+  echo "==> 改注册表的 node 字段并重渲染"
+  node_run bin/registry.js set-node "$tenant" "$to" || return 1
+  node_run bin/render.js >/dev/null
+
+  echo "==> 在 ${to} 上起来"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${to_host}" \
+    "cd '$remote_root' && MT_NODE_NAME='$to' bin/mt.sh up" || { echo "!! 目标节点 up 失败：手工跑一次看输出" >&2; return 1; }
+  # 源端那个已经停掉的容器没有用了：compose 文件里已经没有它的 service，下一次 up 也
+  # 不会重建它，留着只会占 docker ps -a 与端口（doctor 会把它报成 exited 的故障）。
+  # 数据目录 tenants/<租户>/ 保留：回滚就是把 set-node 改回去、再在源端 up 一次。
+  echo "==> 清掉源端（${from_node}）那个已停的容器"
+  if [ "$from_node" = local ]; then
+    docker rm -f "$(docker ps -aq --filter "label=mt.tenant=${tenant}")" >/dev/null 2>&1 || true
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${from_host}" \
+      "docker rm -f \$(docker ps -aq --filter 'label=mt.tenant=${tenant}') >/dev/null 2>&1 || true" || true
+  fi
+  # 数据也要清掉：目标端已经确认起来了，而留在源端的 tenants/<租户>/ 会被源端的备份
+  # 一起打进去（看起来"这台机器上有这个租户"），恢复时还会把一份过期副本铺回来。
+  # 回滚不需要它——数据在目标端，再 move 回来就是了。要留着看，加 --keep-source。
+  if [ "${keep_source:-no}" = yes ]; then
+    echo "    --keep-source：源端数据保留在 ${from_host}:$remote_root/tenants/${tenant}/"
+  else
+    echo "==> 删除源端数据目录 tenants/${tenant}/（回滚＝再 move 回来）"
+    if [ "$from_node" = local ]; then
+      rm -rf "$ROOT/tenants/${tenant}"
+    else
+      ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${from_host}" \
+        "rm -rf '$remote_root/tenants/${tenant}'" || true
+    fi
+  fi
+  echo "==> 完成。该租户现在跑在 ${to}（${to_host}）；用户侧不用改任何东西"
 }
 
 # 手动注册（远端节点或排查时用）。
@@ -485,10 +795,28 @@ cmd_url() {
   port="${MT_EDGE_PORT:-8090}"
   if [ -f state/tls/server.crt ] || [ -n "${MT_TLS_CERT:-}" ]; then scheme="https"; else scheme="http"; fi
   echo "==> 入口"
+  # 节点没有网关，本机不对外提供任何入口：真正的入口在控制面（或前端）那一台。
+  # 照抄 entry-urls.txt 会把"192.168.122.138:8090 统一登录入口"这种不存在的地址
+  # 打印出来——那是控制面的地址，不是这台机器的。
+  if [ "${MT_NODE_NAME:-local}" != local ] && [ "${MT_CONTROL_PLANE_STANDBY:-}" != "1" ]; then
+    echo "    本机是节点 ${MT_NODE_NAME}：不提供租户入口，入口在控制面那一台"
+    [ -n "${MT_CONTROL_PLANE:-}" ] && echo "    控制面: ${MT_CONTROL_PLANE}（租户地址由它按会话跳转）"
+    return 0
+  fi
   if [ -f entry-urls.txt ]; then
     # 模板里写的是 ${MT_EDGE_PORT:-8090} 这种形式，默认值可能与本部署实际端口不同，
     # 所以替换要匹配任意默认值，否则打印出来的地址会原样带着未展开的变量。
-    sed -e "s|\${IP}|${ip:-127.0.0.1}|g" -e "s|\${MT_EDGE_PORT:-[0-9]*}|${port}|g" -e "s|http://|${scheme}://|g" entry-urls.txt
+    local url_lines
+    url_lines="$(sed -e "s|\${IP}|${ip:-127.0.0.1}|g" -e "s|\${MT_EDGE_PORT:-[0-9]*}|${port}|g" -e "s|http://|${scheme}://|g" entry-urls.txt)"
+    if [ "${MT_CONTROL_PLANE_STANDBY:-}" = "1" ]; then
+      # 备用网关只服务共享入口：每租户的专属入口端口只开在主网关上，切换过去之后
+      # 它们不存在（共享入口按会话路由，不受影响）。只打印第一行，避免把不存在的
+      # 地址列出来。
+      printf '%s\n' "$url_lines" | sed -n '1p'
+      printf '    备用网关不监听各租户的专属入口端口（那些只在主网关上）；共享入口照常按会话路由\\n'
+    else
+      printf '%s\n' "$url_lines"
+    fi
   else
     echo "    ${scheme}://${ip:-127.0.0.1}:${port}/"
   fi
@@ -650,6 +978,8 @@ cmd_add() {
   local edge service
   edge="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.edgePort ?? ""))' "$id" 2>/dev/null | tr -d '\r')"
   service="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.service ?? ("dsh-"+t.id)))' "$id" 2>/dev/null | tr -d '\r')"
+  local tenant_node
+  tenant_node="$(node_run -e 'const r=require("/w/tenants.json");const t=r.tenants.find(x=>x.id===process.argv[1]);process.stdout.write(String(t?.node ?? "local"))' "$id" 2>/dev/null | tr -d '\r')"
 
   if [ "$no_start" = yes ]; then
     echo
@@ -663,15 +993,37 @@ cmd_add() {
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 
-  echo "==> 启动租户 ${id}（只动这一个 service）"
-  "${COMPOSE[@]}" up -d "$service" 2>&1 | tail -2
-
-  # 控制面只看注册表，新租户必须先注册（等它打出启动 token）。
-  register_tenant "$id"
-  if wait_tenant_ready "$id" 60; then
-    echo "    ${id} 已就绪"
+  if [ "$tenant_node" != local ]; then
+    # 容器住在别的机器上，控制面的 compose 里没有这个 service（`up -d dsh-n2t`
+    # 只会打印 no such service）。两条路：那台机器上已经有代理上报过租户，就叫它
+    # 开通（控制台走的是同一个 /provision：拉注册表 → 本机 up）；还没有代理，就
+    # 只能去那台机器上跑一次 up——这正是新节点的第一次。
+    echo "==> ${id} 分配给节点 ${tenant_node}：容器由那台机器创建，控制面只登记与路由"
+    local agent_url=""
+    agent_url="$(node_agent_url "$tenant_node")"
+    if [ -n "$agent_url" ]; then
+      echo "==> 让 ${tenant_node} 的代理开通（它先刷新注册表，再在那里 up）"
+      if http POST "${agent_url}/provision" --header "x-mt-registry-key: $(registry_key)" \
+           --max-time 600 --fail >/dev/null 2>&1; then
+        echo "    ${tenant_node} 已开通 ${id}"
+      else
+        echo "    !! 代理开通失败：到 ${tenant_node} 上执行 bin/mt.sh up 看输出" >&2
+      fi
+    else
+      echo "    节点 ${tenant_node} 还没有代理上报过任何租户，控制面找不到它的地址。"
+      echo "    到 ${tenant_node} 上执行： bin/mt.sh up    （它会先从控制面刷新注册表）"
+    fi
   else
-    echo "    !! ${id} 未在预期时间内就绪，查看 bin/mt.sh logs ${id}" >&2
+    echo "==> 启动租户 ${id}（只动这一个 service）"
+    "${COMPOSE[@]}" up -d "$service" 2>&1 | tail -2
+
+    # 控制面只看注册表，新租户必须先注册（等它打出启动 token）。
+    register_tenant "$id"
+    if wait_tenant_ready "$id" 60; then
+      echo "    ${id} 已就绪"
+    else
+      echo "    !! ${id} 未在预期时间内就绪，查看 bin/mt.sh logs ${id}" >&2
+    fi
   fi
 
   local ip port
@@ -846,6 +1198,9 @@ case "${1:-}" in
   admin-add)   shift; node_run bin/admin-users.js add "$@" ;;
   admin-remove) shift; node_run bin/admin-users.js remove "$@" ;;
   unregister) shift; cmd_unregister "$@" ;;     # 让控制面忘掉某个租户的运行时
+  agent)   shift; cmd_agent "$@" ;;               # 节点代理：up/down/status（控制面与节点共用）
+  ha-sync) shift; cmd_ha_sync "$@" ;;             # 控制面 HA：从主网关单向同步状态
+  move)    shift; cmd_move "$@" ;;                # 把一个租户搬到另一台节点
   runtimes)   cmd_runtimes ;;                   # 列出控制面当前认识的运行时
   usage)   shift; bash bin/usage.sh "$@" ;;     # 按租户汇总模型用量（--tenant/--tail）
   cert)    shift; bash bin/make-cert.sh "$@" ;;   # 生成自签证书；之后 bin/mt.sh up 切到 HTTPS

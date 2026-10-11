@@ -72,6 +72,21 @@ function tenantMac(tenant) {
 // validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Which machine this render is for.
+ *
+ * The control plane renders for `local`; a worker node sets `MT_NODE_NAME` to its
+ * own name and renders the tenants assigned to it (plus the node-local helpers),
+ * which is how a node creates its own containers instead of an operator starting
+ * them by hand.
+ *
+ * Defined above the validation loop: that loop reads it to tell a node's registry
+ * copy — which the control plane hands out with password hashes stripped — from a
+ * control-plane file that has genuinely lost them.
+ */
+const THIS_NODE = process.env.MT_NODE_NAME ?? 'local'
+const isControlPlane = THIS_NODE === 'local'
+
 const ids = new Set()
 const ports = new Set()
 const edgePorts = new Set()
@@ -115,8 +130,14 @@ for (const tenant of tenants) {
       process.exit(1)
     }
     if (typeof user.passwordHash !== 'string' || !user.passwordHash.startsWith('scrypt$')) {
-      console.error(`tenant ${tenant.id}/${user.name}: passwordHash must be scrypt$<salt>$<digest>`)
-      process.exit(1)
+      // A node renders the copy it pulled from the control plane, where users
+      // carry only their name: authentication happens at the gateway, and a node
+      // needs a tenant's placement and ports, never its credentials. On the
+      // control plane the same absence means the authoritative file is damaged.
+      if (isControlPlane) {
+        console.error(`tenant ${tenant.id}/${user.name}: passwordHash must be scrypt$<salt>$<digest>`)
+        process.exit(1)
+      }
     }
   }
 }
@@ -128,12 +149,28 @@ for (const tenant of tenants) {
 //
 // 注意常量名是 ROOT（大写）：写成 root 会让渲染直接崩溃，而崩溃的表现是
 // "compose 没更新"，看起来像渲染没跑，不像代码写错了。
+//
+// 只由控制面生成。一套部署里只有一套密钥：节点与控制面共用同一份，节点用
+// bin/node-install.sh 从控制面取回来。节点若在这里自己生成，它拿到的是另一把随机的
+// 密钥，注册与运维调用立刻 401——而症状只是"控制面一直看不到那台节点的租户"，
+// 或者"租户重启后统一入口一直 303"，从现象追不到密钥上。
 const KEY_STATE_DIR = path.join(ROOT, 'state')
-keys.generateKeys(KEY_STATE_DIR)
-for (const purpose of ['ops', 'register']) {
-  fs.writeFileSync(path.join(KEY_STATE_DIR, `${purpose}.key`), `${keys.readKeys(KEY_STATE_DIR)[purpose]}\n`, {
-    mode: 0o600,
-  })
+if (isControlPlane) {
+  keys.generateKeys(KEY_STATE_DIR)
+  for (const purpose of ['ops', 'register']) {
+    fs.writeFileSync(path.join(KEY_STATE_DIR, `${purpose}.key`), `${keys.readKeys(KEY_STATE_DIR)[purpose]}\n`, {
+      mode: 0o600,
+    })
+  }
+} else {
+  for (const purpose of ['ops', 'register']) {
+    const file = path.join(KEY_STATE_DIR, `${purpose}.key`)
+    if (!fs.existsSync(file)) {
+      console.error(`缺 ${file}：本机是节点（MT_NODE_NAME=${THIS_NODE}），密钥要用控制面的那一份。`)
+      console.error('在控制面执行 bin/node-install.sh 的取密钥步骤，或手工取回 state/{register,ops,registry}.key。')
+      process.exit(1)
+    }
+  }
 }
 
 const edgePort = Number(process.env.MT_EDGE_PORT ?? 8090)
@@ -332,16 +369,6 @@ const trustApplied = []
 const sandboxApplied = []
 const remoteTenants = []
 /**
- * Which machine this render is for.
- *
- * The control plane renders for `local`; a worker node sets `MT_NODE_NAME` to its
- * own name and renders the tenants assigned to it (plus the node-local helpers),
- * which is how a node creates its own containers instead of an operator starting
- * them by hand.
- */
-const THIS_NODE = process.env.MT_NODE_NAME ?? 'local'
-const isControlPlane = THIS_NODE === 'local'
-/**
  * Docker network the tenant runtimes join.
  *
  * Configurable so several nodes can share one development host, and so a Swarm
@@ -430,6 +457,42 @@ for (const line of (fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : 
   const at = trimmed.indexOf('=')
   envValues.set(trimmed.slice(0, at).trim(), trimmed.slice(at + 1).trim())
 }
+
+/**
+ * Whether this host is a standby control plane, from MT_CONTROL_PLANE_STANDBY.
+ *
+ * A standby serves the browser entry for the same deployment, so it needs the
+ * gateway; it has no tenants of its own, so it must not render tenant services or
+ * the scheduled backup, and it must not open the per-tenant entry ports the
+ * active gateway already holds.
+ */
+const STANDBY = (envValues.get('MT_CONTROL_PLANE_STANDBY') ?? process.env.MT_CONTROL_PLANE_STANDBY ?? '').trim() === '1'
+
+/** Whether this host serves the browser entry: the control plane, or its standby. */
+const HAS_GATEWAY = isControlPlane || STANDBY
+
+/** Whether this host runs tenant containers of its own. */
+const HAS_LOCAL_TENANTS = tenants.some((tenant) => isLocalTenant(tenant))
+
+/** Hosts that keep their own scheduled backup: the control plane and every node with tenants. */
+const HAS_BACKUP = isControlPlane || HAS_LOCAL_TENANTS
+
+/**
+ * Hosts that run the node agent: the control plane, every tenant node, and any
+ * standby that also carries tenants.
+ *
+ * Independent of {@link HAS_BACKUP}: a node with no tenants yet still needs its
+ * agent, because the console creates a remote tenant by asking that node's agent
+ * to provision (pull the registry and run `bin/mt.sh up`). Without the agent the
+ * console can only write the registry entry, and the tenant stays uncreated until
+ * someone logs in to the node.
+ *
+ * A standby host with no tenants renders none, but a machine can
+ * serve the shared entry and run a node's tenants at the same time (MT_NODE_NAME
+ * names that node), and those tenants register through this host's agent like any
+ * other node's.
+ */
+const HAS_AGENT = !STANDBY || HAS_LOCAL_TENANTS
 
 for (const tenant of tenants) {
   // A tenant assigned elsewhere keeps its data and its containers there; this
@@ -780,7 +843,7 @@ ${loggingBlock()}
       - ./tenants.json:/config/tenants.json:ro
       - ./logs:/logs
 
-${isControlPlane ? `  backup:
+${HAS_BACKUP ? `  backup:
     # A scheduled backup is only worth having if nobody has to remember it. This
     # runs the same bin/backup.sh an operator runs by hand, so there is one
     # backup implementation rather than two that drift. It needs the Docker
@@ -812,7 +875,7 @@ ${loggingBlock()}
     # reads both settings from its own environment rather than from this file.
     entrypoint: ["bash", "/project/bin/retention-loop.sh"]
 
-  node-agent:
+` : ''}${HAS_AGENT ? `  node-agent:
     # The console's lifecycle and maintenance operations have nowhere to run: the
     # control plane is a container with no Docker access and no project directory.
     # This is the host-side actor they go through, and it is a service rather than
@@ -852,6 +915,12 @@ ${loggingBlock()}
       # 指向不存在的路径等于把这道校验架空（它校验的是虚构路径，随后照样执行清理）。
       MT_DATA_ROOT: ${hostRoot()}
       MT_AGENT_PORT: \${MT_AGENT_PORT:-3199}
+      # A node renders from the registry copy it pulls from the control plane, so
+      # its agent must be allowed to refresh that copy (the console's create-remote-
+      # tenant path calls /provision: pull the registry, then run this host's up).
+      # The control plane must not: it holds the authoritative file, and the
+      # node-facing copy it would pull back has the password hashes stripped.
+      MT_REGISTRY_SYNC: ${isControlPlane ? '0' : '1'}
       TZ: \${TZ:-Asia/Shanghai}
 ${loggingBlock()}
     volumes:
@@ -870,7 +939,7 @@ ${loggingBlock()}
       - /usr/bin/docker:/usr/bin/docker:ro
       - /usr/local/bin/docker-compose:/usr/local/bin/docker-compose:ro
 
-  gateway:
+` : ''}${HAS_GATEWAY ? `  gateway:
     build: ./gateway
     image: mt-gateway:local
     container_name: ${NAME_PREFIX}gateway
@@ -884,6 +953,9 @@ ${loggingBlock()}
     environment:
       MT_EDGE_PORT: \${MT_EDGE_PORT:-8090}
       MT_BIND_IP: \${MT_BIND_IP:-0.0.0.0}
+      # 备用网关只服务共享入口：专属入口端口由主网关持有，两边都开会在同一套
+      # 端口上撞车（而且那些入口本来就只指向主网关）。
+      MT_EDGE_LISTEN: ${STANDBY ? '0' : '1'}
       MT_SESSION_TTL_HOURS: \${MT_SESSION_TTL_HOURS:-12}
       # 反向代理把我们挂在子路径下时（https://<域名>/ai/harness），这里填那个前缀。
       # 网关据此生成登录表单、跳转和 cookie Path；请求带不带这个前缀都能路由。

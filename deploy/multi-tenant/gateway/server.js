@@ -2703,6 +2703,16 @@ applyRegistry('boot')
 // Polling instead of fs.watch: the registry arrives through a bind mount, whose
 // watch semantics differ across kernels.
 fs.watchFile(CONFIG_FILE, { interval: 2000 }, () => { applyRegistry('reload') })
+// The runtime table arrives by file too: on a standby gateway `bin/mt.sh ha-sync`
+// copies it from the active gateway, and a registration made elsewhere never
+// reaches this process. Startup is the wrong lifetime for it — a standby that
+// took over with a stale table answers 502 for every tenant whose endpoint moved,
+// while the file on disk is correct.
+fs.watchFile(RUNTIMES_FILE, { interval: 2000 }, () => {
+  runtimes = loadRuntimes()
+  const registered = [...tenants.keys()].filter((id) => runtimes.has(id)).length
+  console.log(`mt-gateway runtime table reloaded: ${String(runtimes.size)} entry(ies), ${String(registered)} registered tenant(s)`)
+})
 const registeredCount = [...tenants.keys()].filter((id) => runtimes.has(id)).length
 console.log(`mt-gateway serving ${String(tenants.size)} tenant(s): ${[...tenants.keys()].join(', ')}` +
   ` — ${String(registeredCount)} registered runtime(s)`)
