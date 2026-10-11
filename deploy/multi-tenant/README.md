@@ -409,6 +409,20 @@ bin/mt.sh add-batch tenants.csv --credentials-file .tenant-credentials.json
 - 用了 Key 免口令登录时，清单里的**用户名要逐字等于 Key 里的账号名**（Key 登录按用户名找租户，
   见《Key免口令登录接入.md》）。
 
+手上只有**用户名和姓名**（没有租户 id）时，加 `--derive-id`，清单每行写 `用户名,姓名[,初始口令]`，
+id 由用户名推导：`liuy_1` → `liuy-1`、`liu.yong` → `liu-yong`（非字母数字一律并成一个连字符）、
+数字开头的名字前面补 `u-`。推导不出来的（例如中文用户名）会**明确报错并要求这一行显式给 id**，
+整份清单照样一个都不建；推导出来的 id 已被占用时自动往后排（`liuy-1` → `liuy-1-2`）并把换号打印出来。
+
+```bash
+cat > users.csv <<'CSV'
+用户名,姓名
+liuy_1,刘勇
+zhang01,张三
+CSV
+bin/mt.sh add-batch users.csv --derive-id --credentials-file .tenant-credentials.json
+```
+
 ### 摘除租户
 
 ```bash

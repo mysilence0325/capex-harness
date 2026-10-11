@@ -675,17 +675,22 @@ cmd_add() {
 }
 
 cmd_add_batch() {
-  local file="" no_start=no creds=""
+  local file="" no_start=no creds="" extra=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --no-start)         no_start=yes; shift ;;
       --credentials-file) creds="${2:-}"; shift 2 ;;
+      # 其余按原样转给 bin/registry.js（--derive-id / --no-edge-port / --node）。
+      --node)             extra+=("--node" "${2:-}"); shift 2 ;;
+      --derive-id|--no-edge-port) extra+=("$1"); shift ;;
       *)                  [ -z "$file" ] && file="$1"; shift ;;
     esac
   done
   [ -n "$file" ] || {
-    echo "用法: bin/mt.sh add-batch <清单.csv> [--no-start] [--credentials-file <路径>]" >&2
-    echo "  清单每行一个租户: id,用户名[,标题[,初始口令]]；# 开头与空行忽略。" >&2
+    echo "用法: bin/mt.sh add-batch <清单.csv> [--derive-id] [--no-start] [--credentials-file <路径>]" >&2
+    echo "  每行一个租户；# 开头与空行忽略。两种写法：" >&2
+    echo "    id,用户名[,标题[,初始口令]]     有租户 id 时" >&2
+    echo "    用户名,姓名[,初始口令]          加 --derive-id，租户 id 由用户名推导（liuy_1 → liuy-1）" >&2
     echo "  用户名用 Key 里的账号名（Key 免口令登录按用户名找租户）。" >&2
     return 2
   }
@@ -700,7 +705,7 @@ cmd_add_batch() {
   fi
 
   local out
-  out="$(node_run bin/registry.js add-batch ".${staged#"$ROOT"}")" || {
+  out="$(node_run bin/registry.js add-batch ".${staged#"$ROOT"}" ${extra[@]+"${extra[@]}"})" || {
     printf '%s\n' "$out"
     [ "$cleanup" = yes ] && rm -f "$staged"
     return 1

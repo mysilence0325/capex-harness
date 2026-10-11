@@ -181,6 +181,47 @@ function idProblem(id) {
 }
 
 /**
+ * The tenant id a username implies.
+ *
+ * The operator has usernames and names, not ids: `liuy_1` becomes `liuy-1`.
+ * Every run of characters that is neither a lowercase letter nor a digit
+ * collapses to one hyphen (`liu.yong` → `liu-yong`), and a name that would start
+ * with a digit gets a `u-` in front of it.
+ *
+ * @param user - the username from the Key identity.
+ * @returns a usable id, or undefined when the username cannot yield one.
+ */
+function deriveId(user) {
+  const slug = user.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-+|-+$/gu, '')
+  if (slug === '') return undefined
+  const candidate = /^[a-z]/u.test(slug) ? slug : `u-${slug}`
+  if (candidate.length > ID_LENGTH.max || !ID_RULE.test(candidate)) return undefined
+  return candidate
+}
+
+/**
+ * The first id at or after one that nothing else has taken.
+ *
+ * Two usernames can imply the same id (`liuy_1` and `liuy-1`), and a name can
+ * collide with a tenant that already exists. The id is an operations label that
+ * users never type, so a suffix is quieter than failing — as long as the
+ * substitution is printed.
+ *
+ * @param base - the derived id.
+ * @param taken - whether an id is already in use.
+ * @returns a free id, or undefined when even the suffixes are exhausted.
+ */
+function freeId(base, taken) {
+  if (!taken(base)) return base
+  for (let n = 2; n < 100; n += 1) {
+    const suffix = `-${String(n)}`
+    const candidate = `${base.slice(0, ID_LENGTH.max - suffix.length).replace(/-+$/u, '')}${suffix}`
+    if (ID_RULE.test(candidate) && !taken(candidate)) return candidate
+  }
+  return undefined
+}
+
+/**
  * Warn when one username exists under several tenants.
  *
  * The shared sign-in entry resolves a tenant by username, so a name that is not
@@ -241,31 +282,57 @@ switch (command) {
 
   case 'add-batch': {
     const file = args[0]
+    // 常见情形是手上只有用户名和姓名，没有租户 id：--derive-id 让 id 从用户名推导。
+    const derive = args.includes('--derive-id')
     if (file === undefined) {
-      console.error('usage: registry.js add-batch <file> [--no-edge-port] [--node <name>]')
+      console.error('usage: registry.js add-batch <file> [--derive-id] [--no-edge-port] [--node <name>]')
+      console.error('  id,用户名[,标题[,口令]]   有租户 id 时')
+      console.error('  用户名,姓名[,口令]        --derive-id：id 由用户名推导（liuy_1 → liuy-1）')
       process.exit(1)
     }
-    // One line per tenant: `id,username[,title[,password]]`. Comments and blank
-    // lines are ignored. The whole file is checked before anything is written:
-    // a list that is half applied is worse than one that is refused.
+    // One line per tenant, `#` and blank lines ignored. Both layouts are checked
+    // in full before anything is written: a list that is half applied is worse
+    // than one that is refused.
     const rows = []
     const problems = []
+    const notes = []
+    const taken = (id) => registry.tenants.some((entry) => entry.id === id)
+      || rows.some((row) => row.id === id)
     fs.readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
       const trimmed = line.trim()
       if (trimmed === '' || trimmed.startsWith('#')) return
       const cells = trimmed.split(',').map((cell) => cell.trim())
-      const [id, user, title, password] = cells
+      const [first, second, third, fourth] = cells
       const where = `第 ${index + 1} 行`
-      if (!ID_RULE.test(id ?? '')) {
-        problems.push(`${where}: 租户 id 不可用 ${JSON.stringify(id ?? '')} —— ${idProblem(id ?? '')}`)
-      } else if (registry.tenants.some((entry) => entry.id === id)) {
-        problems.push(`${where}: 租户 ${id} 已经存在`)
-      } else if (rows.some((row) => row.id === id)) {
-        problems.push(`${where}: 租户 ${id} 在清单里出现了两次`)
+      const user = first
+      const title = derive ? second : third
+      const password = derive ? third : fourth
+      const columns = derive ? 3 : 4
+      if (cells.length > columns) {
+        problems.push(`${where}: 最多 ${String(columns)} 列（${derive ? '用户名,姓名,口令' : 'id,用户名,标题,口令'}）`)
       }
       if (user === undefined || user === '') problems.push(`${where}: 缺少用户名`)
       else if (/[\s,]/u.test(user)) problems.push(`${where}: 用户名不能含空白或逗号: ${JSON.stringify(user)}`)
-      if (cells.length > 4) problems.push(`${where}: 最多四列（id,用户名,标题,口令）`)
+      let id = derive ? deriveId(user ?? '') : first
+      if (derive) {
+        if (id === undefined) {
+          if (user !== undefined && user !== '') {
+            problems.push(`${where}: 用户名 ${JSON.stringify(user)} 推导不出租户 id（只认小写字母、数字与连字符；这一行请改成显式给出 id）`)
+          }
+        } else {
+          const unique = freeId(id, taken)
+          if (unique === undefined) {
+            problems.push(`${where}: 推不出可用的租户 id（${id} 已被占用到没有空位）`)
+          } else {
+            if (unique !== id) notes.push(`${where}: ${id} 已被占用，这一行改用 ${unique}`)
+            id = unique
+          }
+        }
+      } else if (!ID_RULE.test(id ?? '')) {
+        problems.push(`${where}: 租户 id 不可用 ${JSON.stringify(id ?? '')} —— ${idProblem(id ?? '')}`)
+      } else if (taken(id)) {
+        problems.push(`${where}: 租户 ${id} 已经存在`)
+      }
       rows.push({ id, user, title, password })
     })
     if (rows.length === 0) {
@@ -293,6 +360,11 @@ switch (command) {
     console.log(`added ${String(created.length)} tenant(s)`)
     for (const entry of created) {
       console.log(`  ${entry.id}\t${entry.user}\t${entry.password}`)
+    }
+    // 推导出来的 id 被占用时换过号：换成了什么必须说出来，否则清单与注册表对不上。
+    if (notes.length > 0) {
+      console.log('租户 id 与用户名不是一一对应的地方：')
+      for (const note of notes) console.log(note)
     }
     for (const entry of created) warnOnSharedUsername(registry.tenants.find((t) => t.id === entry.id))
     break
