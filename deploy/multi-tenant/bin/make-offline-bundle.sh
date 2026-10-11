@@ -58,13 +58,20 @@ for forbidden in .env local.env model.env tenants.json tenants state logs backup
   [ -e "$PAYLOAD/$forbidden" ] && die "--payload 里出现了运行实例的文件: $forbidden（请用 git archive 导出的干净副本）"
 done
 
+# 运行时镜像必须是**本地源码构建的那一个**（镜像里有 /opt/dsh-local-build/SOURCE 标记，
+# doctor 也是这么认的）。刻意不读 .env.example 的 DSH_IMAGE：那里是示例值（发行版载体），
+# 照着它打出来的包会让目标机跑另一份代码——而且从包里看不出来。
 if [ -z "$RUNTIME_IMAGE" ]; then
-  RUNTIME_IMAGE="$(grep -E '^DSH_IMAGE=' "$PAYLOAD/.env.example" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-  [ -n "$RUNTIME_IMAGE" ] || die "推导不出运行时镜像，请用 --runtime-image 指定"
+  RUNTIME_IMAGE="$(docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' \
+    | grep -E '^dsh-web:local-' | sort -k2 | tail -1 | awk '{print $1}')"
+  [ -n "$RUNTIME_IMAGE" ] || die "本机没有 dsh-web:local-* 镜像（先用 bin/publish-image.sh 发布），或用 --runtime-image 指定"
 fi
 for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do
   docker image inspect "$image" >/dev/null 2>&1 || die "本机没有镜像 $image（docker images 看一下）"
 done
+docker run --rm --entrypoint sh "$RUNTIME_IMAGE" -c 'test -f /opt/dsh-local-build/SOURCE' >/dev/null 2>&1 \
+  || die "$RUNTIME_IMAGE 里没有 /opt/dsh-local-build/SOURCE：它不是本地源码构建的镜像，装上去跑的是另一份代码"
+echo "==> 运行时镜像: $RUNTIME_IMAGE（已确认是本地源码构建）"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 NAME="dsh-offline-$STAMP"
