@@ -116,13 +116,28 @@ if [ "$HAS_GATEWAY" != yes ] && [ -f state/register.key ] && [ -n "${MT_CONTROL_
     "${MT_CONTROL_PLANE%/}/__mt/registry/tenants" 2>/dev/null || true)"
   if [ -n "$CP_DOC" ]; then
     CP_TENANTS="$(printf '%s' "$CP_DOC" | grep -o '"id": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')"
-    if [ "$(printf '%s\n' $CP_TENANTS | sort | tr '\n' ' ')" != "$(printf '%s\n' $TENANTS | sort | tr '\n' ' ')" ]; then
-      warn "本机 tenants.json 与控制面不一致（本机: $(printf '%s\n' $TENANTS | sort | tr '\n' ' ')|控制面: $(printf '%s\n' $CP_TENANTS | sort | tr '\n' ' ')）：bin/mt.sh up 会先刷新再渲染"
+    # 比的是"租户:节点"对，不只是租户集合：租户被 move 到别的机器之后两边 id 一模一样，
+    # 只有 node 变了——只比 id 就会把"这台机器上已经不该有它了"当成一致（实测踩到：
+    # 节点上留着已迁出租户的目录与停止的容器，doctor 一路报故障）。
+    CP_PAIRS=""
+    for t in $CP_TENANTS; do
+      tn="$(printf '%s' "$CP_DOC" | grep -A6 "\"id\": \"$t\"" | grep -o '"node": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+      [ -n "$tn" ] || tn=local
+      CP_PAIRS="$CP_PAIRS$t:$tn "
+    done
+    LOCAL_PAIRS=""
+    for t in $TENANTS; do
+      tn="$(NODE_OF "$t")"
+      [ -n "$tn" ] || tn=local
+      LOCAL_PAIRS="$LOCAL_PAIRS$t:$tn "
+    done
+    if [ "$(printf '%s\n' $CP_PAIRS | tr ' ' '\n' | sort | tr '\n' ' ')" != "$(printf '%s\n' $LOCAL_PAIRS | tr ' ' '\n' | sort | tr '\n' ' ')" ]; then
+      warn "本机 tenants.json 与控制面不一致（本机: $LOCAL_PAIRS|控制面: $CP_PAIRS）：bin/mt.sh up 会先刷新再渲染"
       TENANTS="$CP_TENANTS"
       LOCAL_TENANTS=""
       REMOTE_TENANTS=""
       for t in $TENANTS; do
-        tn="$(printf '%s' "$CP_DOC" | grep -A6 "\"id\": \"$t\"" | grep -o '"node": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+        tn="$(printf '%s\n' $CP_PAIRS | tr ' ' '\n' | grep "^${t}:" | head -1 | cut -d: -f2)"
         [ -n "$tn" ] || tn=local
         if [ "$tn" = "$THIS_NODE" ]; then
           LOCAL_TENANTS="$LOCAL_TENANTS $t"
