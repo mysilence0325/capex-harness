@@ -532,6 +532,60 @@ else
   rm -f "$MJAR" "$MPAGE"
 fi
 
+# ---------------------------------------------------------------- Key 免口令登录
+head_ "Key 免口令登录（USB Key）"
+# 身份只从 cookie 来、且只从信任的来源来，这两条是这个功能的全部安全性。这里的
+# 请求都从 loopback 发出（网关恒信 loopback），所以不必配 MT_KEY_LOGIN_FROM 也能测；
+# 但功能本身要开着才谈得上测，没开就明说跳过，不用"通过"糊过去。
+KEY_FROM_CFG="$(grep '^MT_KEY_LOGIN_FROM=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+KEY_SECRET_CFG="$(grep '^MT_KEY_LOGIN_SECRET=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+KEY_COOKIE_CFG="$(grep '^MT_KEY_LOGIN_COOKIE=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+KEY_COOKIE_CFG="${KEY_COOKIE_CFG:-KOAL_CERT_E}"
+if [ -z "$KEY_FROM_CFG" ] && [ -z "$KEY_SECRET_CFG" ]; then
+  skip "Key 登录（未开启：MT_KEY_LOGIN_FROM / MT_KEY_LOGIN_SECRET 都没配）"
+else
+  KT=""; KU=""; KP=""
+  for t in $TENANTS; do
+    _u="$(cred tenants "$t" user)"; _p="$(cred tenants "$t" password)"
+    if [ -n "$_u" ] && [ -n "$_p" ]; then KT="$t"; KU="$_u"; KP="$_p"; break; fi
+  done
+  if [ -z "$KT" ]; then
+    skip "Key 登录（$CREDS 里没有租户账号，取不到用户名）"
+  else
+    KENTRY="$PUBLIC_SCHEME://127.0.0.1:8090${MT_BASE}"
+    # 1) 没有身份就必须被拒，而且拒的是登录页（不是 500、不是空白）
+    assert_eq "401" "$(curl -sSk -o /tmp/mt_key_none.html -w '%{http_code}' --max-time 15 \
+      "$KENTRY/__mt/key-login" 2>/dev/null)" "没有 Key 身份时被拒（401）"
+    grep -q 'name="password"' /tmp/mt_key_none.html && pass "拒绝页仍是登录页（口令人工兜底还在）" \
+      || fail "拒绝页不是登录页"
+    # 2) 用户名只能来自 cookie：查询参数不许换人
+    assert_eq "401" "$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 15 \
+      "$KENTRY/__mt/key-login?user=$KU" 2>/dev/null)" "查询参数里的用户名不作数（401）"
+    # 3) 注册表里没有的身份：401，不是 500（参考实现里这一条最容易漏）
+    assert_eq "401" "$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 15 \
+      -H "Cookie: ${KEY_COOKIE_CFG}=no-such-account" "$KENTRY/__mt/key-login" 2>/dev/null)" \
+      "注册表里没有的身份被拒（401，不是 500）"
+    # 4) 有效身份 -> 303 -> 直接进该租户的 DSH。放在最后：成功一次会清掉本来源的失败计数，
+    #    于是反复跑这个脚本不会把自己锁在限流里。
+    KJAR="$(mktemp)"; KAPP="$(mktemp)"
+    assert_eq "303" "$(curl -sSk -o /dev/null -c "$KJAR" -w '%{http_code}' --max-time 20 \
+      -H "Cookie: ${KEY_COOKIE_CFG}=${KU}" "$KENTRY/__mt/key-login" 2>/dev/null)" \
+      "Key 身份登录（$KT/$KU）"
+    grep -q 'mt_session' "$KJAR" && pass "签发了网关会话 cookie" || fail "没有签发会话 cookie"
+    assert_eq "200" "$(curl -sSk -o "$KAPP" -b "$KJAR" -w '%{http_code}' --max-time 30 \
+      "$KENTRY/" 2>/dev/null)" "Key 登录后直接进入 $KT 的 DSH"
+    grep -q '<base href="./"' "$KAPP" && pass "DSH 文档带 <base href=\"./\">" || fail "DSH 文档没有相对基准"
+    # 5) 自动登录：带着身份打开入口页，不用点任何东西
+    assert_eq "303" "$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 20 \
+      -H "Cookie: ${KEY_COOKIE_CFG}=${KU}" "$KENTRY/" 2>/dev/null)" "带 Key 打开入口页自动登录"
+    # 6) 口令方式没有被 Key 顶掉
+    assert_eq "303" "$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 15 \
+      --data-urlencode "tenant=$KT" --data-urlencode "user=$KU" --data-urlencode "password=$KP" \
+      "$KENTRY/__mt/login" 2>/dev/null)" "口令登录仍然可用"
+    rm -f "$KJAR" "$KAPP" /tmp/mt_key_none.html
+  fi
+fi
+
 # ---------------------------------------------------------------- 控制台登录的落地页
 head_ "控制台登录：表单提交到哪、落在哪一页"
 if [ "$QUICK" = yes ]; then

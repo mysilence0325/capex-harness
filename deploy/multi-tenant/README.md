@@ -482,6 +482,24 @@ location /ai/harness/ {
 - 有了统一代理入口，租户的专属端口（`--edge-port`）与 `hosts` 条目（`alpha.dsh.local`）就只是
   本机调试入口了，可以不配。
 
+### Key 免口令登录（USB Key 单点登录）
+
+装了 Key 的浏览器打开入口地址可以**免口令**直接进自己的 DSH；没有 Key（或这台机器的 Key 用户
+没绑定本部署账号）时，看到的仍是原来的用户名 + 口令登录页——**两种方式并存**，口令那条路径
+没有改动。
+
+```bash
+# .env：填入口机（代理）的地址；也可以改配 MT_KEY_LOGIN_SECRET + 代理加 X-MT-Key-Auth 头
+MT_KEY_LOGIN_FROM=15.11.40.44
+bin/mt.sh up
+bin/mt.sh mount-check https://officeai.301.avic:496/ai/harness/ --key-user alice
+```
+
+身份来自身份网关（trp，:496）校验证书后写入的 Cookie，**只从这个 Cookie 来**（查询参数与
+请求体里的用户名一律不作数），而且**只接受 `MT_KEY_LOGIN_FROM` 里那些地址送来的它**——
+否则任何能直接访问公开端口的人自造一条 Cookie 就能冒名登录。完整的链路、安全模型、前置条件
+（身份网关要授权 `/ai` 前缀）、故障对照表见 [Key免口令登录接入.md](Key免口令登录接入.md)。
+
 ## 5. 为什么控制面用 host 网络
 
 宿主 `net.ipv4.ip_forward = 0`，从局域网进来的包被 DNAT 到 bridge 网段后无法被转发，因此**这台机器上任何 bridge 网络映射的端口对外都不通**（同机的 Harbor 18083、Grafana 13000、Nacos 18081、capex 18000/8089 实测同样超时；只有 host 网络的 3080 通）。VM 自己访问这些端口会走本地路径，所以在本机上自测永远是通的——这正是最初遗漏外部验证的原因。

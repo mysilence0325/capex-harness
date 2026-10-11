@@ -826,6 +826,12 @@ ${loggingBlock()}
       # 反向代理把我们挂在子路径下时（https://<域名>/ai/harness），这里填那个前缀。
       # 网关据此生成登录表单、跳转和 cookie Path；请求带不带这个前缀都能路由。
       MT_BASE_PATH: \${MT_BASE_PATH:-}
+      # USB Key 免口令登录：只认身份网关从 KOAL_CERT_E cookie 注入的用户名，
+      # 且只接受 MT_KEY_LOGIN_FROM 里那些地址送来的它（留空 = 不开启）。
+      MT_KEY_LOGIN_FROM: \${MT_KEY_LOGIN_FROM:-}
+      MT_KEY_LOGIN_SECRET: \${MT_KEY_LOGIN_SECRET:-}
+      MT_KEY_LOGIN_COOKIE: \${MT_KEY_LOGIN_COOKIE:-KOAL_CERT_E}
+      MT_KEY_LOGIN_AUTO: \${MT_KEY_LOGIN_AUTO:-1}
       MT_LOG_DIR: /logs
       MT_DEPLOY_ROOT: /project
       # This node's agent, for the console's maintenance operations. Empty means

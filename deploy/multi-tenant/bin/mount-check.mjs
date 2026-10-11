@@ -10,6 +10,7 @@
  * Usage:
  *   bin/mt.sh mount-check https://officeai.301.avic:496/ai/harness/ [--insecure]
  *   bin/mt.sh mount-check https://officeai.301.avic:496/ai/harness/ --tenant alpha
+ *   bin/mt.sh mount-check https://officeai.301.avic:496/ai/harness/ --key-user alice
  *
  * Without `--tenant` it checks addressing only, and needs no credentials: the
  * bare mount, where the login form posts, whether POST survives the proxy, the
@@ -18,6 +19,12 @@
  * credentials file `bin/acceptance.sh` already uses, never from the command
  * line — and follows the browser through to its own DSH: the shell document,
  * one RPC call, and the Remote stream's upgrade.
+ *
+ * `--key-user <name>` sends the USB-Key identity cookie a real browser would
+ * arrive with, so the passwordless path can be measured from here instead of
+ * from a browser: the login must answer 303, the entry must then serve that
+ * tenant's DSH, and the same endpoint without the cookie must refuse. Set
+ * `--key-cookie <name>` when the deployment renamed the identity cookie.
  */
 import http from 'node:http'
 import https from 'node:https'
@@ -31,16 +38,18 @@ const readFlag = (name) => {
 }
 const tenantId = readFlag('--tenant')
 const userOverride = readFlag('--user')
+const keyUser = readFlag('--key-user')
+const keyCookieName = readFlag('--key-cookie') ?? 'KOAL_CERT_E'
 /** Positional arguments, ignoring each flag's value. */
 const positional = []
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index]
-  if (arg === '--tenant' || arg === '--user') { index += 1; continue }
+  if (arg === '--tenant' || arg === '--user' || arg === '--key-user' || arg === '--key-cookie') { index += 1; continue }
   if (!arg.startsWith('--')) positional.push(arg)
 }
 const entry = positional[0]
 if (entry === undefined) {
-  console.error('用法: node bin/mount-check.mjs <入口 URL> [--insecure] [--tenant <租户>] [--user <用户名>]')
+  console.error('用法: node bin/mount-check.mjs <入口 URL> [--insecure] [--tenant <租户>] [--user <用户名>] [--key-user <用户名>] [--key-cookie <名>]')
   process.exit(2)
 }
 
@@ -208,6 +217,28 @@ if (tenantId !== undefined) {
     })
     ck('带会话的 Remote 流完成升级', stream.status === 101, `HTTP ${String(stream.status)}`)
   }
+}
+
+// 7. USB Key 免口令登录：模拟身份网关已经注入的那条 cookie。
+if (keyUser !== undefined) {
+  console.log(`\n-- Key 免口令登录（${keyCookieName}=${keyUser}）--`)
+  const denied = await request(new URL(`${mount}/__mt/key-login`, origin), {})
+  ck('没有 Key 身份时拒绝（401）', denied.status === 401, `HTTP ${String(denied.status)}`)
+
+  const login = await request(new URL(`${mount}/__mt/key-login`, origin), {
+    headers: { cookie: `${keyCookieName}=${keyUser}` },
+    noCookies: true,
+  })
+  ck('带 Key 身份登录返回 303', login.status === 303, `HTTP ${String(login.status)}`)
+  ck('登录后跳回挂载点', login.headers.location === `${mount}/`, String(login.headers.location))
+
+  const app = await request(entryUrl)
+  ck('同一地址直接进入自己的 DSH', app.status === 200, `HTTP ${String(app.status)}`)
+  ck('DSH 文档带 <base href="./">', app.body.includes('<base href="./">'))
+
+  // 用户名只能来自 cookie：查询参数不许换人。
+  const forged = await request(new URL(`${mount}/__mt/key-login?user=mount-check`, origin), {})
+  ck('查询参数里的用户名不作数', forged.status === 401, `HTTP ${String(forged.status)}`)
 }
 
 console.log(`\n== 入口检查：${pass} 通过 / ${fail} 失败 ==`)

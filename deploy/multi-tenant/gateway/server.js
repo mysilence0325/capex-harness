@@ -164,6 +164,179 @@ function unmount(pathname) {
 }
 
 /**
+ * Peers allowed to state a USB-Key identity.
+ *
+ * The identity gateway (trp on :496) validates the browser's client certificate
+ * and writes the username into a cookie, but only for the path prefixes it is
+ * authorized for. That cookie is a whole credential — it names a user and no
+ * password follows it — so this gateway honours it only from the machine that
+ * terminates the front proxy. Without this list, anyone who can reach a public
+ * port directly could name any user and be signed in as them.
+ *
+ * Empty means Key login is off, which is what a password-only deployment wants.
+ */
+const KEY_LOGIN_FROM = parsePeerList(process.env.MT_KEY_LOGIN_FROM)
+
+/**
+ * Optional secret the front proxy stamps on every request it forwards.
+ *
+ * Turns the trust from "requests from these addresses" into "requests these
+ * addresses stamped": the proxy sends `X-MT-Key-Auth`, and this gateway compares
+ * it in constant time. Configured on its own, it enables Key login without an
+ * address list, for a proxy whose address is not stable.
+ */
+const KEY_LOGIN_SECRET = (process.env.MT_KEY_LOGIN_SECRET ?? '').trim()
+
+/** Cookie the identity gateway writes the USB-Key username into. */
+const KEY_LOGIN_COOKIE = (process.env.MT_KEY_LOGIN_COOKIE ?? 'KOAL_CERT_E').trim() || 'KOAL_CERT_E'
+
+/**
+ * Whether an entry page signs a visitor in from the Key cookie without being
+ * asked. On by default: a visitor whose browser carries a Key should never see
+ * the password form.
+ */
+const KEY_LOGIN_AUTO = (process.env.MT_KEY_LOGIN_AUTO ?? '1') !== '0'
+
+/** Whether Key login answers at all. */
+const KEY_LOGIN_ENABLED = KEY_LOGIN_FROM.length > 0 || KEY_LOGIN_SECRET !== ''
+
+/**
+ * What to tell a Key holder whose identity did not resolve.
+ *
+ * Covers the three causes a person can act on, in the order they can check them:
+ * no Key in this browser, an identity gateway that did not inject the cookie for
+ * this address, and a Key user that has no account here.
+ */
+const KEY_LOGIN_REFUSAL = '未检测到有效的 Key 身份：本机没有插入 Key、Key 网关没有为这个地址注入身份，或这个 Key 的用户没有绑定本部署账号。可以用下面的用户名与口令登录。'
+
+/**
+ * Parse an address list into IPv4 match entries.
+ *
+ * Accepts `10.0.0.9` and `10.0.0.0/24`. A malformed entry stops the process:
+ * starting with an empty trust list would refuse every Key login while looking
+ * like a working deployment.
+ *
+ * @param raw - the comma-separated list, if configured.
+ * @returns one entry per address or CIDR block.
+ */
+function parsePeerList(raw) {
+  const text = (raw ?? '').trim()
+  if (text === '') return []
+  return text.split(',').map((piece) => piece.trim()).filter((piece) => piece !== '').map((piece) => {
+    const [address, bits] = piece.split('/')
+    const value = ipv4ToInteger(address)
+    const mask = bits === undefined ? 32 : Number(bits)
+    if (value === undefined || !Number.isInteger(mask) || mask < 0 || mask > 32) {
+      console.error(`mt-gateway: MT_KEY_LOGIN_FROM entry is not an IPv4 address or CIDR block: ${JSON.stringify(piece)}`)
+      process.exit(1)
+    }
+    const span = mask === 0 ? 0 : (0xFFFFFFFF << (32 - mask)) >>> 0
+    return { network: (value & span) >>> 0, span }
+  })
+}
+
+/**
+ * An IPv4 address as a 32-bit integer.
+ *
+ * @param address - the text form.
+ * @returns the integer, or undefined when the text is not an IPv4 address.
+ */
+function ipv4ToInteger(address) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(address ?? '')
+  if (match === null) return undefined
+  const octets = match.slice(1).map(Number)
+  if (octets.some((value) => value > 255)) return undefined
+  return octets.reduce((acc, octet) => ((acc * 256) + octet), 0)
+}
+
+/**
+ * The peer address of one request.
+ *
+ * @param req - the request.
+ * @returns the address, with a dual-stack listener's IPv4 mapping removed.
+ */
+function peerAddress(req) {
+  const remote = req.socket.remoteAddress ?? ''
+  return remote.startsWith('::ffff:') ? remote.slice(7) : remote
+}
+
+/**
+ * Whether this request's peer may state a USB-Key identity.
+ *
+ * Loopback always may: it is the operations port and local scripts, which are
+ * already inside this machine's trust.
+ *
+ * @param req - the request.
+ * @returns whether the peer is loopback or in the configured list.
+ */
+function keySourceTrusted(req) {
+  const remote = peerAddress(req)
+  if (remote === '127.0.0.1' || remote === '::1') return true
+  const value = ipv4ToInteger(remote)
+  if (value === undefined) return false
+  return KEY_LOGIN_FROM.some((entry) => ((value & entry.span) >>> 0) === entry.network)
+}
+
+/**
+ * Whether this request may name a USB-Key identity, and why not when it may not.
+ *
+ * @param req - the request.
+ * @returns `trusted`, or the reason to refuse.
+ */
+function keyTrustReason(req) {
+  if (!KEY_LOGIN_ENABLED) return 'disabled'
+  if (!keySourceTrusted(req)) return 'untrusted-source'
+  if (KEY_LOGIN_SECRET !== '') {
+    const presented = req.headers['x-mt-key-auth']
+    if (!accepts(KEY_LOGIN_SECRET, typeof presented === 'string' ? presented : undefined)) return 'bad-secret'
+  }
+  return 'trusted'
+}
+
+/**
+ * Percent-decode a cookie value, keeping the raw text when it is not encoded.
+ *
+ * @param value - the cookie value.
+ * @returns the decoded text.
+ */
+function decodePercent(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    /* a value that is not valid percent-encoding is simply literal text */
+    return value
+  }
+}
+
+/**
+ * The username the identity gateway stated for this request.
+ *
+ * The value is read from the cookie and from nowhere else. A username taken from
+ * a query parameter or a body would make this a passwordless login for anyone
+ * who can reach the port, which is the whole reason the identity travels in a
+ * cookie the gateway cannot be asked to set.
+ *
+ * @param req - the request.
+ * @returns the username, or undefined when no identity was stated.
+ */
+function keyUsername(req) {
+  const raw = parseCookies(req.headers.cookie).get(KEY_LOGIN_COOKIE)
+  if (raw === undefined) return undefined
+  const trimmed = decodePercent(raw).trim()
+  if (trimmed === '') return undefined
+  // The identity gateway sometimes writes UTF-8 bytes that arrive as latin1.
+  // Repair that reading only when every code unit is a byte and the result
+  // decodes cleanly, so an already-correct name is never damaged.
+  let text = trimmed
+  if ([...trimmed].every((character) => (character.codePointAt(0) ?? 0) <= 0xFF)) {
+    const repaired = Buffer.from(trimmed, 'latin1').toString('utf8')
+    if (!repaired.includes('\uFFFD')) text = repaired
+  }
+  const name = text.split('@')[0].trim()
+  return name === '' ? undefined : name
+}
+
+/**
  * TLS material for the public listeners.
  *
  * Both files must exist; `bin/make-cert.sh` writes a self-signed pair, and a
@@ -540,18 +713,32 @@ function htmlPage(title, body) {
 <body><main>${body}</main></body></html>`
 }
 
-function loginPage(prefix, { error } = {}) {
+/**
+ * The tenant sign-in page.
+ *
+ * @param prefix - `/__mt` as a browser addresses it on the entry in use.
+ * @param options - the refusal to display, and whether Key login is offered.
+ * @returns the page HTML.
+ */
+function loginPage(prefix, { error, keyEnabled = false, keyError } = {}) {
+  const keySection = keyEnabled ? `
+    <form method="get" action="${prefix}/key-login">
+      <button type="submit">用 Key 登录（免口令）</button>
+    </form>
+    <p class="sub" style="margin-top:14px">装了 Key 的机器打开本页会自动免口令登录。</p>` : ''
   return htmlPage('DSH 登录', `
     <h1>DeepSeek Harness</h1>
-    <p class="sub">使用管理员分配的用户名登录</p>
+    <p class="sub">${keyEnabled ? '插入 Key 免口令登录，或使用管理员分配的用户名' : '使用管理员分配的用户名登录'}</p>
     ${error ? `<div class="err">${error}</div>` : ''}
+    ${keyError === undefined ? '' : `<div class="err">${keyError}</div>`}
     <form method="post" action="${prefix}/login">
       <label for="user">用户名</label>
       <input id="user" name="user" autocomplete="username" autofocus>
       <label for="password">密码</label>
       <input id="password" name="password" type="password" autocomplete="current-password">
       <button type="submit">登录</button>
-    </form>`)
+    </form>
+    ${keySection}`)
 }
 
 /**
@@ -935,6 +1122,109 @@ function resolveLogin(user, explicit, hinted) {
 const loginByUser = new Throttle({ name: 'login-account', maxFailures: 5, lockoutMs: 5 * 60 * 1000 })
 const loginBySource = new Throttle({ name: 'login-source', maxFailures: 20, lockoutMs: 10 * 60 * 1000 })
 
+/**
+ * Sign-in budget for Key login, by peer address.
+ *
+ * Separate from the password budgets on purpose: everyone reaches this gateway
+ * through one front proxy, so one shared address must not let Key attempts spend
+ * the budget password sign-ins depend on. Only an attempt that carried an
+ * identity is charged — a browser without a Key is not a failure.
+ */
+const keyLoginBySource = new Throttle({ name: 'key-login-source', maxFailures: 20, lockoutMs: 10 * 60 * 1000 })
+
+/**
+ * The browser session cookie for one tenant user.
+ *
+ * @param tenant - the tenant the session names.
+ * @param user - the username.
+ * @returns the `Set-Cookie` value, without the TLS attribute.
+ */
+function sessionCookie(tenant, user) {
+  return `${SESSION_COOKIE}=${signSession(tenant.id, user)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${String(Math.floor(SESSION_TTL_MS / 1000))}`
+}
+
+/**
+ * Resolve the Key identity this request states into a tenant user.
+ *
+ * The password is not consulted: the identity gateway already validated the
+ * certificate, and this deployment's accounts carry no per-user Key setting, so
+ * the registry entry is the whole check. Everything else — which tenant a user
+ * belongs to, what happens when a name exists under several tenants — is the
+ * same resolution password sign-in uses, so the two paths cannot drift.
+ *
+ * @param req - the request.
+ * @returns the tenant and username, or the reason to refuse.
+ */
+function keyLoginAttempt(req) {
+  const trust = keyTrustReason(req)
+  if (trust !== 'trusted') return { reason: trust }
+  const user = keyUsername(req)
+  if (user === undefined) return { reason: 'no-identity' }
+  const resolved = resolveLogin(user, undefined, tenantByAddress(req.headers.host, req.socket.localPort))
+  if (resolved.error !== undefined) return { reason: 'unknown-user', user }
+  return { tenant: resolved.tenant, user }
+}
+
+/**
+ * Sign this browser in as the tenant user the Key names.
+ *
+ * @param req - the request.
+ * @param res - the response, ended here.
+ * @param outcome - a resolved Key identity.
+ */
+function sendKeySession(req, res, outcome) {
+  audit({ tenant: outcome.tenant.id, user: outcome.user, status: 303, note: 'key-login', source: req.socket.remoteAddress ?? 'unknown' })
+  send(res, 303, {
+    location: pathFor(req, '/'),
+    'set-cookie': secureCookies(sessionCookie(outcome.tenant, outcome.user), req.socket.encrypted === true),
+    'cache-control': 'no-store',
+  }, '')
+}
+
+/**
+ * Answer the Key-login endpoint the login page points at.
+ *
+ * A refusal is never a bare status: whoever reached this page can be a person
+ * whose Key is not bound here yet, and the page they get back says which of the
+ * three causes to check and offers the password form.
+ *
+ * @param req - the request.
+ * @param res - the response.
+ */
+function handleKeyLogin(req, res) {
+  const source = req.socket.remoteAddress ?? 'unknown'
+  const locked = keyLoginBySource.retryAfter(source)
+  if (locked > 0) {
+    audit({ tenant: '-', user: '-', status: 429, note: 'key-login-throttled', source })
+    send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'retry-after': String(locked), 'cache-control': 'no-store' },
+      loginPage(prefixFor(req), { error: `尝试次数过多，请 ${String(locked)} 秒后再试`, keyEnabled: KEY_LOGIN_ENABLED }))
+    return
+  }
+  const outcome = keyLoginAttempt(req)
+  if (outcome.reason === 'disabled' || outcome.reason === 'untrusted-source' || outcome.reason === 'bad-secret') {
+    audit({ tenant: '-', user: '-', status: 403, note: `key-login-${outcome.reason}`, source })
+    send(res, 403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+      errorPage(403, '这个入口没有开启 Key 登录。',
+        '请用用户名与口令登录；要开启 Key 登录，在部署机上配置 <code>MT_KEY_LOGIN_FROM</code>（前置代理的地址）。'))
+    return
+  }
+  if (outcome.tenant === undefined) {
+    // Only an attempt that carried an identity spends the budget. A browser
+    // without a Key presents nothing to guess, and charging it would lock out
+    // the password users who make up most of the traffic.
+    const locked = outcome.user === undefined ? 0 : keyLoginBySource.fail(source)
+    audit({
+      tenant: '-', user: outcome.user ?? '-', status: 401, note: `key-login-${outcome.reason}`, source,
+      ...(locked > 0 ? { lockedSourceSeconds: locked } : {}),
+    })
+    send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+      loginPage(prefixFor(req), { keyEnabled: true, keyError: KEY_LOGIN_REFUSAL }))
+    return
+  }
+  keyLoginBySource.succeed(source)
+  sendKeySession(req, res, outcome)
+}
+
 function handleLogin(req, res) {
   readBody(req).then((body) => {
     const params = new URLSearchParams(body)
@@ -950,7 +1240,7 @@ function handleLogin(req, res) {
     if (locked > 0) {
       audit({ tenant: '-', user, status: 429, note: 'login-throttled', source })
       send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'retry-after': String(locked) },
-        loginPage(prefixFor(req), { error: `尝试次数过多，请 ${String(locked)} 秒后再试` }))
+        loginPage(prefixFor(req), { error: `尝试次数过多，请 ${String(locked)} 秒后再试`, keyEnabled: KEY_LOGIN_ENABLED }))
       return
     }
     const resolved = resolveLogin(
@@ -966,7 +1256,8 @@ function handleLogin(req, res) {
         ...(userLock > 0 ? { lockedAccountSeconds: userLock } : {}),
         ...(sourceLock > 0 ? { lockedSourceSeconds: sourceLock } : {}),
       })
-      send(res, 401, { 'content-type': 'text/html; charset=utf-8' }, loginPage(prefixFor(req), { error: '用户名或密码不正确' }))
+      send(res, 401, { 'content-type': 'text/html; charset=utf-8' },
+        loginPage(prefixFor(req), { error: '用户名或密码不正确', keyEnabled: KEY_LOGIN_ENABLED }))
       return
     }
     loginByUser.succeed(user.toLowerCase())
@@ -974,14 +1265,12 @@ function handleLogin(req, res) {
     audit({ tenant: resolved.tenant.id, user, status: 200, note: 'login-ok' })
     send(res, 303, {
       location: pathFor(req, '/'),
-      'set-cookie': secureCookies(
-        `${SESSION_COOKIE}=${signSession(resolved.tenant.id, user)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${String(Math.floor(SESSION_TTL_MS / 1000))}`,
-        req.socket.encrypted === true,
-      ),
+      'set-cookie': secureCookies(sessionCookie(resolved.tenant, user), req.socket.encrypted === true),
       'cache-control': 'no-store',
     }, '')
   }).catch(() => {
-    send(res, 400, { 'content-type': 'text/html; charset=utf-8' }, loginPage(prefixFor(req), { error: '请求格式不正确' }))
+    send(res, 400, { 'content-type': 'text/html; charset=utf-8' },
+      loginPage(prefixFor(req), { error: '请求格式不正确', keyEnabled: KEY_LOGIN_ENABLED }))
   })
 }
 
@@ -2122,6 +2411,12 @@ function handleRequest(req, res) {
     handleLogin(req, res)
     return
   }
+  // Key sign-in. Both methods answer here, because the login page offers it as a
+  // button and the identity gateway's cookie is what decides, not the method.
+  if (url.pathname === `${PREFIX}/key-login`) {
+    handleKeyLogin(req, res)
+    return
+  }
   // Logout is complete: the gateway session AND every tenant's DSH cookie this
   // browser may hold are expired together, so switching users cannot inherit a
   // previous tenant's session. Reachable at /__mt/logout from anywhere.
@@ -2155,7 +2450,28 @@ function handleRequest(req, res) {
       send(res, 303, { location: pathFor(req, `${PREFIX}/`), 'cache-control': 'no-store' }, '')
       return
     }
-    send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }, loginPage(prefixFor(req)))
+    // A browser carrying a USB-Key identity is signed in without being asked.
+    // Only an identity that arrived from a trusted peer starts this: anyone else
+    // gets the ordinary sign-in page instead of a refusal about a Key they did
+    // not present.
+    if (KEY_LOGIN_AUTO && keyTrustReason(req) === 'trusted' && keyUsername(req) !== undefined
+      && keyLoginBySource.retryAfter(req.socket.remoteAddress ?? 'unknown') === 0) {
+      const outcome = keyLoginAttempt(req)
+      if (outcome.tenant !== undefined) {
+        keyLoginBySource.succeed(req.socket.remoteAddress ?? 'unknown')
+        sendKeySession(req, res, outcome)
+        return
+      }
+      audit({
+        tenant: '-', user: outcome.user ?? '-', status: 401,
+        note: `key-login-${outcome.reason}`, source: req.socket.remoteAddress ?? 'unknown', entry: 'auto',
+      })
+      send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+        loginPage(prefixFor(req), { keyEnabled: KEY_LOGIN_ENABLED, keyError: KEY_LOGIN_REFUSAL }))
+      return
+    }
+    send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+      loginPage(prefixFor(req), { keyEnabled: KEY_LOGIN_ENABLED }))
     return
   }
 

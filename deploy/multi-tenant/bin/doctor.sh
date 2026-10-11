@@ -166,6 +166,39 @@ if [ -n "$BASE_PATH" ]; then
 else
   ok "没配 MT_BASE_PATH：入口挂在根路径（直接访问本机端口）"
 fi
+# Key 免口令登录：身份网关校验证书后把用户名写进一个 cookie，本网关只认它，而且
+# 只认配置里那些地址送来的它（否则网段里谁都能自造一条 cookie 冒名登录）。
+head_ "Key 免口令登录"
+KEY_FROM="${MT_KEY_LOGIN_FROM:-}"
+KEY_SECRET="${MT_KEY_LOGIN_SECRET:-}"
+KEY_COOKIE="${MT_KEY_LOGIN_COOKIE:-KOAL_CERT_E}"
+if [ -z "$KEY_FROM" ] && [ -z "$KEY_SECRET" ]; then
+  ok "未开启（MT_KEY_LOGIN_FROM / MT_KEY_LOGIN_SECRET 都没配），登录页只有口令方式"
+else
+  ok "已开启，身份 Cookie 名 ${KEY_COOKIE}"
+  [ -n "$KEY_FROM" ] && ok "  只接受这些地址送来的身份: $KEY_FROM"
+  [ -n "$KEY_SECRET" ] && ok "  要求代理带 X-MT-Key-Auth 头（第二道锁）"
+  case "${KEY_FROM// /}" in
+    *0.0.0.0/0*)
+      if [ -n "$KEY_SECRET" ]; then
+        warn "  信任列表含 0.0.0.0/0，靠第二道锁收紧：别把 MT_KEY_LOGIN_SECRET 泄露给网段"
+      else
+        bad "  信任列表是 0.0.0.0/0 且没有第二道锁：网段里任何人自造一条 Cookie 就能登录成任意用户"
+      fi
+      ;;
+  esac
+  IN_CONTAINER_FROM="$(docker inspect mt-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | grep -E '^MT_KEY_LOGIN_FROM=' | head -1 | cut -d= -f2-)"
+  [ "$IN_CONTAINER_FROM" = "$KEY_FROM" ] && ok "网关容器已带 MT_KEY_LOGIN_FROM" \
+    || bad "网关容器里 MT_KEY_LOGIN_FROM='${IN_CONTAINER_FROM:-（空）}'，.env 里是 '${KEY_FROM}'（bin/mt.sh up 重渲染）"
+  KEY_PAGE="$(curl -fsSk "$PUBLIC_BASE${BASE_PATH}/" 2>/dev/null || true)"
+  printf '%s' "$KEY_PAGE" | grep -q "action=\"${BASE_PATH}/__mt/key-login\"" \
+    && ok "登录页给出了 Key 入口（${BASE_PATH}/__mt/key-login）" \
+    || bad "登录页没有 Key 入口：Key 登录开着，用户却看不到这条路径"
+  printf '%s' "$KEY_PAGE" | grep -q "action=\"${BASE_PATH}/__mt/login\"" \
+    && ok "登录页仍然保留口令方式" || bad "登录页只剩下 Key 一条路，口令登录不见了"
+fi
+
 head_ "运行时注册"
 # 控制面不再看 Docker，只代理注册进来的地址。没有注册 = 该租户登录后必然 503。
 REGISTRY="$(curl -fsS "$GW_BASE/__mt/registry" 2>/dev/null || true)"
