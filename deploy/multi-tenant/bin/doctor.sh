@@ -204,6 +204,34 @@ else
     && ok "登录页仍然保留口令方式" || bad "登录页只剩下 Key 一条路，口令登录不见了"
 fi
 
+# 沙箱：DSH 的选择链是 bwrap → Landlock，两条都不行时租户的每条命令都会以
+# SANDBOX_UNAVAILABLE 失败——只有显式 danger-full-access 才跑得起来。所以这里把
+# "实际哪条可用"与"配置的权限模式"对照一次：配了 workspace-write 却没有沙箱，
+# 是一个会让人百思不得其解的故障（命令全挂，看起来像模型不会用工具）。
+head_ "沙箱"
+SANDBOX_VERDICT="$(bash bin/sandbox-check.sh 2>/dev/null | sed -n 's/^沙箱结论: //p' | head -1)"
+MODE_CFG="$(grep '^DSH_PERMISSION_MODE=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+MODE_CFG="${MODE_CFG:-workspace-write}"
+case "$SANDBOX_VERDICT" in
+  bwrap|landlock)
+    if [ "$MODE_CFG" = danger-full-access ]; then
+      warn "  沙箱可用（${SANDBOX_VERDICT}）但配置是 danger-full-access：当前是无约束在跑，可以改成 workspace-write"
+    else
+      ok "  沙箱可用（${SANDBOX_VERDICT}），权限模式 ${MODE_CFG}"
+    fi
+    ;;
+  none)
+    if [ "$MODE_CFG" = danger-full-access ]; then
+      warn "  这台机器没有可用沙箱（bwrap 与 Landlock 都不行），已显式选择 danger-full-access：容器本身即边界"
+    else
+      bad "  没有可用沙箱，但 DSH_PERMISSION_MODE=${MODE_CFG}：租户的每条命令都会以 SANDBOX_UNAVAILABLE 失败（改成 danger-full-access，或换内核 ≥5.13，或给镜像补 bubblewrap）"
+    fi
+    ;;
+  *)
+    warn "  沙箱结论读不到：手工跑 bin/sandbox-check.sh 看原因"
+    ;;
+esac
+
 head_ "运行时注册"
 # 控制面不再看 Docker，只代理注册进来的地址。没有注册 = 该租户登录后必然 503。
 REGISTRY="$(curl -fsS "$GW_BASE/__mt/registry" 2>/dev/null || true)"

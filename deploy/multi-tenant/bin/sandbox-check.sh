@@ -96,6 +96,11 @@ else
 fi
 echo
 
+# 机器可读的一行，给 bin/doctor.sh 用（人看下面的结论）。
+if [ "$bwrap" = yes ]; then echo "沙箱结论: bwrap"
+elif [ "$landlock" = yes ]; then echo "沙箱结论: landlock"
+else echo "沙箱结论: none"; fi
+
 echo "== 结论 =="
 if [ "$bwrap" = yes ]; then
   echo "   bwrap 可用 → 想拿到更强隔离（多一层 PID/proc 视图隔离）就在 .env 里加 MT_SANDBOX_BWRAP=1；"

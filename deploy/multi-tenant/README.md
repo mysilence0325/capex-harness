@@ -238,6 +238,8 @@ cd dsh-offline-<时间戳> && ./install-offline.sh --dest /data1/dsh-mt
 包里是：三个镜像、**干净的**部署目录（`git archive` 导出，不含 `.env`/`state/`/`tenants.json`）、
 前端覆盖层、`MANIFEST.json` 与校验和，以及目标机入口 `install-offline.sh`
 （校验文件 → `docker load` 并逐个核对镜像 id → 铺开部署目录 → 生成 `.env`，然后打印下一步）。
+安装脚本还会用 `deploy/sandbox-debs/` 里那个 47 KB 的 bubblewrap 包，从运行时镜像派生一层
+`<标签>-sandbox`（沙箱用；DSH 默认仍自己选沙箱，见《离线部署手册》10.4）。
 `--payload` 必须是不带运行数据的干净副本：脚本会拒绝运行实例的文件，免得把口令与状态打进包。
 
 现场逐步流程（前置检查、配置定稿、建租户、启动与验证、接前置代理与 Key）见
