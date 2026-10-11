@@ -152,8 +152,33 @@ function createTenant(id, user, options = {}) {
   return { tenant, password }
 }
 
-/** Tenant id rule, shared by `add` and `add-batch`. */
-const ID_RULE = /^[a-z][a-z0-9-]{1,30}$/u
+/**
+ * Tenant id rule, shared by `add` and `add-batch`.
+ *
+ * An id becomes a Docker container name (`mt-dsh-<id>`), a network name
+ * (`mt-net-<id>`) and a hostname (`<id>.dsh.local`). The hostname is the binding
+ * constraint: lowercase letters, digits and single hyphens between them, never
+ * leading or trailing — so no underscore, no dot, no `ab-`, no `a--b`.
+ */
+const ID_RULE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
+
+/** Length window for a tenant id, as reported when the rule rejects one. */
+const ID_LENGTH = { min: 2, max: 31 }
+
+/**
+ * Why a candidate id is not usable, or undefined when it is.
+ *
+ * @param id - the candidate.
+ * @returns a sentence naming the rule that broke.
+ */
+function idProblem(id) {
+  if (typeof id !== 'string' || id.length < ID_LENGTH.min || id.length > ID_LENGTH.max) {
+    return `长度要在 ${String(ID_LENGTH.min)}-${String(ID_LENGTH.max)} 位之间`
+  }
+  if (!/^[a-z]/u.test(id)) return '要用小写字母开头'
+  if (!ID_RULE.test(id)) return '只能含小写字母、数字和单个连字符，且不能以连字符结尾（它会变成主机名 <id>.dsh.local）'
+  return undefined
+}
 
 /**
  * Warn when one username exists under several tenants.
@@ -186,6 +211,7 @@ switch (command) {
   case 'add': {
     const id = args[0]
     if (!ID_RULE.test(id ?? '')) {
+      console.error(`tenant id 不可用 ${JSON.stringify(id ?? '')} —— ${idProblem(id ?? '')}`)
       console.error('usage: registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--password <pw>]')
       process.exit(1)
     }
@@ -231,7 +257,7 @@ switch (command) {
       const [id, user, title, password] = cells
       const where = `第 ${index + 1} 行`
       if (!ID_RULE.test(id ?? '')) {
-        problems.push(`${where}: 租户 id 不合法 ${JSON.stringify(id ?? '')}（小写字母开头，只能含小写字母、数字、连字符，2-31 位）`)
+        problems.push(`${where}: 租户 id 不可用 ${JSON.stringify(id ?? '')} —— ${idProblem(id ?? '')}`)
       } else if (registry.tenants.some((entry) => entry.id === id)) {
         problems.push(`${where}: 租户 ${id} 已经存在`)
       } else if (rows.some((row) => row.id === id)) {
