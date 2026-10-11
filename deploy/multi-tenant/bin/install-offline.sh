@@ -74,7 +74,7 @@ done
 # `|| true` 是必需的：`set -o pipefail` 下 df 对不存在的目录失败会让整条赋值管道失败，
 # 而 set -e 会因此**静默**结束脚本——现场看到的是"前几步打印完就没了"。
 AVAIL_KB="$(df -Pk "$(dirname "$DEST")" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
-if [ -n "$AVAIL_KB" ] && [ "$AVAIL_KB" -lt 5*1024*1024 ]; then
+if [ -n "$AVAIL_KB" ] && [ "$AVAIL_KB" -lt $((5 * 1024 * 1024)) ]; then
   echo "    !! $(dirname "$DEST") 只剩 $((AVAIL_KB/1024/1024)) GB —— 镜像约 1.4 GB（解压后），加上租户数据会不够" >&2
 fi
 if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
@@ -102,6 +102,9 @@ done
 echo "== 4/4 铺开部署目录与 .env"
 mkdir -p "$DEST"
 ( cd "$ROOT/$DEPLOY_DIR" && tar -cf - . ) | ( cd "$DEST" && tar -xf - )
+# 可执行位在这里补一次：从 Windows 侧拷贝、解压或经 git 检出都可能丢掉它，
+# 而手册里写的是直接 `bin/mt.sh`、`./install-offline.sh`。
+chmod +x "$DEST"/bin/*.sh "$DEST"/bin/*.py "$DEST"/bin/*.mjs 2>/dev/null || true
 [ -f "$DEST/.env" ] && die "包里的 deploy/ 竟然带着 .env——停在这里，请人工看一下这个包"
 cp "$DEST/.env.example" "$DEST/.env"
 chmod 600 "$DEST/.env"
