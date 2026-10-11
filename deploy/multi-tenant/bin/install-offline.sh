@@ -99,7 +99,7 @@ for row in "${IMAGE_ROWS[@]}"; do
   echo "    $ref  ← $file（id ${id:0:19}…）"
 done
 
-echo "== 4/4 铺开部署目录与 .env"
+echo "== 4/5 铺开部署目录与 .env"
 mkdir -p "$DEST"
 ( cd "$ROOT/$DEPLOY_DIR" && tar -cf - . ) | ( cd "$DEST" && tar -xf - )
 # 可执行位在这里补一次：从 Windows 侧拷贝、解压或经 git 检出都可能丢掉它，
@@ -137,10 +137,33 @@ fi
 sed -i '1i # 由 install-offline.sh 生成：目标站点 '"$SITE"'。真密钥请填在下面这一行，\n# 留空时模型网关会拒绝启动（这是设计如此，不是故障）。' "$DEST/.env"
 echo "    部署目录 $DEST（.env 已生成，权限 600）"
 
+echo "== 5/5 沙箱：把 bubblewrap 补进运行时镜像"
+# 运行时镜像里没有 bubblewrap（基础镜像没装），而 DSH 的沙箱链首选就是 bwrap。
+# 离线包带了一个 47 KB 的 deb；这里从刚导入的运行时镜像派生一层把它装进去，
+# 于是"用不用 bwrap"变成一条配置（MT_SANDBOX_BWRAP=1）而不是一次重建。
+if ls "$DEST"/sandbox-debs/*.deb >/dev/null 2>&1; then
+  SANDBOX_IMAGE="${RUNTIME_IMAGE}-sandbox"
+  BUILD_DIR="$(mktemp -d)"
+  mkdir -p "$BUILD_DIR/debs" && cp "$DEST"/sandbox-debs/*.deb "$BUILD_DIR/debs/"
+  printf 'FROM %s\nCOPY debs /tmp/debs\nRUN dpkg -i /tmp/debs/*.deb && rm -rf /tmp/debs\n' "$RUNTIME_IMAGE" > "$BUILD_DIR/Dockerfile"
+  # 经典构建器：BuildKit 会去公网解析基础镜像元数据，这类机器上必失败。
+  if DOCKER_BUILDKIT=0 docker build -q -t "$SANDBOX_IMAGE" "$BUILD_DIR" >/dev/null; then
+    set_env DSH_IMAGE "$SANDBOX_IMAGE"
+    echo "    已派生 $SANDBOX_IMAGE：$(docker run --rm --entrypoint bwrap "$SANDBOX_IMAGE" --version 2>&1 | head -1)"
+    echo "    （DSH 默认仍自己选沙箱；要用 bwrap 那条路，先跑 bin/sandbox-check.sh 确认，再加 MT_SANDBOX_BWRAP=1）"
+  else
+    echo "    !! 派生失败；DSH 仍可用自己选的那条沙箱路（bin/sandbox-check.sh 会给结论）" >&2
+  fi
+  rm -rf "$BUILD_DIR"
+else
+  echo "    包里没有 sandbox-debs/*.deb（跳过）"
+fi
+
 echo
-echo "装好了。接下来四步（手册《离线部署手册.md》第 4-6 节逐条对照）："
+echo "装好了。接下来五步（手册《离线部署手册.md》第 4-6 节逐条对照）："
 echo "    1) 填密钥：  vi $DEST/.env      # MT_UPSTREAM_API_KEY=<内网模型端点的真 key>"
 echo "    2) 建租户：  cd $DEST && bin/mt.sh add-batch tenants.csv --derive-id --credentials-file .tenant-credentials.json"
 echo "                 （清单格式见 tenants.csv.example；没有该文件就先照它建一份）"
 echo "    3) 证书与启动：bin/mt.sh cert && bin/mt.sh up"
 echo "    4) 验证：    bin/mt.sh doctor && bin/acceptance.sh && bin/mt.sh mount-check --key-user <某个用户名>"
+echo "    5) 沙箱：    bin/sandbox-check.sh     # 这台机器上到底哪条沙箱路可用"

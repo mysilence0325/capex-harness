@@ -162,6 +162,10 @@ const MARK_END = '# <<< dsh-mt model config <<<'
 const TRUST_BEGIN = '# >>> dsh-mt host trust (maintained by bin/render.js, do not edit this line) >>>'
 const TRUST_END = '# <<< dsh-mt host trust <<<'
 
+/** Markers for the sandbox-runner block spliced into each tenant's profile patch. */
+const SANDBOX_BEGIN = '# >>> dsh-mt sandbox runner (maintained by bin/render.js, do not edit this line) >>>'
+const SANDBOX_END = '# <<< dsh-mt sandbox runner <<<'
+
 /**
  * Shared model declaration every tenant receives, when it is filled in.
  * @returns the YAML entries to append, or undefined while the template is untouched.
@@ -239,6 +243,47 @@ function spliceTrustBlock(patchFile, tenant) {
   return spliceBlock(patchFile, tenant, TRUST_BEGIN, TRUST_END, block)
 }
 
+/**
+ * Whether every tenant should run commands through bwrap, from MT_SANDBOX_BWRAP.
+ *
+ * Lazy for the same reason as {@link seccompTenants}: as a constant it would read
+ * `envValues` before that is initialised.
+ */
+const bwrapRunner = () => (envValues.get('MT_SANDBOX_BWRAP') ?? process.env.MT_SANDBOX_BWRAP ?? '').trim() === '1'
+
+/**
+ * Force the bwrap runner, when the deployment has verified that bwrap works there.
+ *
+ * DSH's own chain probes bwrap with `--ro-bind / /` and no user namespace, which
+ * cannot succeed inside a container that lacks CAP_SYS_ADMIN — so inside a tenant
+ * container the chain lands on Landlock and the bwrap rung is never reached. The
+ * one form that does work in an unprivileged container is bwrap creating its own
+ * user namespace, which an explicit `runnerCommand` can ask for; DSH then asserts
+ * full enforcement and skips probing, which is why this is a deployment decision
+ * and why the runner's failure signatures are listed: if bwrap refuses, the agent
+ * sees the refusal instead of silently losing the sandbox.
+ *
+ * `bin/sandbox-check.sh` answers whether bwrap's user-namespace form works on the
+ * machine; only turn this on when it says so.
+ *
+ * @param patchFile - the tenant's profile patch path.
+ * @param tenant - tenant record.
+ * @returns whether the file changed.
+ */
+function spliceSandboxBlock(patchFile, tenant) {
+  const block = bwrapRunner()
+    ? `- id: sandbox-local
+  config:
+    runnerCommand: ['bwrap', '--unshare-user']
+    runnerFailureSignatures:
+      - 'creating new namespace'
+      - 'permission denied'
+      - 'operation not permitted'
+      - 'no such file or directory'`
+    : ''
+  return spliceBlock(patchFile, tenant, SANDBOX_BEGIN, SANDBOX_END, block)
+}
+
 // ---------------------------------------------------------------------------
 // per-tenant directories and profile patch
 // ---------------------------------------------------------------------------
@@ -283,6 +328,7 @@ const modelEntries = sharedModelEntries()
 const createdPatches = []
 const modelApplied = []
 const trustApplied = []
+const sandboxApplied = []
 const remoteTenants = []
 /**
  * Which machine this render is for.
@@ -389,6 +435,8 @@ for (const tenant of tenants) {
   if (spliceModelBlock(patchFile, tenant, modelEntries)) modelApplied.push(tenant.id)
   // 老租户的 patch 里可能没有信任块：渲染时补上，缺了它 DSH 会对所有 /api/* 回 403。
   if (spliceTrustBlock(patchFile, tenant)) trustApplied.push(tenant.id)
+  // 沙箱：默认让 DSH 自己选（容器里通常是 Landlock）；开了 MT_SANDBOX_BWRAP 才强指 bwrap。
+  if (spliceSandboxBlock(patchFile, tenant)) sandboxApplied.push(tenant.id)
 }
 
 // ---------------------------------------------------------------------------
@@ -634,7 +682,10 @@ ${fs.existsSync(MODEL_ENV_FILE) ? '    env_file:\n      - ./model.env\n' : ''}  
       DSH_HOME: /dsh-home
       # This host's kernel (3.10, no user namespaces) cannot run DSH's own file
       # sandbox, so the container itself is the isolation boundary.
-      DSH_PERMISSION_MODE: \${DSH_PERMISSION_MODE:-danger-full-access}
+      # 默认取 DSH 自己的安全默认值 workspace-write：没有可用沙箱时**响亮地失败**
+      # （SANDBOX_UNAVAILABLE），而不是悄悄地在无约束下跑。内核没有沙箱的机器
+      # （例如 3.10 的 CentOS 7）要显式写 danger-full-access 并记录原因。
+      DSH_PERMISSION_MODE: \${DSH_PERMISSION_MODE:-workspace-write}
       DSH_TELEMETRY_DISABLED: "1"
       TZ: \${TZ:-Asia/Shanghai}
 ${tenant.modelKey === undefined
@@ -926,6 +977,10 @@ if (remoteTenants.length > 0) {
 }
 if (trustApplied.length > 0) {
   console.log(`updated the host-trust block for: ${trustApplied.join(', ')} (restart those tenants to take effect)`)
+}
+if (sandboxApplied.length > 0) {
+  console.log(`sandbox runner block updated for: ${sandboxApplied.join(', ')}` +
+    (bwrapRunner() ? ' (bwrap forced; bin/sandbox-check.sh says whether it works here)' : ' (bwrap not forced: DSH selects the runner)'))
 }
 if (modelEntries === undefined) {
   console.log('model.patch.yml is absent or still contains CHANGE-ME: tenants use the built-in provider cards only')
