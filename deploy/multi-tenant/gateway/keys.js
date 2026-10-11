@@ -61,6 +61,10 @@ function readKeys(stateDir) {
  * @returns the keys now in effect.
  */
 function generateKeys(stateDir) {
+  // 全新部署时这个目录还不存在（install-offline.sh 只铺开干净的部署目录，state/ 里
+  // 没有任何运行数据），下面的写操作会以 ENOENT 直接崩掉，而它发生在渲染 compose 之前——
+  // 于是"第一次 up"连 compose 文件都没生成。目录在这里建。
+  fs.mkdirSync(stateDir, { recursive: true })
   const file = path.join(stateDir, 'keys.json')
   let stored = {}
   try {
