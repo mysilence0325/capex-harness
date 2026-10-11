@@ -137,6 +137,7 @@ cmd_up() {
   fi
   if [ "$this_node" = local ]; then
     # 控制面：注册本机租户（网关只认注册表里的地址，容器重建后必须重报）。
+    wait_gateway || true
     register_all_tenants
   else
     # 节点：不自己注册，交给本机节点代理——它随容器变化持续重报，而 up 只跑一次。
@@ -279,6 +280,22 @@ register_all_tenants() {
   done
   echo "    已注册 ${ok} 个租户$([ "$failed" -gt 0 ] && echo "，${failed} 个失败" || true)"
   return 0
+}
+
+# 等控制面开始答话。
+#
+# 注册必须在网关监听之后：全新部署（离线包在目标机上的第一次 up）时网关是刚创建的，
+# 注册会直接 ECONNREFUSED，于是"0 个租户注册成功"，而 up 表面上跑完了——
+# 接着每个用户登录都会看到 503。现网那台是增量重建，所以这条只在第一台机器上暴露。
+wait_gateway() {
+  local attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    if [ -n "$(health 2>/dev/null || true)" ]; then return 0; fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  echo "    !! 控制面 60 秒内没有答话（$(gw_base)/__mt/health）：bin/mt.sh logs gateway 看日志" >&2
+  return 1
 }
 
 # 手动注册（远端节点或排查时用）。
@@ -697,21 +714,27 @@ cmd_add_batch() {
   [ -f "$file" ] || { echo "找不到清单文件: $file" >&2; return 2; }
 
   # registry.js 跑在容器里，只看得见项目目录；清单在别处就先拷进来，跑完删掉。
-  local staged="$ROOT/.add-batch.csv" cleanup=no
-  if [ "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" != "$ROOT/$(basename "$file")" ]; then
-    cp "$file" "$staged" && chmod 600 "$staged" && cleanup=yes
-  else
-    staged="$file"
-  fi
+  # 路径一律先取绝对值再算"相对项目目录"——调用者给的是相对路径（`tenants.csv`）时，
+  # 直接拼 `.$file` 会得到 `.tenants.csv`（实测踩过：容器里打开这个文件名直接 ENOENT）。
+  local absolute cleanup=no
+  absolute="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+  case "$absolute" in
+    "$ROOT"/*) ;;
+    *)
+      cp "$file" "$ROOT/.add-batch.csv" && chmod 600 "$ROOT/.add-batch.csv"
+      absolute="$ROOT/.add-batch.csv"
+      cleanup=yes
+      ;;
+  esac
 
   local out
-  out="$(node_run bin/registry.js add-batch ".${staged#"$ROOT"}" ${extra[@]+"${extra[@]}"})" || {
+  out="$(node_run bin/registry.js add-batch "./${absolute#"$ROOT"/}" ${extra[@]+"${extra[@]}"})" || {
     printf '%s\n' "$out"
-    [ "$cleanup" = yes ] && rm -f "$staged"
+    [ "$cleanup" = yes ] && rm -f "$ROOT/.add-batch.csv"
     return 1
   }
   printf '%s\n' "$out"
-  [ "$cleanup" = yes ] && rm -f "$staged"
+  [ "$cleanup" = yes ] && rm -f "$ROOT/.add-batch.csv"
 
   # 清单没给口令的租户拿到的是随机口令，只有这一次能看见。要发下去就写个 0600 的文件，
   # 形状与 bin/acceptance.sh 读的凭据文件一致，可以直接当它用（里面有明文，别进备份）。
