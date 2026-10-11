@@ -1152,6 +1152,12 @@ function sessionCookie(tenant, user) {
  * belongs to, what happens when a name exists under several tenants — is the
  * same resolution password sign-in uses, so the two paths cannot drift.
  *
+ * The spelling the registry holds wins. Only when nothing matches exactly does
+ * one more pass ignore case, because a certificate's subject is written by
+ * another system and the case it chose is not something this deployment
+ * controls; a name that then matches several accounts is refused rather than
+ * guessed.
+ *
  * @param req - the request.
  * @returns the tenant and username, or the reason to refuse.
  */
@@ -1160,9 +1166,17 @@ function keyLoginAttempt(req) {
   if (trust !== 'trusted') return { reason: trust }
   const user = keyUsername(req)
   if (user === undefined) return { reason: 'no-identity' }
-  const resolved = resolveLogin(user, undefined, tenantByAddress(req.headers.host, req.socket.localPort))
-  if (resolved.error !== undefined) return { reason: 'unknown-user', user }
-  return { tenant: resolved.tenant, user }
+  const hinted = tenantByAddress(req.headers.host, req.socket.localPort)
+  const resolved = resolveLogin(user, undefined, hinted)
+  if (resolved.error === undefined) return { tenant: resolved.tenant, user: resolved.account.name }
+  const folded = [...tenants.values()].flatMap((tenant) => {
+    if (hinted !== undefined && tenant.id !== hinted.id) return []
+    return (tenant.users ?? [])
+      .filter((account) => account.name.toLowerCase() === user.toLowerCase())
+      .map((account) => ({ tenant, account }))
+  })
+  if (folded.length !== 1) return { reason: 'unknown-user', user }
+  return { tenant: folded[0].tenant, user: folded[0].account.name }
 }
 
 /**
