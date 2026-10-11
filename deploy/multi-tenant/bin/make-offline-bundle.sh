@@ -100,6 +100,9 @@ echo "==> 收进部署目录（原样复制 --payload；构建产物不进包）
 [ -f "$BUNDLE/deploy/bin/install-offline.sh" ] || die "payload 里没有 bin/install-offline.sh——包不完整"
 cp "$BUNDLE/deploy/bin/install-offline.sh" "$BUNDLE/install-offline.sh"
 chmod +x "$BUNDLE/install-offline.sh"
+# 手册同样放一份到包根：人打开包第一眼要能看到"怎么装"，而不是先猜 deploy/ 里有什么。
+# 它与 deploy/ 里那份是同一个来源（打包时复制），不会各说各话。
+cp "$BUNDLE/deploy/离线部署手册.md" "$BUNDLE/离线部署手册.md"
 # 可执行位也补一遍：git 检出的脚本可能是 644（Windows 上根本没有这个位），
 # 而手册让人直接跑 `bin/mt.sh`。
 chmod +x "$BUNDLE"/deploy/bin/*.sh "$BUNDLE"/deploy/bin/*.py "$BUNDLE"/deploy/bin/*.mjs 2>/dev/null || true
@@ -155,7 +158,10 @@ DSH 多租户离线部署包 $NAME
    它也认 --check-only：只校验、不改任何东西（部署前门禁）。
 
 三、然后照手册走：
-      deploy/离线部署手册.md       ← 从第 4 节"配置"开始，一步一条命令、每步有期望输出
+      离线部署手册.md              ← 就放在本目录（deploy/ 里也有一份），从第 4 节开始
+
+包里有什么：images/ 三块镜像、deploy/ 部署代码与全部文档、overlay/ 前端覆盖层、
+install-offline.sh 安装入口、MANIFEST.json 与 SHA256SUMS 校验和。
 
 本包目标站点：$SITE，入口前缀 $BASE_PATH，模型端点 $UPSTREAM
 不含真模型密钥（现场粘贴）、不含租户名单（deploy/tenants.csv.example 是模板）。
