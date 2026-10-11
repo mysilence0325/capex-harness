@@ -144,16 +144,15 @@ done
 cat > "$BUNDLE/先读我.txt" <<TXT
 DSH 多租户离线部署包 $NAME
 
-一、先校验（在目标机上，包已解开时）：
-      sha256sum -c SHA256SUMS
-   如果你拿到的是分卷，先合并：
-      cat dsh-offline-*.tar.part* > dsh-offline-$STAMP.tar
-      sha256sum -c SHA256SUMS.parts        # 逐卷校验
+一、先校验再解开（在目标机上，就着收到的传输文件做）：
+      sha256sum -c SHA256SUMS.bundle       # 一个 .tar 或几个 .part，都在这个文件里
+      cat dsh-offline-*.tar.part* > dsh-offline-$STAMP.tar   # 没有 part* 就跳过这一行
       tar xf dsh-offline-$STAMP.tar
 
 二、再安装（在解开的 $NAME/ 目录里）：
       ./install-offline.sh --dest /data/dsh-mt
    它做四件事：校验文件、导入三个镜像、把 deploy/ 铺到 --dest、生成 .env（并告诉你还差什么）。
+   它也认 --check-only：只校验、不改任何东西（部署前门禁）。
 
 三、然后照手册走：
       deploy/离线部署手册.md       ← 从第 4 节"配置"开始，一步一条命令、每步有期望输出
@@ -166,11 +165,35 @@ echo "==> 包内校验和（相对包根，安装脚本直接 sha256sum -c 用�
 ( cd "$BUNDLE" && find . -type f ! -name SHA256SUMS -print0 | sort -z \
     | xargs -0 sha256sum | sed 's|\./||' > SHA256SUMS )
 
-echo "==> 打 tar（不再压缩：成员已经是 gzip）并分卷 $VOLUME_SIZE"
+# 每卷上限：整数 + K/M/G 后缀（`1.5G` 这类小数直接拒绝，省得算错了才发现）。
+volume_bytes() {
+  local text="$1" number suffix
+  case "$text" in
+    *[kK]) number="${text%[kK]}"; suffix=1024 ;;
+    *[mM]) number="${text%[mM]}"; suffix=$((1024 * 1024)) ;;
+    *[gG]) number="${text%[gG]}"; suffix=$((1024 * 1024 * 1024)) ;;
+    *)     number="$text"; suffix=1 ;;
+  esac
+  case "$number" in
+    ''|*[!0-9]*) die "--volume-size 只支持整数加 K/M/G 后缀（例如 1500M、2G）：$text" ;;
+  esac
+  echo $((number * suffix))
+}
+VOLUME_BYTES="$(volume_bytes "$VOLUME_SIZE")"
+
+echo "==> 打 tar（不再压缩：成员已经是 gzip）"
 ( cd "$OUT" && tar -cf "$NAME.tar" "$NAME" )
-( cd "$OUT" && split -b "$VOLUME_SIZE" -d -a 2 "$NAME.tar" "$NAME.tar.part" )
-( cd "$OUT" && sha256sum "$NAME".tar.part* > SHA256SUMS.parts )
-rm -f "$OUT/$NAME.tar"
+TAR_BYTES="$(stat -c%s "$OUT/$NAME.tar")"
+if [ "$TAR_BYTES" -le "$VOLUME_BYTES" ]; then
+  # 装得下就不分卷：多一个"先合并再解"的步骤，只有一个文件的传输没任何好处。
+  ( cd "$OUT" && sha256sum "$NAME.tar" > SHA256SUMS.bundle )
+  echo "    整包 $((TAR_BYTES / 1024 / 1024))MB 未超过每卷上限 $VOLUME_SIZE，不分卷：$NAME.tar"
+else
+  echo "    整包 $((TAR_BYTES / 1024 / 1024))MB 超过每卷上限 $VOLUME_SIZE，按 $VOLUME_SIZE 分卷"
+  ( cd "$OUT" && split -b "$VOLUME_SIZE" -d -a 2 "$NAME.tar" "$NAME.tar.part" )
+  ( cd "$OUT" && sha256sum "$NAME".tar.part* > SHA256SUMS.bundle )
+  rm -f "$OUT/$NAME.tar"
+fi
 
 echo
 echo "==> 完成：$OUT"
@@ -178,6 +201,11 @@ ls -1 "$OUT" | grep "$NAME" | sed 's/^/    /'
 echo "    体积：$(du -sh "$BUNDLE" | cut -f1)（未压缩）"
 echo
 echo "下一步（把包搬到目标机）："
-echo "    1) 全部 dsh-offline-*.tar.part*、SHA256SUMS.parts、SHA256SUMS 一起拷贝过去"
-echo "    2) 目标机: cat dsh-offline-*.tar.part* > $NAME.tar && tar xf $NAME.tar"
+if [ "$TAR_BYTES" -le "$VOLUME_BYTES" ]; then
+  echo "    1) 把 $NAME.tar 与 SHA256SUMS.bundle 一起拷贝过去（不分卷）"
+  echo "    2) 目标机: sha256sum -c SHA256SUMS.bundle && tar xf $NAME.tar"
+else
+  echo "    1) 把全部 $NAME.tar.part* 与 SHA256SUMS.bundle 一起拷贝过去"
+  echo "    2) 目标机: sha256sum -c SHA256SUMS.bundle && cat $NAME.tar.part* > $NAME.tar && tar xf $NAME.tar"
+fi
 echo "    3) 目标机: cd $NAME && ./install-offline.sh --dest /data/dsh-mt"

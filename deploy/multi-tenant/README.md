@@ -229,9 +229,9 @@ bin/make-offline-bundle.sh --payload /tmp/clean/deploy-multi-tenant \
   --overlay /path/image-overlay-<时间戳>.tar.gz --out /data \
   --commit "$(git rev-parse HEAD)" --volume-size 1500M
 
-# ② 目标机：校验、合并分卷、解包、安装
-sha256sum -c SHA256SUMS.parts
-cat dsh-offline-*.tar.part* > dsh-offline-<时间戳>.tar && tar xf dsh-offline-<时间戳>.tar
+# ② 目标机：校验、解包、安装（整包约 645 MB，装得下就不分卷；有 part* 才需要先 cat 合并）
+sha256sum -c SHA256SUMS.bundle
+tar xf dsh-offline-<时间戳>.tar
 cd dsh-offline-<时间戳> && ./install-offline.sh --dest /data1/dsh-mt
 ```
 
