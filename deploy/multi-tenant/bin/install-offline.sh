@@ -71,7 +71,9 @@ for row in "${IMAGE_ROWS[@]}"; do
   [ -f "$ROOT/$file" ] || die "镜像文件缺失: $file"
   printf '    %-38s %5sMB  %s\n' "$file" "$(( $(stat -c%s "$ROOT/$file") / 1024 / 1024 ))" "$ref"
 done
-AVAIL_KB="$(df -Pk "$(dirname "$DEST")" 2>/dev/null | awk 'NR==2 {print $4}')"
+# `|| true` 是必需的：`set -o pipefail` 下 df 对不存在的目录失败会让整条赋值管道失败，
+# 而 set -e 会因此**静默**结束脚本——现场看到的是"前几步打印完就没了"。
+AVAIL_KB="$(df -Pk "$(dirname "$DEST")" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
 if [ -n "$AVAIL_KB" ] && [ "$AVAIL_KB" -lt 5*1024*1024 ]; then
   echo "    !! $(dirname "$DEST") 只剩 $((AVAIL_KB/1024/1024)) GB —— 镜像约 1.4 GB（解压后），加上租户数据会不够" >&2
 fi
@@ -112,7 +114,7 @@ set_env() {
     printf '%s=%s\n' "$key" "$value" >> "$DEST/.env"
   fi
 }
-RUNTIME_IMAGE="$(printf '%s\n' "${IMAGE_ROWS[@]}" | grep -o '"ref": "dsh-web:local[^"]*"' | sed 's/.*: "//; s/"$//' | head -1)"
+RUNTIME_IMAGE="$(printf '%s\n' "${IMAGE_ROWS[@]}" | grep -o '"ref": "dsh-web:local[^"]*"' | sed 's/.*: "//; s/"$//' | head -1 || true)"
 [ -n "$RUNTIME_IMAGE" ] || die "清单里没有本机构建的运行时镜像（dsh-web:local*）"
 set_env DSH_IMAGE "$RUNTIME_IMAGE"
 set_env TZ "Asia/Shanghai"

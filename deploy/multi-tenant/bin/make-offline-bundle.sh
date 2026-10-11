@@ -62,8 +62,10 @@ done
 # doctor 也是这么认的）。刻意不读 .env.example 的 DSH_IMAGE：那里是示例值（发行版载体），
 # 照着它打出来的包会让目标机跑另一份代码——而且从包里看不出来。
 if [ -z "$RUNTIME_IMAGE" ]; then
+  # `|| true`：没有匹配时 grep 会失败，而 set -o pipefail + set -e 会让脚本在给出
+  # 下面那条提示之前就静默退出（提示正是要告诉人"先去发布一个镜像"）。
   RUNTIME_IMAGE="$(docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' \
-    | grep -E '^dsh-web:local-' | sort -k2 | tail -1 | awk '{print $1}')"
+    | grep -E '^dsh-web:local-' | sort -k2 | tail -1 | awk '{print $1}' || true)"
   [ -n "$RUNTIME_IMAGE" ] || die "本机没有 dsh-web:local-* 镜像（先用 bin/publish-image.sh 发布），或用 --runtime-image 指定"
 fi
 for image in "$NODE_IMAGE" "$CARRIER_IMAGE" "$RUNTIME_IMAGE"; do
