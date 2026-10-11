@@ -437,6 +437,33 @@ function accepts(expected, presented) {
  */
 const KEYS = keys.readKeys(STATE_DIR)
 
+/**
+ * Whether a presented key matches one purpose's key, re-reading the files when the
+ * startup copy does not match.
+ *
+ * The files are read once at startup, but they can appear or rotate while this
+ * process runs: a first start creates them (bin/render.js writes them, and the
+ * gateway's own container may already be up), and an operator can run
+ * `bin/mt.sh keys`. Without the re-read, a freshly created deployment rejects
+ * every runtime registration with "bad registry key" — the CLI presents
+ * `state/registry.key` while this process holds only the per-purpose key from
+ * `keys.json` — and every login then answers 503. The exact same comparison is
+ * made against the file, and the in-memory copy is replaced when it wins.
+ *
+ * @param purpose - which key: register, metrics or ops.
+ * @param presented - the key from the request, if any.
+ * @returns whether it matches that purpose or the legacy key.
+ */
+function acceptsPurpose(purpose, presented) {
+  if (accepts(KEYS[purpose], presented) || accepts(KEYS.legacy, presented)) return true
+  const fresh = keys.readKeys(STATE_DIR)
+  if (accepts(fresh[purpose], presented) || accepts(fresh.legacy, presented)) {
+    Object.assign(KEYS, fresh)
+    return true
+  }
+  return false
+}
+
 const registryKey = (() => {
   const file = path.join(STATE_DIR, 'registry.key')
   if (fs.existsSync(file)) {
@@ -1343,7 +1370,7 @@ function handleRegister(req, res) {
   // An empty configured key must never authenticate: timingSafeEqual over two
   // empty buffers is true, which would let anyone who can reach the port claim a
   // tenant.
-  if (!accepts(KEYS.register, presented) && !accepts(KEYS.legacy, presented)) {
+  if (!acceptsPurpose('register', presented)) {
     audit({ tenant: '-', user: '-', status: 401, note: 'registry-key-rejected', url: req.url })
     send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
     return
@@ -2335,7 +2362,7 @@ function handleRequest(req, res) {
     const presented = typeof header === 'string' && header !== '' ? header : bearer
     const remote = req.socket.remoteAddress ?? ''
     const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
-    if (!loopback && !accepts(KEYS.metrics, presented) && !accepts(KEYS.legacy, presented)) {
+    if (!loopback && !acceptsPurpose('metrics', presented)) {
       send(res, 401, { 'content-type': 'text/plain; charset=utf-8' }, 'bad registry key\n')
       return
     }
@@ -2385,7 +2412,7 @@ function handleRequest(req, res) {
     // control plane stays the single owner of which tenants exist and where.
     // Password hashes are stripped: a node needs a tenant's placement and ports
     // to build its container, never its credentials.
-    if (typeof req.headers['x-mt-registry-key'] !== 'string' || !accepts(KEYS.register, req.headers['x-mt-registry-key']) && !accepts(KEYS.legacy, req.headers['x-mt-registry-key'])) {
+    if (typeof req.headers['x-mt-registry-key'] !== 'string' || !acceptsPurpose('register', req.headers['x-mt-registry-key'])) {
       send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
       return
     }
@@ -2401,7 +2428,7 @@ function handleRequest(req, res) {
     const presented = req.headers['x-mt-registry-key']
     const remote = req.socket.remoteAddress ?? ''
     const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
-    if (!loopback && !accepts(KEYS.register, presented) && !accepts(KEYS.legacy, presented)) {
+    if (!loopback && !acceptsPurpose('register', presented)) {
       send(res, 401, { 'content-type': 'application/json; charset=utf-8' }, JSON.stringify({ ok: false, error: 'bad registry key' }))
       return
     }
