@@ -18,6 +18,7 @@
 #   bin/mt.sh publish-image      build the runtime image from an uploaded local-source overlay
 #   bin/mt.sh list               list tenants from the registry
 #   bin/mt.sh add <id> [...]     add a tenant (see bin/registry.js)
+#   bin/mt.sh add-batch <清单.csv>  批量建租户（每行 id,用户名[,标题[,口令]]）
 #   bin/mt.sh passwd <id> <user> set a tenant password (and end that user's sessions)
 #   bin/mt.sh kick <id> [user]   end a tenant's or one user's sessions without changing the password
 #   bin/mt.sh limit <id> [--rpm n] [--daily-tokens n] [--clear]   model ceilings for one tenant
@@ -618,7 +619,9 @@ cmd_add() {
   local out id
   out="$(node_run bin/registry.js add "${args[@]}")" || { printf '%s\n' "$out"; return 1; }
   printf '%s\n' "$out"
-  id="$(printf '%s\n' "$out" | sed -n 's/^added tenant //p' | head -1)"
+  # 只取 id：打印行是 `added tenant <id> (node: <node>)`，整串当成 id 会让下面
+  # 取 edgePort / service 全部落空（曾经如此），于是"开通"其实一个容器都没起。
+  id="$(printf '%s\n' "$out" | sed -n 's/^added tenant \([^ ]*\).*/\1/p' | head -1)"
   [ -n "$id" ] || { echo "无法从输出里解析租户 id" >&2; return 1; }
 
   node_run bin/render.js >/dev/null
@@ -669,6 +672,78 @@ cmd_add() {
     echo "    专属入口 : http://${ip:-127.0.0.1}:${edge}/"
   fi
   return 0
+}
+
+cmd_add_batch() {
+  local file="" no_start=no creds=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-start)         no_start=yes; shift ;;
+      --credentials-file) creds="${2:-}"; shift 2 ;;
+      *)                  [ -z "$file" ] && file="$1"; shift ;;
+    esac
+  done
+  [ -n "$file" ] || {
+    echo "用法: bin/mt.sh add-batch <清单.csv> [--no-start] [--credentials-file <路径>]" >&2
+    echo "  清单每行一个租户: id,用户名[,标题[,初始口令]]；# 开头与空行忽略。" >&2
+    echo "  用户名用 Key 里的账号名（Key 免口令登录按用户名找租户）。" >&2
+    return 2
+  }
+  [ -f "$file" ] || { echo "找不到清单文件: $file" >&2; return 2; }
+
+  # registry.js 跑在容器里，只看得见项目目录；清单在别处就先拷进来，跑完删掉。
+  local staged="$ROOT/.add-batch.csv" cleanup=no
+  if [ "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" != "$ROOT/$(basename "$file")" ]; then
+    cp "$file" "$staged" && chmod 600 "$staged" && cleanup=yes
+  else
+    staged="$file"
+  fi
+
+  local out
+  out="$(node_run bin/registry.js add-batch ".${staged#"$ROOT"}")" || {
+    printf '%s\n' "$out"
+    [ "$cleanup" = yes ] && rm -f "$staged"
+    return 1
+  }
+  printf '%s\n' "$out"
+  [ "$cleanup" = yes ] && rm -f "$staged"
+
+  # 清单没给口令的租户拿到的是随机口令，只有这一次能看见。要发下去就写个 0600 的文件，
+  # 形状与 bin/acceptance.sh 读的凭据文件一致，可以直接当它用（里面有明文，别进备份）。
+  if [ -n "$creds" ]; then
+    {
+      printf '{\n  "tenants": {'
+      printf '%s\n' "$out" | awk -F'\t' '
+        /^  [a-z0-9-]+\t/ {
+          id = $1; gsub(/^ +/, "", id)
+          printf "%s\n    \"%s\": { \"user\": \"%s\", \"password\": \"%s\" }", (n++ ? "," : ""), id, $2, $3
+        }
+        END { if (n) printf "\n" }
+      '
+      printf '  }\n}\n'
+    } > "$creds"
+    chmod 600 "$creds"
+    echo
+    echo "==> 凭据已写入 ${creds}（0600，含明文口令；不要放进备份或版本库）"
+    echo "    把它放到部署目录下的 .acceptance-credentials.json 即可直接跑 bin/acceptance.sh"
+  fi
+
+  node_run bin/render.js >/dev/null
+  ensure_egress_proxy
+
+  if [ "$no_start" = yes ]; then
+    echo
+    echo "==> 已注册（--no-start）；执行 bin/mt.sh up 可一起启动。"
+    return 0
+  fi
+
+  echo "==> 建立租户网络并启动全部租户"
+  "${COMPOSE[@]}" up -d 2>&1 | tail -3
+  register_all_tenants
+  cmd_wait
+  # 限速是运行时状态，容器一重建就没了；按 state/bandwidth.json 重放。
+  bash bin/bandwidth.sh apply || echo "    !! 网络限速未恢复，执行 bin/mt.sh bandwidth apply 查看"
+  cmd_url
 }
 
 # 把根目录的 model.patch.yml / model.env 应用到所有租户并重启它们。
@@ -753,6 +828,7 @@ case "${1:-}" in
   render)  shift; node_run bin/render.js "$@" ;;
   list)    node_run bin/registry.js list ;;
   add)     shift; cmd_add "$@" ;;
+  add-batch) shift; cmd_add_batch "$@" ;;
   passwd)  shift; node_run bin/registry.js passwd "$@"; node_run bin/render.js ;;
   kick)    shift; node_run bin/registry.js kick "$@" ;;   # 让某租户（或某用户）已登录的会话失效
   limit)   shift; node_run bin/registry.js limit "$@" ;;  # 设置/查看某租户的模型限额

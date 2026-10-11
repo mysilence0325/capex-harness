@@ -105,6 +105,75 @@ function ensureModelKeys() {
 
 const [command, ...args] = process.argv.slice(2)
 
+/**
+ * Build one tenant record.
+ *
+ * Shared by `add` and `add-batch`, so a bulk creation cannot drift from a
+ * single one: the same port allocation, the same placeholder model key, the
+ * same default limits.
+ *
+ * @param id - tenant id, already validated.
+ * @param user - the account name.
+ * @param options - title, password, node, ports and per-tenant limits.
+ * @returns the record, and the plaintext password it was given.
+ */
+function createTenant(id, user, options = {}) {
+  const password = options.password ?? crypto.randomBytes(9).toString('base64url')
+  const tenant = {
+    id,
+    title: options.title ?? id,
+    // Which machine runs this tenant. `local` means the control plane's own
+    // host: bin/render.js emits a compose service for it and bin/mt.sh starts
+    // it. Any other value marks a runtime on another node, which that node's
+    // agent registers; the control host neither creates nor starts it.
+    node: options.node ?? 'local',
+    internalPort: Number(options.internalPort ?? nextPort('internalPort', 3181)),
+    // Compose service name (proxy target) and container name (log lookup).
+    // The prefix is a deployment setting: a second deployment on the same host
+    // must not collide with the first one's container names, and the agent and
+    // bin/mt.sh both look the container up by the name recorded here.
+    service: `dsh-${id}`,
+    container: `${NAME_PREFIX}dsh-${id}`,
+    hosts: [`${id}.dsh.local`],
+    users: [{ name: user, passwordHash: hashPassword(password) }],
+    // Placeholder the tenant presents to the model gateway; the real upstream
+    // credential never enters a tenant container.
+    modelKey: mintModelKey(id),
+    limits: { memory: options.memory ?? '2g', cpus: options.cpus ?? '1.5', pids: 512 },
+  }
+  if (options.edgePort !== undefined) {
+    tenant.edgePort = Number(options.edgePort)
+  } else if (options.noEdgePort !== true) {
+    // Every tenant gets its own entry port by default: it makes the tenant
+    // reachable without typing a username on the shared entry, and it lets a
+    // shared username be disambiguated by the address it arrived on.
+    tenant.edgePort = nextPort('edgePort', 8091)
+  }
+  return { tenant, password }
+}
+
+/** Tenant id rule, shared by `add` and `add-batch`. */
+const ID_RULE = /^[a-z][a-z0-9-]{1,30}$/u
+
+/**
+ * Warn when one username exists under several tenants.
+ *
+ * The shared sign-in entry resolves a tenant by username, so a name that is not
+ * unique can only reach its tenants through their dedicated entries — and Key
+ * sign-in refuses rather than guess.
+ *
+ * @param tenant - the tenant just created.
+ */
+function warnOnSharedUsername(tenant) {
+  const user = tenant.users[0].name
+  const clash = registry.tenants.find((entry) => entry !== tenant
+    && entry.users.some((candidate) => candidate.name === user))
+  if (clash === undefined) return
+  console.warn(`  warning: user "${user}" also exists in tenant ${clash.id}.`)
+  console.warn('  The shared login entry resolves the tenant by username, so a shared name')
+  console.warn('  must log in through its own dedicated entry (edge port or hostname).')
+}
+
 switch (command) {
   case 'list': {
     for (const tenant of registry.tenants) {
@@ -116,7 +185,7 @@ switch (command) {
 
   case 'add': {
     const id = args[0]
-    if (!/^[a-z][a-z0-9-]{1,30}$/u.test(id ?? '')) {
+    if (!ID_RULE.test(id ?? '')) {
       console.error('usage: registry.js add <id> --user <name> [--title <text>] [--edge-port <n>] [--password <pw>]')
       process.exit(1)
     }
@@ -125,51 +194,81 @@ switch (command) {
       process.exit(1)
     }
     const user = flag(args, 'user') ?? 'admin'
-    const password = flag(args, 'password') ?? crypto.randomBytes(9).toString('base64url')
-    const node = flag(args, 'node') ?? 'local'
-    const tenant = {
-      id,
-      title: flag(args, 'title') ?? id,
-      // Which machine runs this tenant. `local` means the control plane's own
-      // host: bin/render.js emits a compose service for it and bin/mt.sh starts
-      // it. Any other value marks a runtime on another node, which that node's
-      // agent registers; the control host neither creates nor starts it.
-      node,
-      internalPort: Number(flag(args, 'internal-port') ?? nextPort('internalPort', 3181)),
-      // Compose service name (proxy target) and container name (log lookup).
-      // The prefix is a deployment setting: a second deployment on the same host
-      // must not collide with the first one's container names, and the agent and
-      // bin/mt.sh both look the container up by the name recorded here.
-      service: `dsh-${id}`,
-      container: `${NAME_PREFIX}dsh-${id}`,
-      hosts: [`${id}.dsh.local`],
-      users: [{ name: user, passwordHash: hashPassword(password) }],
-      // Placeholder the tenant presents to the model gateway; the real upstream
-      // credential never enters a tenant container.
-      modelKey: mintModelKey(id),
-      limits: { memory: flag(args, 'memory') ?? '2g', cpus: flag(args, 'cpus') ?? '1.5', pids: 512 },
-    }
-    const edgePort = flag(args, 'edge-port')
-    if (edgePort !== undefined) {
-      tenant.edgePort = Number(edgePort)
-    } else if (!args.includes('--no-edge-port')) {
-      // Every tenant gets its own entry port by default: it makes the tenant
-      // reachable without typing a username on the shared entry, and it lets a
-      // shared username be disambiguated by the address it arrived on.
-      tenant.edgePort = nextPort('edgePort', 8091)
-    }
+    const { tenant, password } = createTenant(id, user, {
+      title: flag(args, 'title'),
+      password: flag(args, 'password'),
+      node: flag(args, 'node'),
+      internalPort: flag(args, 'internal-port'),
+      edgePort: flag(args, 'edge-port'),
+      noEdgePort: args.includes('--no-edge-port'),
+      memory: flag(args, 'memory'),
+      cpus: flag(args, 'cpus'),
+    })
     registry.tenants.push(tenant)
     save()
-    console.log(`added tenant ${id} (node: ${node})`)
+    console.log(`added tenant ${id} (node: ${tenant.node})`)
     console.log(`  user:     ${user}`)
     console.log(`  password: ${password}`)
-    const clash = registry.tenants.find((entry) => entry !== tenant
-      && entry.users.some((candidate) => candidate.name === user))
-    if (clash !== undefined) {
-      console.warn(`  warning: user "${user}" also exists in tenant ${clash.id}.`)
-      console.warn(`  The shared login entry resolves the tenant by username, so a shared name`)
-      console.warn(`  must log in through its own dedicated entry (edge port or hostname).`)
+    warnOnSharedUsername(tenant)
+    break
+  }
+
+  case 'add-batch': {
+    const file = args[0]
+    if (file === undefined) {
+      console.error('usage: registry.js add-batch <file> [--no-edge-port] [--node <name>]')
+      process.exit(1)
     }
+    // One line per tenant: `id,username[,title[,password]]`. Comments and blank
+    // lines are ignored. The whole file is checked before anything is written:
+    // a list that is half applied is worse than one that is refused.
+    const rows = []
+    const problems = []
+    fs.readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+      const trimmed = line.trim()
+      if (trimmed === '' || trimmed.startsWith('#')) return
+      const cells = trimmed.split(',').map((cell) => cell.trim())
+      const [id, user, title, password] = cells
+      const where = `第 ${index + 1} 行`
+      if (!ID_RULE.test(id ?? '')) {
+        problems.push(`${where}: 租户 id 不合法 ${JSON.stringify(id ?? '')}（小写字母开头，只能含小写字母、数字、连字符，2-31 位）`)
+      } else if (registry.tenants.some((entry) => entry.id === id)) {
+        problems.push(`${where}: 租户 ${id} 已经存在`)
+      } else if (rows.some((row) => row.id === id)) {
+        problems.push(`${where}: 租户 ${id} 在清单里出现了两次`)
+      }
+      if (user === undefined || user === '') problems.push(`${where}: 缺少用户名`)
+      else if (/[\s,]/u.test(user)) problems.push(`${where}: 用户名不能含空白或逗号: ${JSON.stringify(user)}`)
+      if (cells.length > 4) problems.push(`${where}: 最多四列（id,用户名,标题,口令）`)
+      rows.push({ id, user, title, password })
+    })
+    if (rows.length === 0) {
+      console.error(`清单里没有可用的行: ${file}`)
+      process.exit(1)
+    }
+    if (problems.length > 0) {
+      console.error(`清单有 ${String(problems.length)} 处问题，没有创建任何租户：`)
+      for (const problem of problems) console.error(`  ${problem}`)
+      process.exit(1)
+    }
+    const created = []
+    for (const row of rows) {
+      const { tenant, password } = createTenant(row.id, row.user, {
+        title: row.title,
+        password: row.password,
+        node: flag(args, 'node'),
+        noEdgePort: args.includes('--no-edge-port'),
+      })
+      // Pushed before the next row so port allocation sees it.
+      registry.tenants.push(tenant)
+      created.push({ id: tenant.id, user: row.user, password })
+    }
+    save()
+    console.log(`added ${String(created.length)} tenant(s)`)
+    for (const entry of created) {
+      console.log(`  ${entry.id}\t${entry.user}\t${entry.password}`)
+    }
+    for (const entry of created) warnOnSharedUsername(registry.tenants.find((t) => t.id === entry.id))
     break
   }
 
@@ -263,6 +362,6 @@ switch (command) {
   }
 
   default:
-    console.error('usage: registry.js <list|add|passwd|remove> [...]')
+    console.error('usage: registry.js <list|add|add-batch|passwd|kick|remove|ensure-model-keys> [...]')
     process.exit(2)
 }

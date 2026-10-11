@@ -376,7 +376,8 @@ FIRST_TENANT="$(printf '%s\n' "$TENANTS" | head -1)"
 # 用出口代理自己的宿主地址当"内网目标"：它必然是私网地址，且不必写死任何 IP。
 PROBE_INTERNAL="$(printf '%s' "${MT_EGRESS_PROXY:-}" | sed 's|^http[s]*://||; s|:.*$||')"
 if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTERNAL" ]; then
-  PROBE="$(docker exec -e PROBE_INTERNAL="$PROBE_INTERNAL" "mt-dsh-${FIRST_TENANT}" node -e '
+  egress_probe() {
+    docker exec -e PROBE_INTERNAL="$PROBE_INTERNAL" "mt-dsh-${FIRST_TENANT}" node -e '
     const proxy = process.env.HTTPS_PROXY
     const internal = process.env.PROBE_INTERNAL
     if (!proxy) { console.log("no-proxy-in-container"); process.exit(0) }
@@ -395,7 +396,15 @@ if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTER
       const internalResult = await ask(internal, 8090)
       console.log(`${publicResult.includes("200") ? "public-ok" : "public-fail"} ${internalResult.includes("403") ? "internal-blocked" : "internal-ALLOWED"}`)
     })()
-  ' 2>/dev/null | tr -d '\r')"
+  ' 2>/dev/null | tr -d '\r'
+  }
+  PROBE="$(egress_probe)"
+  # 刚 up 完时最早的那次可能撞上出口代理还在起（租户容器同理），于是报出一个
+  # 只存在几秒的假故障——而"部署完立刻跑 doctor"正是最会撞上的时刻，所以重试一次再判。
+  case "$PROBE" in
+    "public-ok internal-blocked") ;;
+    *) sleep 3; PROBE="$(egress_probe)" ;;
+  esac
   case "$PROBE" in
     "public-ok internal-blocked") ok "  实测 ${FIRST_TENANT}: 可经代理访问公网，且内网地址被拒" ;;
     "no-proxy-in-container") warn "  ${FIRST_TENANT} 容器里没有 HTTPS_PROXY（执行 bin/mt.sh up）" ;;

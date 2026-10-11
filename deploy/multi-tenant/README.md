@@ -386,6 +386,26 @@ bin/mt.sh add delta --user dave
 
 `bin/mt.sh list` 可查看当前所有租户及其端口分配。
 
+租户多的时候用清单一次建完：
+
+```bash
+cat > tenants.csv <<'CSV'
+# 租户id,用户名[,标题[,初始口令]]
+zhang01,zhang_01,张伟
+liwei02,li_wei,李伟
+CSV
+bin/mt.sh add-batch tenants.csv --credentials-file .tenant-credentials.json
+```
+
+- **整份清单先校验再动手**：任何一行不合法（id 不符合规则、id 重复、缺用户名、列数过多）都会
+  打印全部问题并**一个租户都不建**——半建成的清单比拒绝更难收拾。
+- 端口继续自动分配（内部端口、专属入口端口各往后排），`--no-start` 只登记不启动，
+  之后一条 `bin/mt.sh up` 一起拉起。
+- `--credentials-file` 写出的文件是 0600、含明文口令，**别放进备份或版本库**；它的形状与
+  `bin/acceptance.sh` 读的凭据文件一致，可以直接当作 `.acceptance-credentials.json` 用。
+- 用了 Key 免口令登录时，清单里的**用户名要逐字等于 Key 里的账号名**（Key 登录按用户名找租户，
+  见《Key免口令登录接入.md》）。
+
 ### 摘除租户
 
 ```bash
