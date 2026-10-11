@@ -823,6 +823,9 @@ ${loggingBlock()}
       MT_EDGE_PORT: \${MT_EDGE_PORT:-8090}
       MT_BIND_IP: \${MT_BIND_IP:-0.0.0.0}
       MT_SESSION_TTL_HOURS: \${MT_SESSION_TTL_HOURS:-12}
+      # 反向代理把我们挂在子路径下时（https://<域名>/ai/harness），这里填那个前缀。
+      # 网关据此生成登录表单、跳转和 cookie Path；请求带不带这个前缀都能路由。
+      MT_BASE_PATH: \${MT_BASE_PATH:-}
       MT_LOG_DIR: /logs
       MT_DEPLOY_ROOT: /project
       # This node's agent, for the console's maintenance operations. Empty means
@@ -889,17 +892,24 @@ fs.chmodSync(path.join(ROOT, 'docker-compose.yml'), 0o600)
 
 // Humans and ops scripts both need the entry list; keep it next to the compose
 // file so `bin/mt.sh url` never has to parse it again.
-const entryLines = [`\${IP}:\${MT_EDGE_PORT:-8090}/   统一登录入口（所有租户）`]
+// 子路径接入时浏览器看到的是代理那边的完整地址，本机端口只是它的后端，
+// 所以这份清单按 MT_BASE_PATH 拼出浏览器实际要用的路径。
+// （只影响这里的打印：网关读到带尾斜杠的值会直接启动失败，不在这里替它吞掉。）
+const BASE_PATH = (process.env.MT_BASE_PATH ?? '').trim()
+const entryLines = [`\${IP}:\${MT_EDGE_PORT:-8090}${BASE_PATH}/   统一登录入口（所有租户）`]
 for (const tenant of tenants) {
   if (!isLocalTenant(tenant)) continue
   if (tenant.edgePort !== undefined) {
-    entryLines.push(`\${IP}:${String(tenant.edgePort)}/   ${tenant.id} 专属入口`)
+    entryLines.push(`\${IP}:${String(tenant.edgePort)}${BASE_PATH}/   ${tenant.id} 专属入口`)
   }
   for (const host of tenant.hosts ?? []) {
-    entryLines.push(`${host}:\${MT_EDGE_PORT:-8090}/   ${tenant.id}（客户端 hosts 需指向本机）`)
+    entryLines.push(`${host}:\${MT_EDGE_PORT:-8090}${BASE_PATH}/   ${tenant.id}（客户端 hosts 需指向本机）`)
   }
 }
 fs.writeFileSync(path.join(ROOT, 'entry-urls.txt'), entryLines.join('\n') + '\n')
+if (BASE_PATH !== '') {
+  console.log(`浏览器入口在前置代理上，本部署挂在 ${BASE_PATH}/ 之下。`)
+}
 
 console.log(`rendered docker-compose.yml for ${String(tenants.length)} tenant(s): ${tenants.map((t) => t.id).join(', ')}`)
 if (createdPatches.length > 0) console.log(`created profile patches for: ${createdPatches.join(', ')}`)

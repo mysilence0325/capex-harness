@@ -427,6 +427,61 @@ bin/mt.sh restore backups/dsh-mt-xxx.tar.gz
 
 DSH 的 cookie 默认 30 天，期间不用重复登录网关也会自动续上；清除浏览器 cookie 或换浏览器时会重新激活一次。
 
+### 挂在子路径下（前置反向代理）
+
+局域网里常见形态是代理上给一个域名加前缀，例如 `https://officeai.301.avic:496/ai/harness/`：
+域名解析到代理（15.11.40.44:6006），代理再把 `/ai/harness/` 转给本部署。本部署这边只需一行配置：
+
+```bash
+# .env
+MT_BASE_PATH=/ai/harness
+bin/mt.sh up          # 改过 gateway/ 里的代码则先 docker-compose build gateway
+```
+
+代理那边（nginx 示例）：
+
+```nginx
+# 裸前缀必须规范到带斜杠：页面的相对地址是按目录解析的
+location = /ai/harness { return 301 /ai/harness/; }
+
+location /ai/harness/ {
+  # 保留前缀（不要写成 ...:8090/ 那种带斜杠的写法也行，网关两种都认）
+  proxy_pass https://<部署机IP>:8090;
+  # 自签证书；要真正校验证书就改成 proxy_ssl_trusted_certificate <state/tls/ca.crt>
+  proxy_ssl_verify off;
+  # 必须带端口转发：控制台的"同源"检查比对 Origin 与 Host，丢了端口会 403
+  proxy_set_header Host $http_host;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_http_version 1.1;
+  # DSH 的 Remote 流（会话、工具输出）走 WebSocket
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  # 流式输出不要缓冲，否则界面上是"卡住然后一次性出现"
+  proxy_buffering off;
+  proxy_read_timeout 3600s;
+}
+```
+
+几个要点：
+
+- **配完代理先量一次**：`bin/mt.sh mount-check https://officeai.301.avic:496/ai/harness/`
+  会按浏览器的方式问一遍那个地址（裸前缀是否规范化、表单提交到哪、POST 通不通、控制台页内
+  相对地址的基准、以及代理有没有转发 WebSocket 升级）。这四条里任何一条错了，本机自测都是
+  全绿的——只有从这里才看得出来。不带参数则查本机公开入口。
+- 网关把登录表单、跳转和**控制台 cookie 的 Path** 都生成在 `MT_BASE_PATH` 之下，所以代理
+  保留前缀（网关自己剥掉）或先剥掉再转发都能用；`bin/mt.sh doctor` 会拿不需要口令的请求
+  核对"页面里的提交地址 == 入口前缀"，这是浏览器里才会暴露的那类故障的自动断言。
+- 网关**在 loopback 运维端口（8099）上不挂载**：`bin/mt.sh` 与 `bin/acceptance.sh` 照旧
+  用本部署自己的路径说话，控制台 cookie 的 Path 也照旧，所以子路径只影响浏览器入口。
+- **`Host` 必须带端口转发**（`$http_host`）。用 `$host` 会把 `:496` 丢掉，控制台的按钮会以
+  403 失败——登录页却看起来完全正常。
+- 公开端口仍然建议跑 `bin/mt.sh cert` 的 TLS：`Secure` 属性只在网关自己终结 TLS 时才会加上
+  （见「0.2 传输加密」）。网关这一段是明文时，浏览器会把会话 cookie 也发给明文入口。
+- 用户端不需要知道端口：把 `https://<域名>/ai/harness/` 发给用户即可。**没登录看到登录页，
+  登录过直接进自己的 DSH**；退出用 `https://<域名>/ai/harness/__mt/logout`。
+- 有了统一代理入口，租户的专属端口（`--edge-port`）与 `hosts` 条目（`alpha.dsh.local`）就只是
+  本机调试入口了，可以不配。
+
 ## 5. 为什么控制面用 host 网络
 
 宿主 `net.ipv4.ip_forward = 0`，从局域网进来的包被 DNAT 到 bridge 网段后无法被转发，因此**这台机器上任何 bridge 网络映射的端口对外都不通**（同机的 Harbor 18083、Grafana 13000、Nacos 18081、capex 18000/8089 实测同样超时；只有 host 网络的 3080 通）。VM 自己访问这些端口会走本地路径，所以在本机上自测永远是通的——这正是最初遗漏外部验证的原因。

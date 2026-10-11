@@ -128,6 +128,44 @@ if [ -n "$HEALTH" ]; then
 else
   bad "健康接口无响应（本机 curl $GW_BASE/__mt/health）"
 fi
+
+# 子路径接入：浏览器入口常常是前置代理上的 https://<域名>/<前缀>，而本机端口只是
+# 它的后端。网关必须把登录表单、跳转、cookie Path 都按这个前缀生成，否则表单会提交到
+# 代理的根路径上（那里没有我们），页面看起来正常却登不进去——这类故障在浏览器里才暴露，
+# 所以在这里用一条不需要口令的请求把它钉住。
+head_ "子路径接入"
+BASE_PATH="${MT_BASE_PATH:-}"
+BASE_PATH="${BASE_PATH%/}"
+# 必须问公开入口，而不是上面那个 loopback 运维端口：运维端口不属于浏览器入口，
+# 网关在它上面故意不挂载（脚本与 cookie 的 Path 都按老样子）。挂在子路径下这件事
+# 只有浏览器看到的那个入口才体现得出来。
+PUBLIC_SCHEME="http"; [ -f state/tls/server.crt ] && PUBLIC_SCHEME="https"
+PUBLIC_BASE="$PUBLIC_SCHEME://127.0.0.1:${MT_EDGE_PORT:-8090}"
+ENTRY_PAGE="$(curl -fsSk "$PUBLIC_BASE${BASE_PATH}/" 2>/dev/null || true)"
+if [ -z "$ENTRY_PAGE" ]; then
+  bad "入口页取不到（$PUBLIC_BASE${BASE_PATH}/）"
+else
+  ACTION="$(printf '%s' "$ENTRY_PAGE" | grep -o 'action="[^"]*"' | head -1 | cut -d'"' -f2)"
+  if [ "$ACTION" = "${BASE_PATH}/__mt/login" ]; then
+    ok "登录表单提交到 ${BASE_PATH}/__mt/login（与入口前缀一致）"
+  else
+    bad "登录表单提交到 ${ACTION:-（页面里没有 action）}，但入口前缀是 ${BASE_PATH:-（根路径）} —— 浏览器会提交到代理的根路径上"
+  fi
+  if [ -n "$BASE_PATH" ]; then
+    BARE="$(curl -sSk -o /dev/null -w '%{http_code}' "$PUBLIC_BASE$BASE_PATH" 2>/dev/null || true)"
+    [ "$BARE" = "301" ] && ok "不带尾斜杠的 $BASE_PATH 会 301 到 $BASE_PATH/" \
+      || warn "访问 $BASE_PATH（无尾斜杠）返回 $BARE，期望 301；代理若已自行规范化可以忽略"
+  fi
+fi
+# .env 里写了前缀但容器没拿到，是"改完配置没有重建/up"这一类：入口页看着对，实际仍是旧行为。
+if [ -n "$BASE_PATH" ]; then
+  IN_CONTAINER="$(docker inspect mt-gateway --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | grep -E '^MT_BASE_PATH=' | head -1 | cut -d= -f2-)"
+  [ "$IN_CONTAINER" = "$BASE_PATH" ] && ok "网关容器已带 MT_BASE_PATH=$BASE_PATH" \
+    || bad "网关容器里 MT_BASE_PATH='${IN_CONTAINER:-（空）}'，.env 里是 '$BASE_PATH'（bin/mt.sh up 重渲染，网关镜像改了还要先 build）"
+else
+  ok "没配 MT_BASE_PATH：入口挂在根路径（直接访问本机端口）"
+fi
 head_ "运行时注册"
 # 控制面不再看 Docker，只代理注册进来的地址。没有注册 = 该租户登录后必然 503。
 REGISTRY="$(curl -fsS "$GW_BASE/__mt/registry" 2>/dev/null || true)"

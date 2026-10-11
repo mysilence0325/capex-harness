@@ -42,6 +42,8 @@ done
 
 IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(docker|br|veth|virbr|lo)/ { split($4, a, "/"); print a[1] }' | head -1)"
 EDGE="$(grep '^MT_EDGE_PORT=' .env 2>/dev/null | cut -d= -f2)"; EDGE="${EDGE:-8090}"
+# 前置代理把我们挂在哪个子路径下（浏览器看到的入口）。留空 = 直接挂在根路径。
+MT_BASE="$(grep '^MT_BASE_PATH=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"; MT_BASE="${MT_BASE%/}"
 TENANTS="$(grep -o '"id": *"[a-z0-9-]*"' tenants.json 2>/dev/null | sed 's/.*"\([a-z0-9-]*\)"$/\1/' | tr '\n' ' ')"
 
 # 宿主机没有 curl 时用容器里的顶（局域网装不了包的情况）；有 curl 时它什么都不做。
@@ -483,6 +485,53 @@ print(1 if b and max(b) < min(a) else 0)')"
   rm -f "$HJAR" /tmp/hist_all.json /tmp/hist_w.json /tmp/hist_p1.json /tmp/hist_p2.json /tmp/hist_bad.json /tmp/hist_bound.txt
 fi
 
+# ---------------------------------------------------------------- 租户入口
+head_ "租户入口（含前置代理的子路径）"
+# 用户拿到的最短地址就是这一个：没登录 -> 租户登录页；登录过 -> 直接进自己的 DSH。
+# 断言程序打印出来的表单地址，因为它决定浏览器下一步去哪（前后端不一致时状态码照样是 200）。
+# 公开端口装了证书就是 HTTPS（与 doctor 同一条判断），否则明文。
+PUBLIC_SCHEME="http"; [ -f state/tls/server.crt ] && PUBLIC_SCHEME="https"
+ENTRY="$(curl -sSk --max-time 15 "$PUBLIC_SCHEME://127.0.0.1:8090${MT_BASE}/" 2>/dev/null)"
+printf '%s' "$ENTRY" | grep -q 'name="password"' && pass "租户入口是登录页（未登录时）" \
+  || fail "租户入口不是登录页"
+printf '%s' "$ENTRY" | grep -q "action=\"${MT_BASE}/__mt/login\"" \
+  && pass "租户登录表单提交到 ${MT_BASE}/__mt/login" \
+  || fail "租户登录表单没提交到 ${MT_BASE}/__mt/login（前缀没进到页面里）"
+if [ -n "$MT_BASE" ]; then
+  BARE_CODE="$(http "$PUBLIC_SCHEME://127.0.0.1:8090$MT_BASE")"
+  assert_eq "301" "$BARE_CODE" "不带尾斜杠的 $MT_BASE 会跳转到 $MT_BASE/"
+fi
+
+# 端到端按浏览器的方式走一遍：登录页 -> 在子路径下提交 -> 落进该租户自己的 DSH。
+# 断言 DSH 送出的文档带 <base href="./"> 且资源是相对地址 —— 这就是"挂在子路径下还能用"
+# 的依据：根绝对地址（/assets/…）会被浏览器解析到代理的根路径，那里没有我们。
+MOUNT_TENANT=""; MOUNT_USER=""; MOUNT_PW=""
+for t in $TENANTS; do
+  _u="$(cred tenants "$t" user)"; _p="$(cred tenants "$t" password)"
+  if [ -n "$_p" ]; then MOUNT_TENANT="$t"; MOUNT_USER="$_u"; MOUNT_PW="$_p"; break; fi
+done
+if [ "$QUICK" = yes ]; then
+  skip "子路径端到端（--quick 跳过）"
+elif [ -z "$MOUNT_TENANT" ]; then
+  skip "子路径端到端（$CREDS 里没有租户口令）"
+else
+  MJAR="$(mktemp)"; MPAGE="$(mktemp)"
+  curl -sSk -o /dev/null -c "$MJAR" -w '%{http_code}' --max-time 20 \
+    --data-urlencode "tenant=$MOUNT_TENANT" --data-urlencode "user=$MOUNT_USER" --data-urlencode "password=$MOUNT_PW" \
+    "$PUBLIC_SCHEME://127.0.0.1:8090${MT_BASE}/__mt/login" > /tmp/mt_mount_code.txt 2>/dev/null
+  assert_eq "303" "$(cat /tmp/mt_mount_code.txt)" "$MOUNT_TENANT 在子路径下登录"
+  APP_CODE="$(curl -sSk -o "$MPAGE" -b "$MJAR" -c "$MJAR" -w '%{http_code}' --max-time 30 \
+    "$PUBLIC_SCHEME://127.0.0.1:8090${MT_BASE}/" 2>/dev/null)"
+  assert_eq "200" "$APP_CODE" "已登录时同一地址直接进入 $MOUNT_TENANT 的 DSH"
+  grep -q '<base href="./"' "$MPAGE" && pass "DSH 文档带 <base href=\"./\">（相对地址按挂载点解析）" \
+    || fail "DSH 文档没有 <base href=\"./\">"
+  grep -qE 'src="\./assets/|href="\./assets/' "$MPAGE" && pass "DSH 资源是相对地址" \
+    || fail "DSH 资源不是相对地址（浏览器会去代理根路径取）"
+  grep -qE 'src="/assets/|href="/assets/' "$MPAGE" && fail "DSH 文档里有根绝对资源地址" \
+    || pass "DSH 文档里没有根绝对资源地址"
+  rm -f "$MJAR" "$MPAGE"
+fi
+
 # ---------------------------------------------------------------- 控制台登录的落地页
 head_ "控制台登录：表单提交到哪、落在哪一页"
 if [ "$QUICK" = yes ]; then
@@ -493,15 +542,15 @@ else
     skip "控制台登录落地页（$CREDS 里缺 admin.password）"
   else
     LPAGE=$(mktemp)
-    curl -sSk -o "$LPAGE" -w '%{http_code}' --max-time 15 https://127.0.0.1:8090/__mt/admin > /tmp/lp_code.txt 2>/dev/null
+    curl -sSk -o "$LPAGE" -w '%{http_code}' --max-time 15 "https://127.0.0.1:8090${MT_BASE}/__mt/admin" > /tmp/lp_code.txt 2>/dev/null
     assert_eq "200" "$(cat /tmp/lp_code.txt)" "控制台登录页返回 200"
 
     # 关键：不问"路由对不对"，问【浏览器会提交到哪里】。
     # 页面地址没有结尾斜杠时，相对 action 会被解析到上一级目录 —— 这正是线上那次事故。
-    RESOLVED="$(python3 - "$LPAGE" <<'PY'
+    RESOLVED="$(python3 - "$LPAGE" "https://127.0.0.1:8090${MT_BASE}/__mt/admin" <<'PY'
 import re, sys
 from urllib.parse import urljoin
-page_url = 'https://127.0.0.1:8090/__mt/admin'
+page_url = sys.argv[2]
 html = open(sys.argv[1], encoding='utf-8', errors='replace').read()
 base = re.search(r'<base href="([^"]+)"', html)
 base_url = urljoin(page_url, base.group(1)) if base else page_url
@@ -509,7 +558,7 @@ form = re.search(r'<form[^>]*action="([^"]+)"', html)
 print(urljoin(base_url, form.group(1)) if form else '(没有表单)')
 PY
 )"
-    assert_eq "https://127.0.0.1:8090/__mt/admin/login" "$RESOLVED" "登录表单解析后的提交地址"
+    assert_eq "https://127.0.0.1:8090${MT_BASE}/__mt/admin/login" "$RESOLVED" "登录表单解析后的提交地址"
 
     # 提交到那个地址，并【跟随跳转】—— 只看状态码是不够的，那次事故里状态码是 303。
     LANDED=$(mktemp); LANDJAR=$(mktemp)
@@ -519,23 +568,23 @@ PY
     FINAL=$(curl -sSk -L -c "$LANDJAR" -b "$LANDJAR" -o "$LANDED" -w '%{url_effective}' --max-time 20 \
       --data-urlencode "user=$(cred admin user)" --data-urlencode "password=$ADMIN_PW_LOCAL" \
       "$RESOLVED" 2>/dev/null)
-    assert_eq "https://127.0.0.1:8090/__mt/admin" "$FINAL" "登录后落在控制台（不是租户页）"
+    assert_eq "https://127.0.0.1:8090${MT_BASE}/__mt/admin" "$FINAL" "登录后落在控制台（不是租户页）"
     # hist-tenant 只在控制台页里出现，登录页没有 —— 用它区分两页，而不是用标题。
     grep -q 'hist-tenant' "$LANDED" && pass "落地页是控制台（含只有控制台才有的控件）" \
       || fail "落地页不是控制台页（拿到的多半是登录页）"
     grep -q 'name="password"' "$LANDED" && fail "落地页仍是登录表单（会话没带上）" || pass "落地页不是登录表单"
 
     # 页内脚本用的相对地址也走同一个基准，必须解析到 /__mt/admin/ 之下
-    API_BASE="$(python3 - "$LPAGE" <<'PY'
+    API_BASE="$(python3 - "$LPAGE" "https://127.0.0.1:8090${MT_BASE}/__mt/admin" <<'PY'
 import re, sys
 from urllib.parse import urljoin
 html = open(sys.argv[1], encoding='utf-8', errors='replace').read()
 base = re.search(r'<base href="([^"]+)"', html)
-base_url = urljoin('https://127.0.0.1:8090/__mt/admin', base.group(1)) if base else 'https://127.0.0.1:8090/__mt/admin'
+base_url = urljoin(sys.argv[2], base.group(1)) if base else sys.argv[2]
 print(urljoin(base_url, 'api/state'))
 PY
 )"
-    assert_eq "https://127.0.0.1:8090/__mt/admin/api/state" "$API_BASE" "页内脚本的相对地址基准"
+    assert_eq "https://127.0.0.1:8090${MT_BASE}/__mt/admin/api/state" "$API_BASE" "页内脚本的相对地址基准"
 
     # 服务端【真正送出】的脚本必须能被解析。页面脚本包在模板字符串里，
     # 文件里写成 '\n' 的转义会被模板解成真实换行，让整段脚本语法错误、

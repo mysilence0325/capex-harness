@@ -11,6 +11,7 @@
 #   bin/mt.sh smoke              run the isolation smoke test
 #   bin/mt.sh accept <args>      run the end-to-end acceptance (model catalog → prompt → reply)
 #   bin/mt.sh doctor             preflight and health check of this deployment
+#   bin/mt.sh mount-check [URL]  check one entry URL the way a browser uses it (front proxy sub-paths)
 #   bin/mt.sh cert [额外SAN]     generate a self-signed certificate; then bin/mt.sh up serves HTTPS
 #   bin/mt.sh backup [args]      back up every tenant's data + control-plane state
 #   bin/mt.sh restore <archive>  restore a backup (current data is moved aside, not deleted)
@@ -73,6 +74,7 @@ node_run() {
     -e "MT_NETWORK=${MT_NETWORK:-mt-net}" \
     -e "MT_NETWORK_EXTERNAL=${MT_NETWORK_EXTERNAL:-}" \
     -e "MT_CONTAINER_NAME_PREFIX=${MT_CONTAINER_NAME_PREFIX:-mt-}" \
+    -e "MT_BASE_PATH=${MT_BASE_PATH:-}" \
     -e "MT_HOST_PROJECT_DIR=${ROOT}" \
     -v "$ROOT:/w" -w /w "$NODE_IMAGE" node "$@"
 }
@@ -696,6 +698,24 @@ case "${1:-}" in
   smoke)   shift; cmd_smoke "$@" ;;
   accept)  shift; cmd_accept "$@" ;;
   doctor)  bash bin/doctor.sh ;;
+  mount-check)
+    # 校验一个入口 URL 是不是真的按浏览器的方式工作（前置代理的子路径、
+    # Host 是否带端口、Upgrade 有没有转发）。不带参数就查本机公开入口。
+    shift
+    _has_url=""
+    for _a in "$@"; do
+      case "$_a" in http://*|https://*) _has_url=1 ;; esac
+    done
+    if [ -z "$_has_url" ]; then
+      _scheme="http"; [ -f state/tls/server.crt ] && _scheme="https"
+      _default="$_scheme://127.0.0.1:${MT_EDGE_PORT:-8090}${MT_BASE_PATH:-}/"
+      # 本机入口用的是本部署自签的证书，容器里没有它的 CA：这会儿只关心"地址对不对"，
+      # 证书校验留给你们内网那台（配了 CA 或按需加 --insecure）。
+      if [ "$_scheme" = "https" ]; then set -- "$_default" --insecure "$@"; else set -- "$_default" "$@"; fi
+    fi
+    # 不能用 node_run：它不带 --network host，容器里的 127.0.0.1 是容器自己。
+    docker run --rm --network host -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bin/mount-check.mjs "$@"
+    ;;
   isolate) shift; bash bin/isolate.sh "$@" ;;   # 限制租户可访问的宿主端口（apply/remove/status/install-boot）
   register)
     # 不带租户 = 注册全部。以前是打印用法然后退出 0 —— 看起来像成功，

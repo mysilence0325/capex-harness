@@ -90,6 +90,80 @@ const SESSION_COOKIE = 'mt_session'
 const PREFIX = '/__mt'
 
 /**
+ * The mount prefix a browser reaches this deployment through.
+ *
+ * A front proxy usually publishes this deployment under a sub-path
+ * (`https://officeai.301.avic:496/ai/harness`). DSH's own Web shell is built for
+ * that: its browser references are document-relative, so the tenant UI needs
+ * nothing from us. The control plane's own pages are not — the login form, every
+ * redirect and the console cookie path are absolute — and those would address
+ * the proxy's origin root instead of the mount.
+ *
+ * Set this to the prefix such a proxy mounts us under. Every URL this gateway
+ * hands a browser is then emitted under it, and a request arriving with it is
+ * routed on the remainder. A request arriving without it is routed as it stands,
+ * so a proxy that strips the prefix before forwarding, and the loopback
+ * operations port, keep working unchanged.
+ */
+const BASE_PATH = (() => {
+  const raw = (process.env.MT_BASE_PATH ?? '').trim()
+  if (raw === '' || raw === '/') return ''
+  const segments = raw.split('/')
+  const invalid = !raw.startsWith('/') || raw.endsWith('/') || /[?#\s]/u.test(raw)
+    || segments.some((segment, index) => index > 0 && (segment === '' || segment === '.' || segment === '..'))
+  if (invalid) {
+    console.error(`mt-gateway: MT_BASE_PATH must be a plain path prefix such as /ai/harness: ${JSON.stringify(raw)}`)
+    process.exit(1)
+  }
+  return raw
+})()
+
+/**
+ * The mount prefix one request arrived under.
+ *
+ * The loopback operations port is not a browser entry: `bin/mt.sh` and the
+ * acceptance scripts speak to it at the deployment's own paths, and a browser
+ * never uses it. Exempting it keeps those scripts — and the console cookie they
+ * carry, whose path the client matches against the address it requested — exactly
+ * as they were before a front proxy existed.
+ *
+ * @param req - the request.
+ * @returns the prefix, or the empty string for an unmounted entry.
+ */
+function mountFor(req) {
+  if (OPS_PORT !== undefined && req.socket.localPort === OPS_PORT) return ''
+  return BASE_PATH
+}
+
+/**
+ * The path a browser must request, for one request's mount, for a route this
+ * gateway owns.
+ *
+ * Route keys stay absolute (`/__mt/health`); only a reference a browser resolves
+ * goes under the mount.
+ *
+ * @param req - the request.
+ * @param pathname - the absolute route path.
+ * @returns the browser-facing path.
+ */
+const pathFor = (req, pathname) => `${mountFor(req)}${pathname}`
+
+/** `/__mt` as a browser addresses it on the entry this request used. */
+const prefixFor = (req) => pathFor(req, PREFIX)
+
+/**
+ * The route a request addresses, with the mount prefix removed when it carries one.
+ *
+ * @param pathname - the request path as it arrived.
+ * @returns the path to route on, or the empty string for the bare mount.
+ */
+function unmount(pathname) {
+  if (BASE_PATH === '') return pathname
+  if (pathname === BASE_PATH) return ''
+  return pathname.startsWith(`${BASE_PATH}/`) ? pathname.slice(BASE_PATH.length) : pathname
+}
+
+/**
  * TLS material for the public listeners.
  *
  * Both files must exist; `bin/make-cert.sh` writes a self-signed pair, and a
@@ -466,12 +540,12 @@ function htmlPage(title, body) {
 <body><main>${body}</main></body></html>`
 }
 
-function loginPage({ error } = {}) {
+function loginPage(prefix, { error } = {}) {
   return htmlPage('DSH 登录', `
     <h1>DeepSeek Harness</h1>
     <p class="sub">使用管理员分配的用户名登录</p>
     ${error ? `<div class="err">${error}</div>` : ''}
-    <form method="post" action="${PREFIX}/login">
+    <form method="post" action="${prefix}/login">
       <label for="user">用户名</label>
       <input id="user" name="user" autocomplete="username" autofocus>
       <label for="password">密码</label>
@@ -498,20 +572,20 @@ function loginPage({ error } = {}) {
  * @param options - the tenant, the signed-in user, and any refusal to display.
  * @returns the HTML page.
  */
-function accountPage({ tenant, user, error }) {
+function accountPage(prefix, { tenant, user, error }) {
   const notice = error === undefined ? '' : `<p style="color:#b00020"><b>${error}</b></p>`
   return htmlPage('修改密码', `
     <h1>修改密码</h1>
     <p class="sub">${tenant.id} / ${user}</p>
     ${notice}
-    <form method="post" action="${PREFIX}/account">
+    <form method="post" action="${prefix}/account">
       <p><input name="current" type="password" placeholder="当前密码" autocomplete="current-password" required></p>
       <p><input name="next" type="password" placeholder="新密码（至少 12 位）" autocomplete="new-password" required></p>
       <p><input name="again" type="password" placeholder="再输一次新密码" autocomplete="new-password" required></p>
       <p><button type="submit">修改</button></p>
     </form>
     <p class="sub">改完之后已登录的会话都会失效，需要重新登录。</p>
-    <p><a href="${PREFIX}/">返回</a></p>`)
+    <p><a href="${prefix}/">返回</a></p>`)
 }
 
 /**
@@ -528,11 +602,11 @@ async function handleAccount(req, res, session) {
   const deny = (message) => {
     audit({ tenant: session.tenant.id, user: session.user, url: req.url, status: 400, note: 'account-refused' })
     send(res, 400, { 'content-type': 'text/html; charset=utf-8' },
-      accountPage({ tenant: session.tenant, user: session.user, error: message }))
+      accountPage(prefixFor(req), { tenant: session.tenant, user: session.user, error: message }))
   }
   if (req.method !== 'POST') {
     send(res, 200, { 'content-type': 'text/html; charset=utf-8' },
-      accountPage({ tenant: session.tenant, user: session.user }))
+      accountPage(prefixFor(req), { tenant: session.tenant, user: session.user }))
     return
   }
   const form = await readForm(req).catch(() => new URLSearchParams())
@@ -566,7 +640,7 @@ async function handleAccount(req, res, session) {
     return deny('写入失败，请稍后重试或联系管理员')
   }
   send(res, 303, {
-    location: `${PREFIX}/login?changed=1`,
+    location: `${prefixFor(req)}/login?changed=1`,
     'set-cookie': `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
     'cache-control': 'no-store',
   }, '')
@@ -714,7 +788,7 @@ async function proxyRequest(req, res, session) {
         audit({ tenant: tenant.id, user: session.user, url: req.url, status: 303, note: 'refresh-cookie' })
         const target = new URL(req.url ?? '/', 'http://gateway.invalid')
         target.searchParams.set('mt_refresh', '1')
-        send(res, 303, { location: `${target.pathname}${target.search}`, 'cache-control': 'no-store' }, '')
+        send(res, 303, { location: pathFor(req, `${target.pathname}${target.search}`), 'cache-control': 'no-store' }, '')
         return
       }
 
@@ -876,7 +950,7 @@ function handleLogin(req, res) {
     if (locked > 0) {
       audit({ tenant: '-', user, status: 429, note: 'login-throttled', source })
       send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'retry-after': String(locked) },
-        loginPage({ error: `尝试次数过多，请 ${String(locked)} 秒后再试` }))
+        loginPage(prefixFor(req), { error: `尝试次数过多，请 ${String(locked)} 秒后再试` }))
       return
     }
     const resolved = resolveLogin(
@@ -892,14 +966,14 @@ function handleLogin(req, res) {
         ...(userLock > 0 ? { lockedAccountSeconds: userLock } : {}),
         ...(sourceLock > 0 ? { lockedSourceSeconds: sourceLock } : {}),
       })
-      send(res, 401, { 'content-type': 'text/html; charset=utf-8' }, loginPage({ error: '用户名或密码不正确' }))
+      send(res, 401, { 'content-type': 'text/html; charset=utf-8' }, loginPage(prefixFor(req), { error: '用户名或密码不正确' }))
       return
     }
     loginByUser.succeed(user.toLowerCase())
     loginBySource.succeed(source)
     audit({ tenant: resolved.tenant.id, user, status: 200, note: 'login-ok' })
     send(res, 303, {
-      location: '/',
+      location: pathFor(req, '/'),
       'set-cookie': secureCookies(
         `${SESSION_COOKIE}=${signSession(resolved.tenant.id, user)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${String(Math.floor(SESSION_TTL_MS / 1000))}`,
         req.socket.encrypted === true,
@@ -907,7 +981,7 @@ function handleLogin(req, res) {
       'cache-control': 'no-store',
     }, '')
   }).catch(() => {
-    send(res, 400, { 'content-type': 'text/html; charset=utf-8' }, loginPage({ error: '请求格式不正确' }))
+    send(res, 400, { 'content-type': 'text/html; charset=utf-8' }, loginPage(prefixFor(req), { error: '请求格式不正确' }))
   })
 }
 
@@ -1149,11 +1223,21 @@ function adminCookie(req) {
   return parseCookies(req.headers.cookie).get(ADMIN_COOKIE)
 }
 
-/** Set or clear the console cookie. */
-function adminCookieHeader(value, encrypted, maxAgeSeconds) {
+/**
+ * Set or clear the console cookie.
+ *
+ * @param value - the cookie value, empty to clear it.
+ * @param encrypted - whether the browser reached this deployment over TLS.
+ * @param maxAgeSeconds - cookie lifetime, 0 to expire it now.
+ * @param path - the mount-prefixed console path this cookie is scoped to; the
+ *   browser matches it against the address it requested, so it must be the entry
+ *   the request arrived on rather than a fixed one.
+ * @returns the `Set-Cookie` header value.
+ */
+function adminCookieHeader(value, encrypted, maxAgeSeconds, path) {
   const attributes = [
     `${ADMIN_COOKIE}=${value}`,
-    `Path=${PREFIX}/admin`,
+    `Path=${path}`,
     'HttpOnly',
     'SameSite=Strict',
     `Max-Age=${String(maxAgeSeconds)}`,
@@ -1777,11 +1861,11 @@ async function handleAdmin(req, res, url) {
   if (path === '' || path === '/') {
     if (session === undefined) {
       send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-        adminLoginPage(PREFIX, { configured: admin.hasAdmin() }))
+        adminLoginPage(prefixFor(req), { configured: admin.hasAdmin() }))
       return
     }
     send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-      adminConsolePage(PREFIX, { user: session, role: admin.roleOf(session) }))
+      adminConsolePage(prefixFor(req), { user: session, role: admin.roleOf(session) }))
     return
   }
 
@@ -1790,7 +1874,7 @@ async function handleAdmin(req, res, url) {
     if (locked > 0) {
       admin.audit({ action: 'login', tenant: '-', user: '-', result: 'throttled', source: remote })
       send(res, 429, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-        adminLoginPage(PREFIX, { locked, configured: admin.hasAdmin() }))
+        adminLoginPage(prefixFor(req), { locked, configured: admin.hasAdmin() }))
       return
     }
     const form = await readForm(req).catch(() => new URLSearchParams())
@@ -1808,7 +1892,7 @@ async function handleAdmin(req, res, url) {
       }
       admin.audit({ action: 'login', tenant: '-', user: String(form.get('user') ?? ''), result: 'rejected', source: remote })
       send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-        adminLoginPage(PREFIX, { error: '用户名或密码不正确', configured: admin.hasAdmin() }))
+        adminLoginPage(prefixFor(req), { error: '用户名或密码不正确', configured: admin.hasAdmin() }))
       return
     }
     // Second factor, when this administrator has one.
@@ -1825,7 +1909,7 @@ async function handleAdmin(req, res, url) {
           note: code === '' ? '未提供验证码' : '验证码不正确',
         })
         send(res, 401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-          adminLoginPage(PREFIX, { error: '验证码不正确（或已用过的恢复码）', configured: admin.hasAdmin() }))
+          adminLoginPage(prefixFor(req), { error: '验证码不正确（或已用过的恢复码）', configured: admin.hasAdmin() }))
         return
       }
       admin.audit({
@@ -1836,8 +1920,8 @@ async function handleAdmin(req, res, url) {
     admin.bucketFor(remote).count = 0
     admin.audit({ action: 'login', tenant: '-', user: stored.name, role: stored.role, result: 'ok', source: remote })
     send(res, 303, {
-      location: `${PREFIX}/admin`,
-      'set-cookie': adminCookieHeader(admin.mintSession(stored.name), encrypted, Math.floor(SESSION_MS / 1000)),
+      location: pathFor(req, `${PREFIX}/admin`),
+      'set-cookie': adminCookieHeader(admin.mintSession(stored.name), encrypted, Math.floor(SESSION_MS / 1000), pathFor(req, `${PREFIX}/admin`)),
       'cache-control': 'no-store',
     }, '')
     return
@@ -1845,8 +1929,8 @@ async function handleAdmin(req, res, url) {
 
   if (path === '/logout' && req.method === 'POST') {
     send(res, 303, {
-      location: `${PREFIX}/admin`,
-      'set-cookie': adminCookieHeader('', encrypted, 0),
+      location: pathFor(req, `${PREFIX}/admin`),
+      'set-cookie': adminCookieHeader('', encrypted, 0, pathFor(req, `${PREFIX}/admin`)),
       'cache-control': 'no-store',
     }, '')
     return
@@ -1882,7 +1966,7 @@ async function handleAdmin(req, res, url) {
     // freshly minted session for exactly that reason: everyone else is signed out,
     // the administrator who made the change is not.
     if (typeof answer.session === 'string') {
-      headers['set-cookie'] = adminCookieHeader(answer.session, encrypted, Math.floor(SESSION_MS / 1000))
+      headers['set-cookie'] = adminCookieHeader(answer.session, encrypted, Math.floor(SESSION_MS / 1000), pathFor(req, `${PREFIX}/admin`))
     }
     send(res, answer.ok ? 200 : 400, headers, JSON.stringify(answer))
     return
@@ -1893,6 +1977,23 @@ async function handleAdmin(req, res, url) {
 
 function handleRequest(req, res) {
   const url = new URL(req.url ?? '/', 'http://gateway.invalid')
+
+  // The bare mount has no document to serve — the shell's relative references
+  // resolve against a directory — so send the browser to the slash form once,
+  // here, where the mount is still visible in the path. Only a mounted entry
+  // does this: the operations port has no mount to normalize.
+  if (BASE_PATH !== '' && url.pathname === BASE_PATH && mountFor(req) !== '') {
+    send(res, 301, { location: `${BASE_PATH}/`, 'cache-control': 'no-store' }, '')
+    return
+  }
+  // Everything below routes on the path without the mount: the route table, the
+  // tenant proxy target, and the audit line all use the deployment's own paths,
+  // whether the front proxy kept the prefix or stripped it.
+  const routed = unmount(url.pathname)
+  if (routed !== url.pathname) {
+    url.pathname = routed
+    req.url = `${routed}${url.search}`
+  }
   const localPort = req.socket.localPort
 
   // The administrator console answers before the tenant session logic: it has its
@@ -2039,7 +2140,7 @@ function handleRequest(req, res) {
       note: 'logout',
     })
     send(res, 303, {
-      location: `${PREFIX}/`,
+      location: pathFor(req, `${PREFIX}/`),
       'set-cookie': secureCookies(expired, req.socket.encrypted === true),
       'cache-control': 'no-store',
     }, '')
@@ -2051,10 +2152,10 @@ function handleRequest(req, res) {
 
   if (session === undefined) {
     if (url.pathname !== `${PREFIX}/` && url.pathname !== '/') {
-      send(res, 303, { location: `${PREFIX}/`, 'cache-control': 'no-store' }, '')
+      send(res, 303, { location: pathFor(req, `${PREFIX}/`), 'cache-control': 'no-store' }, '')
       return
     }
-    send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }, loginPage())
+    send(res, 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }, loginPage(prefixFor(req)))
     return
   }
 
@@ -2079,10 +2180,10 @@ function handleRequest(req, res) {
     send(res, 200, { 'content-type': 'text/html; charset=utf-8' }, htmlPage('DSH', `
       <h1>${session.tenant.title ?? session.tenant.id}</h1>
       <p class="sub">已登录：${session.user} @ ${session.tenant.id}</p>
-      <p><a href="/">进入 ${session.tenant.id}</a></p>
-      <p><a href="${PREFIX}/logout">退出登录 / 切换用户</a></p>
-        <p><a href="${PREFIX}/account">修改密码</a></p>
-      <p class="sub" style="margin-top:22px">直接访问 <code>${PREFIX}/logout</code> 可在任何页面退出。</p>`))
+      <p><a href="${pathFor(req, '/')}">进入 ${session.tenant.id}</a></p>
+      <p><a href="${prefixFor(req)}/logout">退出登录 / 切换用户</a></p>
+        <p><a href="${prefixFor(req)}/account">修改密码</a></p>
+      <p class="sub" style="margin-top:22px">直接访问 <code>${prefixFor(req)}/logout</code> 可在任何页面退出。</p>`))
     return
   }
 
@@ -2101,6 +2202,11 @@ function handleRequest(req, res) {
 // ---------------------------------------------------------------------------
 
 function handleUpgrade(req, socket, head) {
+  // Same mount handling as the HTTP path: the shell's WebSocket URL is relative
+  // to its document, so an upgrade that arrives under the mount carries the
+  // prefix, and the runtime must not be asked for it.
+  const upgradeUrl = new URL(req.url ?? '/', 'http://gateway.invalid')
+  const upgradePath = `${unmount(upgradeUrl.pathname)}${upgradeUrl.search}`
   const cookies = parseCookies(req.headers.cookie)
   const session = verifySession(cookies.get(SESSION_COOKIE))
   if (session === undefined) {
@@ -2120,7 +2226,7 @@ function handleUpgrade(req, socket, head) {
     // Same Host/Origin pairing as the HTTP path: the upgrade carries the
     // browser's Origin too, and the fence refuses a mismatch.
     if (headers.origin !== undefined) headers.origin = `http://${tenantAuthority(tenant)}`
-    const lines = [`${req.method} ${address.prefix}${req.url} HTTP/1.1`]
+    const lines = [`${req.method} ${address.prefix}${upgradePath} HTTP/1.1`]
     for (const [name, value] of Object.entries(headers)) {
       if (value === undefined) continue
       lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : String(value)}`)
