@@ -94,6 +94,11 @@ echo "==> 收进部署目录（原样复制 --payload；构建产物不进包）
   | ( cd "$BUNDLE/deploy" && tar -xf - )
 [ -f "$BUNDLE/deploy/离线部署手册.md" ] || die "payload 里没有 离线部署手册.md——包不完整"
 
+# 安装脚本也放到包根：现场的人不需要先 cd 进 deploy/ 才能开始。
+[ -f "$BUNDLE/deploy/bin/install-offline.sh" ] || die "payload 里没有 bin/install-offline.sh——包不完整"
+cp "$BUNDLE/deploy/bin/install-offline.sh" "$BUNDLE/install-offline.sh"
+chmod +x "$BUNDLE/install-offline.sh"
+
 if [ -n "$OVERLAY" ]; then
   [ -f "$OVERLAY" ] || die "找不到 --overlay 文件: $OVERLAY"
   mkdir -p "$BUNDLE/overlay"
