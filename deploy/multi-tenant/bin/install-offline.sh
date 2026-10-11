@@ -84,7 +84,7 @@ echo "    环境检查通过（$COMPOSE）"
 
 if [ "$CHECK_ONLY" = yes ]; then
   echo
-  echo "== --check-only：包完整、镜像齐全、$_DEST 可用，没有改动任何东西"
+  echo "== --check-only：包完整、镜像齐全、$DEST 可用，没有改动任何东西"
   exit 0
 fi
 
