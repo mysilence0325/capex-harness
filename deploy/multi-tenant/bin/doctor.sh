@@ -903,15 +903,25 @@ fi
 # 节点代理的控制面地址。留空时代理只提供运维能力、不做租户发现与注册，而且这是静默的：
 # 界面上一切正常，直到某个租户重启（启动 token 会轮换）之后，统一入口才开始一直返回 303。
 # 这一项曾经丢掉过一次（restore 用归档里的 .env 覆盖了当前配置），排查了一整轮，所以它是失败项。
-if [ -n "$(grep '^MT_CONTROL_PLANE=' .env 2>/dev/null | cut -d= -f2-)" ]; then
-  if [ -n "$(grep '^MT_CONTROL_PLANE_CA=' .env 2>/dev/null | cut -d= -f2-)" ]; then
-    ok "节点代理已配置控制面地址与 CA（会注册租户）"
-  else
-    warn "节点代理有控制面地址但没有 MT_CONTROL_PLANE_CA：HTTPS 自签证书下注册会失败"
-  fi
-else
-  bad "MT_CONTROL_PLANE 为空：节点代理不会注册租户，租户重启后统一入口会一直返回 303"
-fi
+#
+# 还有第三种状态：值还是 .env.example 里的占位符（https://CHANGE-ME:8090）。它非空，
+# 于是"配过了"，但代理每次注册都会以 getaddrinfo（解析 change-me）失败告终——实测在
+# 一台真机上，日志里 12 个租户全是 `register ... failed: getaddrinfo EAI_AGAIN change-me`，
+# 而 doctor 说"已配置、会注册"。非空不等于配好，占位符在这里是失败项。
+CONTROL_PLANE_VALUE="$(grep '^MT_CONTROL_PLANE=' .env 2>/dev/null | cut -d= -f2-)"
+CONTROL_PLANE_CA_VALUE="$(grep '^MT_CONTROL_PLANE_CA=' .env 2>/dev/null | cut -d= -f2-)"
+case "$(printf '%s' "$CONTROL_PLANE_VALUE" | tr 'A-Z' 'a-z')" in
+  *change-me*|*changeme*|*example.com*)
+    bad "MT_CONTROL_PLANE 还是占位符（${CONTROL_PLANE_VALUE}）：节点代理解析不了这个主机名，注册全部失败——实测真机上 docker logs ${PREFIX}node-agent 里 12 个租户全是 getaddrinfo EAI_AGAIN change-me。改成这台机器自己的地址：MT_CONTROL_PLANE=https://<本机IP>:${MT_EDGE_PORT:-8090}" ;;
+  "")
+    bad "MT_CONTROL_PLANE 为空：节点代理不会注册租户，租户重启后统一入口会一直返回 303" ;;
+  *)
+    if [ -n "$CONTROL_PLANE_CA_VALUE" ]; then
+      ok "节点代理已配置控制面地址与 CA（会注册租户）"
+    else
+      warn "节点代理有控制面地址但没有 MT_CONTROL_PLANE_CA：HTTPS 自签证书下注册会失败"
+    fi ;;
+esac
 
 # .env 里已删租户的残留键。
 #
