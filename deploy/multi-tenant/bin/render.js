@@ -659,7 +659,29 @@ const ISOLATED_TENANTS = (() => {
  * or removing a tenant does not renumber the others — renumbering would force
  * those containers to be recreated. A collision between two ids moves to the next
  * free third octet, which is deterministic because the ids are walked in order.
+ *
+ * The base is configurable because `10.98` is only a default: on a machine that
+ * already routes that range — a Kubernetes cluster with a 10.98.0.0/16 pod CIDR
+ * is the common case — a tenant's container address loses to the other system's
+ * route and the node agent's request to it times out
+ * (`connect ETIMEDOUT <container-ip>:<port>`) while the host looks healthy.
+ * Changing the base recreates the tenant networks and containers: their
+ * addresses change and the agent re-registers them.
  */
+const TENANT_SUBNET_BASE = (() => {
+  const raw = (envValues.get('MT_TENANT_SUBNET_BASE') ?? process.env.MT_TENANT_SUBNET_BASE ?? '').trim()
+  if (raw === '') return '10.98'
+  if (!/^[0-9]{1,3}\.[0-9]{1,3}$/u.test(raw)) {
+    console.error(`MT_TENANT_SUBNET_BASE 要写成两段，例如 10.99：${JSON.stringify(raw)}`)
+    process.exit(1)
+  }
+  const [first, second] = raw.split('.').map(Number)
+  if (first > 255 || second > 255) {
+    console.error(`MT_TENANT_SUBNET_BASE 的每段都要是 0-255：${JSON.stringify(raw)}`)
+    process.exit(1)
+  }
+  return raw
+})()
 function tenantNetwork(tenant, taken) {
   const digest = crypto.createHash('sha256').update(tenant.id).digest()
   let octet = digest[0]
@@ -667,10 +689,10 @@ function tenantNetwork(tenant, taken) {
   taken.add(octet)
   return {
     name: `${NETWORK_NAME}-${tenant.id}`,
-    subnet: `10.98.${String(octet)}.0/24`,
+    subnet: `${TENANT_SUBNET_BASE}.${String(octet)}.0/24`,
     // Interface names are capped at fifteen characters.
     bridge: `mtbr${digest.subarray(1, 5).toString('hex')}`,
-    gateway: `10.98.${String(octet)}.1`,
+    gateway: `${TENANT_SUBNET_BASE}.${String(octet)}.1`,
   }
 }
 

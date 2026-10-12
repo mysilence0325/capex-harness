@@ -528,6 +528,16 @@ fi
 
 head_ "防火墙与网络"
 PORTS="$(firewall-cmd --list-ports 2>/dev/null || true)"
+# 租户网络的地址段（默认 10.98.<n>.0/24）如果被这台机器上**别的系统**也占着，发往
+# 容器的包会被那个系统的路由抢走，症状是节点代理报 connect ETIMEDOUT <容器地址>:<端口>，
+# 而宿主自己看着一切正常（租户容器 Up、代理在监听）。k8s 的 pod CIDR 常常就是 10.98.0.0/16。
+# 这里只看路由：有指向非本部署网桥的 10.98.x.x 路由，就说明这段地址有别人在用。
+TENANT_BASE="$(grep '^MT_TENANT_SUBNET_BASE=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+TENANT_BASE="${TENANT_BASE:-10.98}"
+ROUTE_CLASH="$(ip route 2>/dev/null | grep -E "(^| )${TENANT_BASE//./\\.}\.[0-9]+" | grep -vE 'dev (mtbr|br-|docker)' | head -3)"
+if [ -n "$ROUTE_CLASH" ]; then
+  warn "租户网段 ${TENANT_BASE}.x 也被这台机器上的别的系统路由（$(printf '%s' "$ROUTE_CLASH" | tr '\n' ';')）：发往租户容器的包会被抢走，症状是节点代理报 connect ETIMEDOUT。把 .env 的 MT_TENANT_SUBNET_BASE 换一段没人用的（例如 10.99），然后 bin/mt.sh up（租户容器会重建并换地址）"
+fi
 # 节点不用开网关端口，它要开的是"网关能连到本机代理"。放行没做对时，节点侧一切正常
 # （它能连出去注册），只有控制面那台登录会 502 —— 实测过，从现象追不到防火墙。
 if [ "$HAS_GATEWAY" != yes ]; then
@@ -908,8 +918,10 @@ fi
 # 于是"配过了"，但代理每次注册都会以 getaddrinfo（解析 change-me）失败告终——实测在
 # 一台真机上，日志里 12 个租户全是 `register ... failed: getaddrinfo EAI_AGAIN change-me`，
 # 而 doctor 说"已配置、会注册"。非空不等于配好，占位符在这里是失败项。
-CONTROL_PLANE_VALUE="$(grep '^MT_CONTROL_PLANE=' .env 2>/dev/null | cut -d= -f2-)"
-CONTROL_PLANE_CA_VALUE="$(grep '^MT_CONTROL_PLANE_CA=' .env 2>/dev/null | cut -d= -f2-)"
+# 取**最后**一条：`. ./.env` 与 compose 都是后出现的赋值生效，doctor 取第一条时，
+# 一份 .env 里出现两次（先占位符、后真地址）会让它报一个不存在的失败。
+CONTROL_PLANE_VALUE="$(grep '^MT_CONTROL_PLANE=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+CONTROL_PLANE_CA_VALUE="$(grep '^MT_CONTROL_PLANE_CA=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
 case "$(printf '%s' "$CONTROL_PLANE_VALUE" | tr 'A-Z' 'a-z')" in
   *change-me*|*changeme*|*example.com*)
     bad "MT_CONTROL_PLANE 还是占位符（${CONTROL_PLANE_VALUE}）：节点代理解析不了这个主机名，注册全部失败——实测真机上 docker logs ${PREFIX}node-agent 里 12 个租户全是 getaddrinfo EAI_AGAIN change-me。改成这台机器自己的地址：MT_CONTROL_PLANE=https://<本机IP>:${MT_EDGE_PORT:-8090}" ;;
