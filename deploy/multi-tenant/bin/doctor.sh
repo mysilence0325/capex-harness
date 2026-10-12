@@ -682,6 +682,24 @@ if [ -n "${FIRST_TENANT:-}" ] && [ -n "$LAN_IP" ]; then
     bad "  实测 ${FIRST_TENANT}: 仍能访问宿主端口（结果 ${REACHED:-无响应}）"
   fi
 fi
+# 反方向也必须通：宿主上的节点代理与网关要能连**进**租户容器，这是投递用户请求的那一跳。
+# 隔离规则只该丢"容器主动发起的新连接"，一旦连带把回程也丢掉，症状就非常难认：容器里
+# 能看到 SYN_RECV（SYN 到了）、宿主侧 ETIMEDOUT、节点代理 502、统一入口登录 502，而两边
+# 各自看着都正常。iptables 后端曾经如此（链挂在 INPUT 第 1 位、在 conntrack 之前）。
+if [ -n "$LOCAL_TENANTS" ]; then
+  HOST_TO_TENANT=no
+  for _t in $(printf '%s\n' $LOCAL_TENANTS | head -2); do
+    _ip="$(docker inspect "${PREFIX}dsh-$_t" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -m1 '^10\.' || true)"
+    _pt="$(grep -A6 "\"id\": \"$_t\"" tenants.json 2>/dev/null | grep -o '"internalPort": *[0-9]*' | grep -o '[0-9]*' | head -1)"
+    [ -n "$_ip" ] && [ -n "$_pt" ] || continue
+    if timeout 4 bash -c "cat < /dev/null > /dev/tcp/${_ip}/${_pt}" 2>/dev/null; then HOST_TO_TENANT=yes; break; fi
+  done
+  if [ "$HOST_TO_TENANT" = yes ]; then
+    ok "  实测 宿主 -> 本机租户容器：可连（代理与网关投递请求走的就是这条路）"
+  else
+    bad "  实测 宿主 -> 本机租户容器：连不上——隔离规则可能把回程也丢了（重跑 bin/isolate.sh apply），或容器里的运行时没在监听"
+  fi
+fi
 
 head_ "日志上限"
 # json-file 驱动默认不封顶：容器一直写就把磁盘写满。逐个容器核实，并报出实际占用。

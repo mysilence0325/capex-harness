@@ -105,10 +105,18 @@ ipt_apply() {
   ipt -N "$MT_CHAIN" 2>/dev/null || true
   ipt -F "$MT_CHAIN" || return 1
   echo "==> 限制以下网桥对宿主的访问（iptables 链 $MT_CHAIN）"
+  # 链挂在 INPUT 第 1 位，也就是**在 conntrack 之前**：链自己必须先放行"已建立连接的回程"，
+  # 否则宿主发起、容器应答的那一半也被丢掉。实测（Ubuntu 真机）：租户容器里能看到
+  # 10.98.x.2:3181 ← 10.98.x.1 的 SYN_RECV（SYN 到了），但 SYN-ACK 回不来，节点代理到
+  # 容器的每次请求都以 connect ETIMEDOUT 结束，统一入口登录 502——而宿主与容器各自都正常。
+  # firewalld 那条路没有这个问题，因为 direct 规则排在 conntrack 之后；两条路语义必须一致。
+  ipt -A "$MT_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
   while IFS= read -r br; do
     [ -n "$br" ] || continue
     ip link show "$br" >/dev/null 2>&1 || { echo "    跳过不存在的网桥 $br" >&2; continue; }
     ipt -A "$MT_CHAIN" -i "$br" -p tcp --dport "$EGRESS_PORT" -j ACCEPT || return 1
+    # 丢弃本网桥到宿主的其余流量。回程包由链首那条 ESTABLISHED,RELATED 先放行，所以这里
+    # 保持无条件丢弃——语义与 firewalld 那条一致，也顺手挡掉 INVALID 状态的包。
     ipt -A "$MT_CHAIN" -i "$br" -j DROP || return 1
     echo "    ${br}: 放行 -> 宿主:${EGRESS_PORT}，丢弃其余"
   done <<< "$bridges"
@@ -122,6 +130,34 @@ ipt_apply() {
     return 1
   fi
   echo "    规则已加载；注意：iptables 规则重启会丢，用 bin/isolate.sh install-boot 让它开机重建"
+  # 双向各验一次。隔离要生效（容器 -> 宿主的其它端口被拒，doctor 每次也测），但**不能**
+  # 把宿主自己到容器的路堵上：那条路是节点代理与网关投递请求用的。曾经就堵过——容器里
+  # 能看到 SYN_RECV、宿主侧 ETIMEDOUT、统一入口登录 502，而两边各自看着都正常。
+  # 试前几个租户，全失败才下结论：单个容器可能正在重启、或被别的探针占着，用一台的
+  # 失败就报错会变成假警报（实测踩过一次）。
+  local sample id cip cport reachable=no tried=0
+  for sample in $(docker ps --filter 'label=mt.tenant' --format '{{.Names}}' 2>/dev/null | head -3); do
+    [ -n "$sample" ] || continue
+    id="$(docker inspect "$sample" --format '{{index .Config.Labels "mt.tenant"}}' 2>/dev/null || true)"
+    cip="$(docker inspect "$sample" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -m1 '^10\.' || true)"
+    cport="$(grep -A6 "\"id\": \"$id\"" tenants.json 2>/dev/null | grep -o '"internalPort": *[0-9]*' | grep -o '[0-9]*' | head -1 || true)"
+    [ -n "$cip" ] && [ -n "$cport" ] || continue
+    tried=$((tried + 1))
+    for _ in 1 2; do
+      if timeout 4 bash -c "cat < /dev/null > /dev/tcp/${cip}/${cport}" 2>/dev/null; then reachable=yes; break 2; fi
+      sleep 2
+    done
+  done
+  if [ "$tried" -gt 0 ]; then
+    if [ "$reachable" = yes ]; then
+      echo "    实测 宿主 -> 租户容器：可连（节点代理与网关投递租户请求走的就是这条路）"
+    else
+      echo "    实测 宿主 -> 租户容器：${tried} 个都连不上！隔离规则把回程也丢了：" >&2
+      echo "      症状是容器里能看到 SYN_RECV、节点代理报 connect ETIMEDOUT、统一入口登录 502。" >&2
+      echo "      iptables 后端必须在链首放行 ESTABLISHED,RELATED（本脚本已这么做；手工改过规则就重跑 apply）" >&2
+      return 1
+    fi
+  fi
   return 0
 }
 
@@ -218,6 +254,12 @@ apply_rules() {
   done <<< "$(own_rules)"
 
   echo "==> 限制以下网桥对宿主的访问（每个网桥各自一条放行 + 一条丢弃）"
+  # 先放行"已建立连接的回程"：这条链挂在 INPUT_direct 上，通常排在 conntrack 的
+  # ESTABLISHED 之后，所以本来就没问题；写在这里是为了两条后端语义一致——iptables 那条
+  # 路挂在 INPUT 第 1 位（conntrack 之前），少了它会把**宿主发起、容器应答**的回程丢掉，
+  # 症状是容器里 SYN_RECV、节点代理 connect ETIMEDOUT、统一入口登录 502。
+  firewall-cmd --permanent --direct --add-rule ipv4 filter "$CHAIN" 0 \
+    -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$COMMENT" -j ACCEPT >/dev/null || return 1
   while IFS= read -r br; do
     [ -n "$br" ] || continue
     # 优先级决定链内顺序：先放行出口代理，再丢弃其余。
