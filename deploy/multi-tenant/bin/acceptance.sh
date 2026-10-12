@@ -150,11 +150,48 @@ case "$DOCTOR" in *"0 项失败"*) pass "doctor $DOCTOR" ;; *) fail "doctor $DOC
 
 # ---------------------------------------------------------------- 监控链路
 head_ "监控与告警"
-C=capex-ai-lab-prometheus-1
-TARGET="$(docker exec "$C" wget -q -O - 'http://127.0.0.1:9090/api/v1/targets' 2>/dev/null | sed 's/},{/}\n{/g' | grep dsh-multitenant | grep -o '"health":"up"' | head -1)"
-assert_eq '"health":"up"' "$TARGET" "抓取目标 up"
-RULES="$(docker exec "$C" wget -q -O - 'http://127.0.0.1:9090/api/v1/rules' 2>/dev/null | grep -o '"name":"Dsh[A-Za-z]*"' | wc -l)"
-[ "$RULES" -ge 12 ] && pass "DSH 告警规则 $RULES 条（≥12）" || fail "DSH 告警规则只有 $RULES 条"
+# Prometheus 既不保证在本机、也不叫某个固定名字：写死一个容器名会让"这台机器上没有
+# Prometheus"变成一条红字缺陷（实测在真机上就是这样）。优先 MT_PROMETHEUS_URL（直连，
+# 容器外的 Prometheus 也算），其次 MT_PROMETHEUS_CONTAINER，再次在本机容器里找一个
+# 名字含 prometheus 的；都没有就跳过这两条并说清楚该怎么接。
+PROM_BASE="${MT_PROMETHEUS_URL:-}"
+# 候选：显式指定的在前，其次本机所有名字含 prometheus 的容器。一台机器上可能有
+# 好几套 stack 各自的 Prometheus（实测 .137 上就有两台），随手取第一个会问到
+# **没在抓我们**的那个，然后报一条不存在的缺陷——所以要逐个问"谁在抓 dsh-multitenant"。
+prom_candidates() {
+  {
+    [ -n "${MT_PROMETHEUS_CONTAINER:-}" ] && printf '%s\n' "$MT_PROMETHEUS_CONTAINER"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -i prometheus || true
+  } | awk 'NF' | awk '!seen[$0]++'
+}
+prom_get() { # $1 = 候选容器, $2 = 路径
+  docker exec "$1" wget -q -O - "http://127.0.0.1:9090$2" 2>/dev/null
+}
+PROM_USED=""; TARGET=""; RULES=""
+if [ -n "$PROM_BASE" ]; then
+  PROM_USED="$PROM_BASE"
+  TARGET="$(curl -sSk --max-time 10 "$PROM_BASE/api/v1/targets" 2>/dev/null | sed 's/},{/}\n{/g' | grep dsh-multitenant | grep -o '"health":"up"' | head -1)"
+  RULES="$(curl -sSk --max-time 10 "$PROM_BASE/api/v1/rules" 2>/dev/null | grep -o '"name":"Dsh[A-Za-z]*"' | wc -l)"
+else
+  for c in $(prom_candidates); do
+    T="$(prom_get "$c" /api/v1/targets | sed 's/},{/}\n{/g' | grep dsh-multitenant | grep -o '"health":"up"' | head -1)"
+    [ -n "$T" ] || continue
+    PROM_USED="$c"
+    TARGET="$T"
+    RULES="$(prom_get "$c" /api/v1/rules | grep -o '"name":"Dsh[A-Za-z]*"' | wc -l)"
+    break
+  done
+  # 没人抓我们：拿第一个候选当上下文去报错（比"实际（空）"有用）
+  [ -n "$PROM_USED" ] || PROM_USED="$(prom_candidates | head -1)"
+fi
+if [ -z "$PROM_USED" ]; then
+  skip "抓取目标 up（本机没有 Prometheus：装一个，或用 MT_PROMETHEUS_URL / MT_PROMETHEUS_CONTAINER 指向你们的）"
+  skip "DSH 告警规则（同上；规则由 bin/mt.sh wire-prometheus 写进去）"
+else
+  assert_eq '"health":"up"' "$TARGET" "抓取目标 up（$PROM_USED）"
+  [ "$RULES" -ge 12 ] && pass "DSH 告警规则 $RULES 条（≥12，在 $PROM_USED）" \
+    || fail "DSH 告警规则只有 $RULES 条（在 $PROM_USED；执行 bin/mt.sh wire-prometheus 把规则写进去）"
+fi
 
 # 正向：投一条告警，落盘条数必须增加。数不变说明链路断了，而不是"没变化也算过"。
 LOGFILE=state/alerts/alerts.jsonl
@@ -162,10 +199,15 @@ if [ "$QUICK" = yes ]; then
   skip "告警投递（--quick 跳过）"
 else
   BEFORE_ALERTS="$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)"
-  bin/mt.sh alert-sink test >/dev/null 2>&1
-  AFTER_ALERTS="$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)"
-  [ "$AFTER_ALERTS" -gt "$BEFORE_ALERTS" ] && pass "告警投递：落盘 $BEFORE_ALERTS → $AFTER_ALERTS 条" \
-    || fail "告警投递：落盘没有增加（$BEFORE_ALERTS → $AFTER_ALERTS）"
+  # 接收器没起时，"落盘没增加"是必然的，而原因不是链路断了。分开报，并把命令写出来。
+  if [ "$SINK" = "0" ]; then
+    fail "告警投递：接收器没在运行（bin/mt.sh alert-sink up 起它，再 bin/mt.sh alert-sink test 验证）"
+  else
+    bin/mt.sh alert-sink test >/dev/null 2>&1
+    AFTER_ALERTS="$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)"
+    [ "$AFTER_ALERTS" -gt "$BEFORE_ALERTS" ] && pass "告警投递：落盘 $BEFORE_ALERTS → $AFTER_ALERTS 条" \
+      || fail "告警投递：落盘没有增加（$BEFORE_ALERTS → $AFTER_ALERTS）——看 bin/mt.sh alert-sink status 与 logs"
+  fi
 fi
 
 # ---------------------------------------------------------------- 密钥权限
@@ -352,6 +394,10 @@ head_ "控制台的配额与限速操作"
 # 经控制台设，再读回来。只看"接口返回 ok"不算 —— 那可能什么都没落下。
 if [ "$QUICK" = yes ]; then
   skip "控制台设限速并读回（--quick 跳过）"
+elif [ -z "$ADMIN_PW" ]; then
+  # 没有管理员口令就没有会话，后面三条必然红——那是"没测成"，不是"功能坏了"。
+  # 这段以前忘了这一判断，实测在一台真机上三条全红，看着像控制台坏了。
+  skip "控制台设限速并读回（$CREDS 里缺 admin.password）"
 else
   AJAR="$(mktemp)"
   curl -sS -o /dev/null -c "$AJAR" --data-urlencode "user=${ADMIN_USER:-admin}" --data-urlencode "password=$ADMIN_PW"     http://127.0.0.1:8099/__mt/admin/login 2>/dev/null
@@ -385,13 +431,17 @@ else
   ALL="$(printf '%s' "$DISK" | grep -c '^mt_tenant_disk_used_bytes')"
   NZ="$(printf '%s' "$DISK" | awk '$2 != 0' | grep -c '^mt_tenant_disk_used_bytes')"
   assert_eq "$ALL" "$NZ" "磁盘用量指标全部非零（$NZ/$ALL）—— 0 会看起来像正常值"
-  # 与真实目录对账：同量级即可（指标按文件大小，du 按分配的块，本来就略有出入）
+  # 与真实目录对账。两边必须是同一种算法：指标是 node-agent 的 measureTenantBytes，
+  # 它按**文件字节**累加，不含目录自身；`du -sb` 会把每个目录的 4 KB 也计进去，于是
+  # 新建的租户（只有凭据与 patch，六个目录 ≈ 24 KB 比内容还多）必然报"不成比例"——
+  # 实测在一台真机上 12 个租户全红，而指标是对的。改成同样只数文件字节，留 ±10% 余量
+  # （两次测量之间可能有写入）。
   for t in $LOCAL_TENANTS; do
     M="$(printf '%s' "$DISK" | awk -v t="$t" '$0 ~ "tenant=\"" t "\"" {print $2}')"
-    D="$(du -sb "tenants/$t" 2>/dev/null | awk '{print $1}')"
+    D="$(find "tenants/$t" -type f -printf '%s\n' 2>/dev/null | awk '{ s += $1 } END { printf "%d", s + 0 }')"
     if [ -z "$M" ] || [ -z "$D" ]; then skip "$t 无法对账"; continue; fi
-    RATIO="$(awk -v m="$M" -v d="$D" 'BEGIN{ if (d == 0) { print "na"; exit } r = m / d; print (r > 0.8 && r <= 1.01) ? "ok" : "bad" }')"
-    [ "$RATIO" = "ok" ] && pass "$t 指标 $M 与目录 $D 同量级" || fail "$t 指标 $M 与目录 $D 不成比例"
+    RATIO="$(awk -v m="$M" -v d="$D" 'BEGIN{ if (d == 0) { print "na"; exit } r = m / d; print (r > 0.9 && r <= 1.1) ? "ok" : "bad" }')"
+    [ "$RATIO" = "ok" ] && pass "$t 指标 $M 与目录里文件字节 $D 一致" || fail "$t 指标 $M 与目录里文件字节 $D 不成比例"
   done
 fi
 
