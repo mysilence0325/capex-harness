@@ -43,6 +43,22 @@ PY
 )" || die "读 tenants.json 失败"
 [ -n "$PAIRS" ] || die "注册表里没有租户"
 
+# 没有用户的租户：没人能登录，也没法重置口令（口令属于用户，不属于租户），而且渲染会
+# 直接失败（render.js: "tenant X needs at least one user"）——所以正常部署里不该存在。
+# 这里点名，别让它在凭据文件里被静默跳过。
+NOUSER="$(python3 - <<'PY'
+import json
+doc = json.load(open("tenants.json", encoding="utf-8"))
+print(" ".join(t["id"] for t in doc.get("tenants", []) if not (t.get("users") or [])))
+PY
+)"
+if [ -n "${NOUSER// /}" ]; then
+  echo "!! 这些租户在注册表里没有用户：$NOUSER" >&2
+  echo "   没有用户 = 没人能登录，也没法重置口令（口令挂在用户上）。修法（数据保留）：" >&2
+  echo "     bin/mt.sh remove <租户>            # 只摘注册表与容器，tenants/<租户>/ 数据不动" >&2
+  echo "     bin/mt.sh add <租户> --user <用户名>  # 新口令打印一次，然后 bin/mt.sh up" >&2
+fi
+
 CREDS=""
 if [ -n "$FROM" ]; then
   [ -f "$FROM" ] || die "找不到 $FROM"
@@ -94,12 +110,6 @@ if [ -n "${MISSING// /}" ]; then
   die "这些租户在 $FROM 里没有口令：$MISSING（要么补全，要么加 --rotate 重置）"
 fi
 
-# 控制台管理员口令：默认直接设成传进来的那个，免得"文件里的和实际的不一致"这种假失败。
-if [ "$SET_ADMIN" = yes ]; then
-  echo "==> 设置控制台管理员口令（同时吊销已登录的管理员会话）"
-  bin/mt.sh admin-passwd "$ADMIN_PW" >/dev/null || die "设置管理员口令失败（bin/mt.sh admin-passwd）"
-fi
-
 printf '%s' "$ROWS" | python3 -c '
 import json, sys
 rows = [line.split(None, 2) for line in sys.stdin.read().splitlines() if line.strip()]
@@ -113,6 +123,29 @@ with open(sys.argv[3], "w", encoding="utf-8") as handle:
 chmod 600 "$OUT"
 echo "==> 已写 $OUT（0600，${OUT} 属于明文口令，别外传、别进版本库）"
 
+# 口令表先打出来再碰管理员那一步：曾经把它放在后面，结果管理员设置失败时脚本提前退出，
+# 重置出来的口令一次都没显示过——那 12 个用户的口令谁也不知道了，只能再重置一遍。
+# 顺序就按"先落地、再打印、最后动控制台"。
+echo
+echo "==> 租户口令（重置出来的只在这里出现一次，请存好并按需要重新发给本人）"
+printf '%s' "$ROWS" | awk '{ printf "    %-16s %-14s %s\n", $1, $2, $3 }'
+
+# 控制台管理员：默认设成传进来的那个口令，免得"文件里的和实际的不一致"这种假失败。
+# 这台机器上还没建过管理员时先建一个——没有管理员的控制台是登不进去的（验收里那几段
+# 控制台检查就会跳过或报错），这正是实测遇到的情况。
+if [ "$SET_ADMIN" = yes ]; then
+  echo
+  # 列表是"名字 角色 创建时间"三列、带前导空格的表格，所以不能只匹配行首。
+  if bin/mt.sh admin-users list 2>/dev/null | grep -qE '^[[:space:]]*admin([[:space:]]|$)'; then
+    echo "==> 设置控制台管理员口令（同时吊销已登录的管理员会话）"
+    bin/mt.sh admin-passwd "$ADMIN_PW" >/dev/null 2>&1 || echo "!! 设置管理员口令失败（bin/mt.sh admin-passwd）；文件已经写好，控制台那几段验收会跳过" >&2
+  else
+    echo "==> 这台机器还没有控制台管理员：创建 admin（角色 admin）"
+    bin/mt.sh admin-add admin --role admin --password "$ADMIN_PW" >/dev/null 2>&1 \
+      || echo "!! 创建管理员失败（bin/mt.sh admin-add admin --role admin --password '<口令>'）；文件已经写好，控制台那几段验收会跳过" >&2
+  fi
+fi
+
 # 实测一次控制台登录：文件里的口令对不对，这一条说了算。
 if [ -f bin/lib-http.sh ]; then
   # shellcheck disable=SC1091
@@ -123,13 +156,11 @@ CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/__mt/admin
 if [ "$CODE" = "303" ]; then
   echo "==> 控制台登录实测通过（303）"
 else
-  echo "!! 控制台登录实测返回 ${CODE:-无响应}：口令已写进文件，但登录没通；" >&2
-  echo "   看 bin/mt.sh logs gateway，或重跑本脚本" >&2
+  echo "!! 控制台登录实测返回 ${CODE:-无响应}：文件已写好（租户口令可用），但控制台登录没通。" >&2
+  echo "   先 bin/mt.sh admin-users list 看有没有 admin；没有就 bin/mt.sh admin-add admin --role admin --password '<口令>'；" >&2
+  echo "   已有却登不进就看 bin/mt.sh logs gateway。" >&2
 fi
 
-echo
-echo "==> 租户口令（重置出来的只在这里出现一次，请存好并按需要重新发给本人）"
-printf '%s' "$ROWS" | awk '{ printf "    %-16s %-14s %s\n", $1, $2, $3 }'
 echo
 echo "下一步："
 echo "    bin/mt.sh doctor        # 期望 0 项失败"
