@@ -120,6 +120,15 @@ cmd_up() {
   if [ "$this_node" != local ]; then
     sync_registry_from_control_plane | sed 's/^/    /'
   fi
+  # MT_NODE_ADDRESS 是"控制面该来哪儿找我"。从别的机器抄来的 .env 里常常还是那一台的
+  # 地址，而按它注册出来的端点（http://<地址>:3199/proxy/<租户>）只有那台可达——本机
+  # 自己的网关连不上，表现是 doctor 里每个租户都"连不上"、登录 503，而容器全在跑。
+  # 这里提前点名（NAT 之后的节点有意用外部地址时会看到这条提示，那是对的，忽略即可）。
+  if [ -n "${MT_NODE_ADDRESS:-}" ] && command -v ip >/dev/null 2>&1 \
+     && ! ip -4 -o addr show scope global 2>/dev/null | grep -qw "${MT_NODE_ADDRESS}"; then
+    echo "    !! MT_NODE_ADDRESS=${MT_NODE_ADDRESS} 不是本机地址（本机探测到 $(lan_ip)）："
+    echo "       注册出去的端点会指向别的机器，登录会连不上。改成本机地址，或删掉这行让脚本自动探测。"
+  fi
   # 老租户可能还没有占位 key；先补发，否则渲染出来的租户没有模型凭据。
   node_run bin/registry.js ensure-model-keys | sed "s/^/    /"
   node_run bin/render.js "${1:-}"

@@ -208,6 +208,18 @@ if [ "$HAS_GATEWAY" = yes ]; then
   else
     bad "健康接口无响应（本机 curl $GW_BASE/__mt/health）"
   fi
+  # 本机租户的注册端点是 http://<本机>:3199/proxy/<租户>，由本机节点代理提供。代理不在
+  # 时症状是一长串"每个租户都连不上 + 就绪 0/N + 登录 503"，全部指向同一个原因，所以这
+  # 里单独点名——控制面这台上也需要它（不是只有节点才需要）。
+  if [ -n "$LOCAL_TENANTS" ]; then
+    APORT="${MT_AGENT_PORT:-3199}"
+    ASTATUS="$(docker inspect ${PREFIX}node-agent --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+    if printf '%s\n' "$LISTEN" | grep -q ":$APORT "; then
+      ok "节点代理在监听 $APORT（本机租户的注册端点由它提供）"
+    else
+      bad "没有进程监听 ${APORT}：本机租户的注册端点 http://<本机>:${APORT}/proxy/<租户> 由它提供，代理不在时每个租户都连不上（容器状态: ${ASTATUS}，执行 bin/mt.sh agent up）"
+    fi
+  fi
 else
   # 节点没有网关。它要保证的是"节点代理在跑、知道向谁注册、密钥对得上"——
   # 这三样里任何一样不对，本机的租户在控制面上都不会出现（登录 503）。
@@ -594,7 +606,14 @@ if [ -n "$FIRST_TENANT" ] && [ "$EGRESS_STATE" = running ] && [ -n "$PROBE_INTER
   case "$PROBE" in
     "public-ok internal-blocked") ok "  实测 ${FIRST_TENANT}: 可经代理访问公网，且内网地址被拒" ;;
     "no-proxy-in-container") warn "  ${FIRST_TENANT} 容器里没有 HTTPS_PROXY（执行 bin/mt.sh up）" ;;
-    *) bad "  ${FIRST_TENANT} 出口实测异常: ${PROBE:-无响应}" ;;
+    # 这条检查要断言的不变量是两条：租户能连上出口代理、私网地址被它拒掉。
+    # 公网能不能出去是**环境事实**，不是部署正确性——隔离内网里本来就没有公网，
+    # 配了 MT_EGRESS_ALLOW 时公网按白名单被拒也是设计行为。把它们当成失败，会让
+    # 一台跑得好好的隔离机器永远停在"1 项失败"上，然后有人去追一个不存在的问题。
+    "public-fail internal-blocked") warn "  实测 ${FIRST_TENANT}: 出口代理可达、内网地址被拒；公网不可达（隔离内网下正常，被白名单拒绝也算这一档）" ;;
+    "public-ok internal-ALLOWED") bad "  ${FIRST_TENANT} 的出口代理放行了私网地址：隔离失效（检查 MT_EGRESS_ALLOW 与 NO_PROXY）" ;;
+    "") bad "  出口代理没有应答：租户的出网链路不通（bin/mt.sh logs egress-proxy）" ;;
+    *) bad "  ${FIRST_TENANT} 出口实测异常: ${PROBE}" ;;
   esac
 fi
 
@@ -838,8 +857,16 @@ head_ "资源与备份"
 AVAIL="$(df -h / | awk 'NR==2{print $4}')"
 USEDP="$(df -h / | awk 'NR==2{print $5}' | tr -d '%')"
 [ "$USEDP" -lt 85 ] && ok "磁盘剩余 $AVAIL（已用 ${USEDP}%）" || warn "磁盘已用 ${USEDP}%，剩余 $AVAIL"
-MEM="$(free -m | awk '/Mem:/{print $7}')"
-[ "${MEM:-0}" -gt 512 ] && ok "可用内存 ${MEM} MB" || warn "可用内存仅 ${MEM} MB"
+# `free` 的 available 列（$7）是 procps 3.3 之后才有的；老版本或裁剪过的镜像里
+# 读到空值，原先那条判断就打印成"可用内存仅  MB"——一个没有数字的警告没人能处理。
+MEM="$(free -m 2>/dev/null | awk '/Mem:/{print $7}')"
+case "${MEM:-}" in
+  ''|*[!0-9]*) MEM="$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || true)" ;;
+esac
+case "${MEM:-}" in
+  ''|*[!0-9]*) warn "读不到可用内存（free 与 /proc/meminfo 都没给数）：手工看一眼 free -m" ;;
+  *) if [ "$MEM" -gt 512 ]; then ok "可用内存 ${MEM} MB"; else warn "可用内存仅 ${MEM} MB"; fi ;;
+esac
 LAST="$(ls -1t backups/dsh-mt-*.tar.gz 2>/dev/null | head -1 || true)"
 if [ -z "$LAST" ]; then
   warn "还没有任何备份（bin/backup.sh）"
