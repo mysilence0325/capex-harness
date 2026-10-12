@@ -53,6 +53,14 @@ am_available() {
   [ -n "$name" ] && docker inspect "$name" >/dev/null 2>&1
 }
 
+# 网络：显式指定的最优先；否则**有 Alertmanager 时和它同网**（它要按容器名
+# http://dsh-alert-sink:9110/alert 找到接收器 —— 跨网络是找不到的，实测会把
+# "告警投递没增加"报成缺陷）；没有 Alertmanager 时才用本部署自己的网络。
+if [ -z "${MT_ALERT_SINK_NETWORK:-}" ] && am_available; then
+  AM_NET="$(docker inspect "$AM_CONTAINER" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -m1 . || true)"
+  [ -n "$AM_NET" ] && SINK_NETWORK="$AM_NET"
+fi
+
 command="${1:-status}"
 
 case "$command" in

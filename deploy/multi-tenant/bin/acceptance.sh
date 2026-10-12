@@ -129,6 +129,14 @@ for t in $TENANTS; do
     continue
   fi
   R="$(bin/mt.sh smoke --tenant "$t" --user "$U" --password "$P" 2>&1 | grep -o '结果.*')"
+  # 登录限流（429）不是部署缺陷：同源失败满 20 次（或同账号 5 次）会锁 10 分钟，被锁期间
+  # 连正确口令也拿 429，于是继续跑只会越锁越深、把 11 个租户也一起报成红的。见到就停，
+  # 并把复位办法写出来。
+  if printf '%s' "$R" | grep -q '429'; then
+    skip "$t 冒烟被登录限流挡住（429）——其余租户本轮不再跑"
+    printf '      \033[33m!\033[0m 这是限流不是缺陷：等 10 分钟，或 docker restart %sgateway 立刻清掉，然后只跑一次 bin/acceptance.sh\n' "${PREFIX:-mt-}"
+    break
+  fi
   # 断言"0 失败"而不是写死条数：检查项会增加（例如把一条一直没被计数的检查接回计数），
   # 写死 15 会让加一条检查就报红 —— 那不是发现缺陷，只是数字变了。条数只做下限校验。
   case "$R" in
@@ -248,26 +256,30 @@ else
 fi
 
 # 历史筛选：正向断言"返回的每一条都真的属于该租户"。
+# 用注册表里的**第一个真实租户**，不写死名字：以前写的是 "alpha"（我演练机的租户名），
+# 换一台机器就变成"筛选返回 0 条"，看着像筛选坏了，其实只是那台没有 alpha。
 if [ "$CODE" = "skip" ]; then
   skip "历史筛选（没有管理员会话）"
 else
+FILTER_TENANT="$(printf '%s\n' $TENANTS | head -1)"
 HIST="$(curl -sS -b "$JAR" -X POST -H 'content-type: application/json' -H 'Origin: http://127.0.0.1:8099' \
-  -d '{"action":"ops-history","limit":500,"tenantFilter":"alpha"}' http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null)"
+  -d "{\"action\":\"ops-history\",\"limit\":500,\"tenantFilter\":\"$FILTER_TENANT\"}" http://127.0.0.1:8099/__mt/admin/api/tenant 2>/dev/null)"
 printf '%s' "$HIST" | python3 -c '
 import json, sys
+want = sys.argv[1]
 try:
     d = json.load(sys.stdin)
 except Exception as e:
     print("BAD 历史接口返回的不是 JSON: %s" % e); sys.exit(0)
 rows = d.get("entries", [])
-others = sorted({str(r.get("tenant")) for r in rows} - {"alpha"})
+others = sorted({str(r.get("tenant")) for r in rows} - {want})
 if not rows:
-    print("BAD 筛选 alpha 返回 0 条（无法证明筛选正确）")
+    print("BAD 筛选 %s 返回 0 条（无法证明筛选正确）" % want)
 elif others:
-    print("BAD 筛选 alpha 的结果里混入了 %s" % others)
+    print("BAD 筛选 %s 的结果里混入了 %s" % (want, others))
 else:
-    print("OK 筛选 alpha 返回 %d 条，全部属于 alpha（共匹配 %s / 总计 %s）" % (len(rows), d.get("matched"), d.get("total")))
-' | while read -r line; do
+    print("OK 筛选 %s 返回 %d 条，全部属于它（共匹配 %s / 总计 %s）" % (want, len(rows), d.get("matched"), d.get("total")))
+' "$FILTER_TENANT" | while read -r line; do
   case "$line" in OK*) pass "${line#OK }" ;; BAD*) fail "${line#BAD }" ;; esac
 done
 fi
