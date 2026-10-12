@@ -190,6 +190,15 @@ for t in $LOCAL_TENANTS; do
   else
     warn "  $t 没有 profile patch（bin/mt.sh render 会补）"
   fi
+  # 启动 token 对账：容器重启会重新打印一个 token，而控制面可能还拿着旧的。这时页面照常
+  # 打开，但 DSH 的 API（建会话、选模型）全部失败——症状是 model-check 第 2 步"有 provider
+  # 加载失败："、第 3 步"建会话失败"，冒烟里 RPC 那几项失败。实测逐字复现过，所以在这里
+  # 直接对账：容器日志里**当前这次启动**的 token vs state/runtimes.json 里登记的那个。
+  REG_TOKEN="$(grep -A6 "\"$t\":" state/runtimes.json 2>/dev/null | grep -o '"token": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+  LIVE_TOKEN="$(docker logs "${PREFIX}dsh-$t" 2>&1 | grep -o 'token=[^ )]*' | tail -1 | cut -d= -f2)"
+  if [ -n "$LIVE_TOKEN" ] && [ -n "$REG_TOKEN" ] && [ "$REG_TOKEN" != "$LIVE_TOKEN" ]; then
+    bad "  $t 的启动 token 与控制面不一致（容器重启过）：bin/mt.sh register $t"
+  fi
 done
 
 head_ "控制面"

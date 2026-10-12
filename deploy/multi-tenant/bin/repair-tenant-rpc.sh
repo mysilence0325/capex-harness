@@ -2,13 +2,18 @@
 # 租户 DSH 的 RPC 不答话时（model-check 第 2/3 步空、冒烟里 RPC 那几项失败）用它。
 #
 #   bin/repair-tenant-rpc.sh check [租户]       只读：看这个租户的模型 env、DSH 日志尾、RPC 探针
-#   bin/repair-tenant-rpc.sh fix  [租户]        修：强制重建容器 → 重注册 → 复验 RPC
+#   bin/repair-tenant-rpc.sh refresh [租户]     最小修：按容器当前打印的 token 重新注册（不重建容器）
+#   bin/repair-tenant-rpc.sh refresh --all      全部租户（推荐先试这个）
+#   bin/repair-tenant-rpc.sh fix  [租户]        更重：强制重建容器 → 重新注册 → 复验 RPC
 #   bin/repair-tenant-rpc.sh fix --all          对注册表里全部租户做（逐个，慢）
 #
-# 为什么是"重建"：租户容器里的模型 env（DEEPSEEK_BASE_URL / DEEPSEEK_API_KEY）与 profile patch
-# 是创建时注入的；`.env`/`model.patch.yml` 后来改过而容器没重建时，DSH 里的 provider 就会加载
-# 失败，表现为登录正常、页面正常，但 RPC（建会话、选模型）全挂。重建保留 tenants/<租户>/home
-# 与 workspace（那是挂载卷），只是换一个新容器、重印一次启动 token。
+# 两种原因，两种修法：
+#   refresh —— 容器重启过、token 换了，注册表还是旧的。症状：登录与页面都正常，model-check
+#              第 2 步"有 provider 加载失败："（列表为空）、第 3 步"建会话失败"；冒烟里 RPC
+#              那几项失败。实测在真机上逐字复现过。重新注册只是把当前 token 报上去，不动容器。
+#   fix     —— 容器里的模型 env 与 profile patch 是创建时注入的；`.env` 改过而容器没重建时，
+#              provider 会真的加载不起来（日志里会有报错）。重建会把新配置注入，home/workspace
+#              是挂载卷，数据不丢。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -74,6 +79,22 @@ doc = json.load(open("tenants.json", encoding="utf-8"))
 print(" ".join(x["id"] for x in doc["tenants"]))
 '); do show "$t"; done
     fi
+    ;;
+  refresh)
+    targets="$*"
+    case " $targets " in *" --all "*) targets="$(python3 -c '
+import json
+doc = json.load(open("tenants.json", encoding="utf-8"))
+print(" ".join(x["id"] for x in doc["tenants"]))
+')" ;; esac
+    [ -n "${targets// /}" ] || usage
+    for t in $targets; do
+      # register 会从容器日志里读**当前这次启动**打印的 token 再上报（旧 token 就这下换掉）
+      echo "==> $t：$(bin/mt.sh register "$t" 2>&1 | tail -1)"
+    done
+    echo
+    echo "复验（单租户）：bin/model-check.sh --tenant <租户> --user <用户名> --password '<口令>'"
+    echo "全量复验：bin/acceptance.sh | tail -3"
     ;;
   fix)
     targets="$*"
