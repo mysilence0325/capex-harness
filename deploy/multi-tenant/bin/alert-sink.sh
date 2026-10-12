@@ -25,7 +25,10 @@ ROOT="$PWD"
 
 CONTAINER="${MT_ALERT_SINK_CONTAINER:-dsh-alert-sink}"
 SINK_IMAGE="${MT_ALERT_SINK_IMAGE:-node:22-bookworm-slim}"
-SINK_NETWORK="${MT_ALERT_SINK_NETWORK:-capex-ai-lab_ops}"
+# 默认就用本部署自己的网络。以前这里写的是另一套栈的网络名（那是这台机器上的邻居），
+# 在没有那套栈的机器上"接收器"根本起不来 —— 而它跟 Alertmanager 同网只是为了让
+# Alertmanager 能按容器名找到它。
+SINK_NETWORK="${MT_ALERT_SINK_NETWORK:-${MT_NETWORK:-mt-net}}"
 # 固定的 MAC。Docker 结束点上的 MAC 不跟着 IP 变，而重建会重新分配 IP —— 实测
 # 出现过接收器与 Alertmanager 在同一张网络上 MAC 完全相同（都是 02:42:ac:19:00:02），
 # 网桥因此分不清两台：Alertmanager 的邻居表里接收器永远是 0x0（incomplete），
@@ -37,15 +40,30 @@ DATA_DIR="$ROOT/state/alerts"
 LOG_FILE="$DATA_DIR/alerts.jsonl"
 SINK_URL="http://${CONTAINER}:9110/alert"
 
+# Alertmanager 是这套链路里的**上游**，不是本部署的一部分：很多机器上根本没有它。
+# 有它就做端到端自检（投给 Alertmanager，看它转发过来），没有就直投接收器验证接收器
+# 自己 —— 两种都断言"落盘的新记录里带着本次告警名"，而不是只看条数。
+am_available() {
+  # 显式指定就用它；没指定时按默认名字探测。别把"没显式指定"当成"不存在"——
+  # 那样在 Alertmanager 就在本机的机器上也会走降级路径（自己踩过）。
+  # 这台机器没有 Alertmanager 时就是"探测不到"，自动降级；想在有的机器上强制走降级
+  # （自检用）就设 MT_ALERTMANAGER=none。
+  case "${MT_ALERTMANAGER:-}" in none|off|0|no) return 1 ;; esac
+  local name="${MT_ALERTMANAGER_CONTAINER:-$AM_CONTAINER}"
+  [ -n "$name" ] && docker inspect "$name" >/dev/null 2>&1
+}
+
 command="${1:-status}"
 
 case "$command" in
   up)
     [ -f alerts/sink.js ] || { echo "缺少 alerts/sink.js" >&2; exit 1; }
     if ! docker network inspect "$SINK_NETWORK" >/dev/null 2>&1; then
-      echo "找不到网络 $SINK_NETWORK —— 用 MT_ALERT_SINK_NETWORK 指定 Alertmanager 所在的网络" >&2
+      echo "找不到网络 $SINK_NETWORK —— 用 MT_ALERT_SINK_NETWORK 指定（默认是本部署的 MT_NETWORK）" >&2
       exit 1
     fi
+    # 先建目录：接收器与 test/status 都要写它，以前靠"up 成功过"来保证，于是 up 一失败
+    # 后面每条命令都跟着报"没有那个文件或目录"（实测）。
     mkdir -p "$DATA_DIR"
     touch "$LOG_FILE"
     chmod 640 "$LOG_FILE" 2>/dev/null || true
@@ -58,6 +76,12 @@ case "$command" in
     sleep 4
     echo "  $(docker ps --filter "name=$CONTAINER" --format '{{.Names}}  {{.Status}}')"
     echo "  日志: $(docker logs "$CONTAINER" 2>&1 | tail -1)"
+    if ! am_available; then
+      echo "==> 本机没有 Alertmanager（$AM_CONTAINER）：接收器只做落盘（state/alerts/alerts.jsonl）。"
+      echo "    等你们有告警平台时，用 MT_ALERTMANAGER_CONTAINER / MT_ALERTMANAGER_CONFIG 指过来，"
+      echo "    再 bin/alert-sink.sh wire 把 webhook 接上。"
+      exit 0
+    fi
     # 重建会换掉容器 IP。Alertmanager 可能还留着旧邻居表项，表现为它那边报
     # "no route to host" —— 看起来是告警发不出去，其实是收件人换了地址。
     # 它是别的栈的容器，所以先探一次，必要时重启它，并把做了什么说清楚。
@@ -92,6 +116,11 @@ case "$command" in
     ;;
 
   wire)
+    if ! am_available; then
+      echo "本机没有 Alertmanager（$AM_CONTAINER）：没有地方可写 webhook。" >&2
+      echo "用 MT_ALERTMANAGER_CONTAINER / MT_ALERTMANAGER_CONFIG 指向你们那台的容器与配置文件后再跑。" >&2
+      exit 1
+    fi
     [ -f "$AM_CONFIG" ] || { echo "找不到 $AM_CONFIG（用 MT_ALERTMANAGER_CONFIG 指定）" >&2; exit 1; }
     cp "$AM_CONFIG" "/tmp/alertmanager.yml.bak.$(date -u +%Y%m%dT%H%M%SZ)"
     echo "==> 已备份 $AM_CONFIG 到 /tmp"
@@ -143,19 +172,38 @@ PY
     ;;
 
   test)
+    mkdir -p "$DATA_DIR"
     touch "$LOG_FILE"
-    before="$(wc -l < "$LOG_FILE")"
+    before="$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)"
+    before="${before:-0}"
     # 告警名必须每次都不同。用固定名字的话，第二次之后的投递都会因为
     # group_interval（默认 5 分钟）被认为"同一组已经通知过"而不重发 ——
     # 自检会失败，但链路其实是好的（我这么误判过一次）。
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     echo "==> 投递前落盘条目: $before（本次告警名 DshDeliveryCheck-$stamp）"
-    docker exec "$AM_CONTAINER" wget -q -O - \
-      --post-data='[{"labels":{"alertname":"DshDeliveryCheck-'"$stamp"'","severity":"warning","instance":"self-test","job":"dsh-multitenant"},"annotations":{"summary":"告警投递自检","description":"验证 Alertmanager 能把告警投出去、接收器能收到。"},"startsAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}]' \
-      --header='Content-Type: application/json' http://127.0.0.1:9093/api/v2/alerts >/dev/null 2>&1
-    echo "  已投递，等 group_wait(30s) 与转发…"
-    sleep 60
-    after="$(wc -l < "$LOG_FILE")"
+    PAYLOAD='[{"labels":{"alertname":"DshDeliveryCheck-'"$stamp"'","severity":"warning","instance":"self-test","job":"dsh-multitenant"},"annotations":{"summary":"告警投递自检","description":"验证告警能投到接收器、接收器能收到。"},"startsAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}]'
+    if am_available; then
+      docker exec "$AM_CONTAINER" wget -q -O - \
+        --post-data="$PAYLOAD" \
+        --header='Content-Type: application/json' http://127.0.0.1:9093/api/v2/alerts >/dev/null 2>&1
+      echo "  经 Alertmanager（$AM_CONTAINER）投递，等 group_wait(30s) 与转发…"
+      sleep 60
+    else
+      # 没有 Alertmanager 就把同样的载荷直投接收器：验证的是接收器本身（它按 Alertmanager
+      # 的格式解析、逐条落盘）。以前这种情况会去 docker exec 一个不存在的容器，报一堆
+      # "No such container"，看着像链路坏了，其实只是这台机器没有那套监控。
+      SINK_IP="$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -m1 . || true)"
+      [ -n "$SINK_IP" ] || { echo "  ✗ 接收器容器 $CONTAINER 没在跑：先 bin/mt.sh alert-sink up" >&2; exit 1; }
+      # shellcheck disable=SC1091
+      [ -f bin/lib-http.sh ] && . bin/lib-http.sh
+      echo "  本机没有 Alertmanager：直投接收器 http://$SINK_IP:9110/alert"
+      CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        --data "$PAYLOAD" "http://$SINK_IP:9110/alert" 2>/dev/null || true)"
+      echo "  接收器应答: ${CODE:-无响应}"
+      sleep 2
+    fi
+    after="$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)"
+    after="${after:-0}"
     echo "  投递后落盘条目: $after"
     if [ "$after" -gt "$before" ]; then
       # 只看"条数变多"不够：接收器曾把 Alertmanager 的载荷当成单条告警解析，
@@ -177,9 +225,9 @@ print("yes" if want in names else "no")
         exit 1
       fi
     else
-      echo "  ✗ 没有新条目；看接收器与 Alertmanager 的日志:"
+      echo "  ✗ 没有新条目；看接收器的日志:"
       docker logs "$CONTAINER" 2>&1 | tail -3 | sed 's/^/    /'
-      docker logs "$AM_CONTAINER" 2>&1 | tail -3 | sed 's/^/    /'
+      am_available && docker logs "$AM_CONTAINER" 2>&1 | tail -3 | sed 's/^/    /'
       exit 1
     fi
     ;;
@@ -187,8 +235,13 @@ print("yes" if want in names else "no")
   status)
     echo "==> 接收器容器"
     docker ps -a --filter "name=$CONTAINER" --format '  {{.Names}}  {{.Status}}  (restart={{.Label "restart"}})' 2>/dev/null || true
-    echo "==> Alertmanager 的接收人"
-    docker exec "$AM_CONTAINER" sh -c 'grep -A6 "^receivers:" /etc/alertmanager/alertmanager.yml' 2>/dev/null | sed 's/^/  /' || echo "  （读不到配置）"
+    if am_available; then
+      echo "==> Alertmanager 的接收人（$AM_CONTAINER）"
+      docker exec "$AM_CONTAINER" sh -c 'grep -A6 "^receivers:" /etc/alertmanager/alertmanager.yml' 2>/dev/null | sed 's/^/  /' || echo "  （读不到配置）"
+    else
+      echo "==> 本机没有 Alertmanager（$AM_CONTAINER）：接收器只做落盘，没有上游把告警投给它。"
+      echo "    要用端到端链路：MT_ALERTMANAGER_CONTAINER / MT_ALERTMANAGER_CONFIG 指向你们那台，再 wire。"
+    fi
     echo "==> 收到的告警"
     if [ -s "$LOG_FILE" ]; then
       echo "  共 $(wc -l < "$LOG_FILE") 条，最近 3 条："
