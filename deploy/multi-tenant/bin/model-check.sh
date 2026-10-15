@@ -48,9 +48,28 @@ rpc() { docker run --rm --network host -v "$ROOT:/w" -w /w "$NODE_IMAGE" node bi
   --base "http://127.0.0.1:${PORT}" --jar /w/.model-check-jar "$@"; }
 
 echo "== 1. 登录 $TENANT/$USER =="
-curl -sS -o /dev/null -c "$JAR" --data-urlencode "user=$USER" --data-urlencode "password=$PASSWORD" "$BASE/__mt/login"
+LOGIN_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -c "$JAR" \
+  --data-urlencode "user=$USER" --data-urlencode "password=$PASSWORD" "$BASE/__mt/login")"
+# 303 才是登录成功；401 口令不对、429 被限流。以前这一步只检查"jar 文件非空"，
+# 而替身写出的 jar 只有文件头也算非空 —— 于是登录没成也会打印 ok，等到第 2 步以
+# 303 的形式暴露，看起来像租户坏了。当场把状态码和复位办法说清楚。
+if [ "$LOGIN_CODE" != "303" ]; then
+  echo "  登录失败（HTTP ${LOGIN_CODE:-无响应}）：$(
+    case "$LOGIN_CODE" in
+      401) echo "口令不对（用户 $USER）" ;;
+      429) echo "登录被限流：等 10 分钟，或 docker restart ${MT_CONTAINER_NAME_PREFIX:-mt-}gateway 后只跑一次" ;;
+      *) echo "网关没按预期应答（bin/mt.sh logs gateway）" ;;
+    esac
+  )" >&2
+  rm -f "$JAR"
+  exit 1
+fi
 curl -sS -o /dev/null -b "$JAR" -c "$JAR" "$BASE/"
-[ -s "$JAR" ] || { echo "  登录失败" >&2; exit 1; }
+if ! grep -q 'mt_session' "$JAR" 2>/dev/null; then
+  echo "  登录返回 303 但会话 cookie 没进 jar（$JAR）：网关那边看 bin/mt.sh logs gateway" >&2
+  rm -f "$JAR"
+  exit 1
+fi
 echo "  ok"
 
 echo
