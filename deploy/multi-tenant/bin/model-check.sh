@@ -55,7 +55,24 @@ echo "  ok"
 
 echo
 echo "== 2. 该租户可用的模型 =="
-CATALOG="$(rpc --method session/modelCatalog 2>/dev/null)"
+CATALOG="$(rpc --method session/modelCatalog 2>/tmp/.model-check-rpc.err)"; RPC_RC=$?
+# 拿不到目录 ≠ "provider 加载失败"。以前两种情况共用一句"有 provider 加载失败："，把
+# "没登录上/cookie 没带上"和"控制面到租户那一跳挂了"混成同一个原因，害人多查一轮。
+# 这里先把原始返回与退出码打出来，再谈 provider。
+if [ "$RPC_RC" != 0 ] || ! printf '%s' "$CATALOG" | grep -q '"routableProviders"'; then
+  echo "  !! 没拿到模型目录（rpc.js 退出码 $RPC_RC）——原始返回前 300 字："
+  printf '%s' "$CATALOG" | head -c 300 | sed 's/^/     /'; echo
+  if [ -s /tmp/.model-check-rpc.err ]; then
+    echo "     rpc.js stderr："; head -c 300 /tmp/.model-check-rpc.err | sed 's/^/     /'; echo
+  fi
+  rm -f /tmp/.model-check-rpc.err
+  echo "     对照判断：" >&2
+  echo "       · 返回里是登录页/303 → 这个租户的登录没成（口令不对，或登录被限流 429）" >&2
+  echo "       · 返回为空且退出码非 0 → 控制面到租户那一跳没通：docker logs --tail 30 ${MT_CONTAINER_NAME_PREFIX:-mt-}node-agent" >&2
+  echo "       · 返回是 {\"error\":…} → 把那一行发出来" >&2
+  rm -f "$JAR"; exit 1
+fi
+rm -f /tmp/.model-check-rpc.err
 printf '%s\n' "$CATALOG" | tr ',' '\n' | grep -oE '"(provider|model)":"[^"]*"' | sed 's/"//g; s/^/  /' | head -12
 echo "$CATALOG" | grep -q '"failures":\[\]' && echo "  （无 provider 失败）" || echo "  !! 有 provider 加载失败：$(printf '%s' "$CATALOG" | grep -o '"failures":\[[^]]*\]' | head -c 200)"
 
