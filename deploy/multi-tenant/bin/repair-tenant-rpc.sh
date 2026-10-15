@@ -34,6 +34,15 @@ print("" if t is None else str(t.get(sys.argv[2], "") or ""))
 ' "$1" "$2"
 }
 
+# 这个租户的运行时是不是在本机。远端租户由它那台的代理上报，本机去 register 只会
+# 因为本地没有对应容器而报"没有网络地址"——白噪声，而且会让人以为有故障。
+is_local() { # $1 = 租户
+  local node
+  node="$(field "$1" node)"
+  [ -n "$node" ] || node=local
+  [ "$node" = "${MT_NODE_NAME:-local}" ]
+}
+
 probe() { # RPC 探针：问一次模型目录。答话就是好的。
   local t="$1" pw user out
   user="$(python3 -c '
@@ -89,6 +98,7 @@ print(" ".join(x["id"] for x in doc["tenants"]))
 ')" ;; esac
     [ -n "${targets// /}" ] || usage
     for t in $targets; do
+      if ! is_local "$t"; then echo "==> $t：运行时在节点 $(field "$t" node)，本机跳过"; continue; fi
       # register 会从容器日志里读**当前这次启动**打印的 token 再上报（旧 token 就这下换掉）
       echo "==> $t：$(bin/mt.sh register "$t" 2>&1 | tail -1)"
     done
@@ -107,6 +117,7 @@ print(" ".join(x["id"] for x in doc["tenants"]))
     for t in $targets; do
       c="$PREFIX""dsh-$t"
       service="$(field "$t" service)"; [ -n "$service" ] || service="dsh-$t"
+      if ! is_local "$t"; then echo "!! $t：运行时在节点 $(field "$t" node)，本机不重建（到那台机器上跑本脚本）" >&2; continue; fi
       docker inspect "$c" >/dev/null 2>&1 || { echo "!! $t：容器 $c 不存在，先 bin/mt.sh up" >&2; continue; }
       echo "==> $t：强制重建 $service（home/workspace 是挂载卷，不会丢）"
       "${COMPOSE[@]}" up -d --force-recreate --no-deps "$service" >/dev/null 2>&1 \
