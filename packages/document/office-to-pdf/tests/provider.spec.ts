@@ -236,6 +236,16 @@ it('rejects caller cancellation before allocating any conversion resources', asy
   expect(kit.create).not.toHaveBeenCalled()
 })
 
+it('prewarms and reuses one converter without rendering a source', async () => {
+  const provider = await mount({ maxConcurrentConversions: 1 })
+  await provider.prewarm(new AbortController().signal)
+  expect(kit.create).toHaveBeenCalledOnce()
+  expect(render).not.toHaveBeenCalled()
+  await provider.convert(request)
+  expect(kit.create).toHaveBeenCalledOnce()
+  expect(render).toHaveBeenCalledOnce()
+})
+
 it('rejects relative font directories during provider configuration', async () => {
   expect(() => new OfficeToPdf(ctx, Config({ fontDirectories: ['relative/fonts'] })))
     .toThrow('fontDirectories must contain absolute paths')

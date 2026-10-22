@@ -32,6 +32,16 @@ type RuntimePlatformManifest = Record<string, RuntimePlatform>
 
 const AGENT_PRESET_GLOB = 'packages/bundle/web-app/presets/*.patch.yml'
 
+/**
+ * Package globs whose manifests the closure traversal can reach. `apps/*`
+ * carries the shipped CLI, so every package the application pulls in must be
+ * subject to the same peer rules as the packages it composes.
+ */
+const WORKSPACE_PACKAGE_GLOBS = ['packages/*/*/package.json', 'apps/*/package.json', 'vendor/*/package.json'] as const
+
+/** Key of the runtime manifest's own dependency set in the provider index. */
+const RUNTIME_ROOT = '<runtime-manifest>'
+
 export interface RuntimeClosureResult {
   failures: string[]
   presetCount: number
@@ -42,20 +52,23 @@ export interface RuntimeClosureResult {
  * Check that the runtime manifest contains every shipped-preset plugin and workspace peer.
  * @param root repository root containing the runtime manifest and shipped presets.
  * @param manifestPath runtime manifest path relative to {@link root}.
+ * @param includePresets whether this carrier includes the shipped application presets.
  * @returns the discovered preset count, reachable workspace package count, and violations.
  */
 export async function verifyRuntimeClosure(
   root: string,
   manifestPath = 'python/sdk-runtime/package.json',
+  includePresets = true,
 ): Promise<RuntimeClosureResult> {
   const runtimeManifest = await loadManifest(resolve(root, manifestPath))
   const runtimeName = runtimeManifest.name ?? manifestPath
   const workspace = await loadWorkspacePackages(root)
   const runtimeDependencies = runtimeManifest.dependencies ?? {}
-  const platforms = await loadJson<RuntimePlatformManifest>(resolve(root, 'python/sdk-runtime/platforms.json'))
-  const presetPaths = globSync(AGENT_PRESET_GLOB, { cwd: root }).sort()
+  const platforms = includePresets ? await loadJson<RuntimePlatformManifest>(resolve(root, 'python/sdk-runtime/platforms.json')) : {}
+  const presetPaths = includePresets ? globSync(AGENT_PRESET_GLOB, { cwd: root }).sort() : []
   const targets = Object.keys(platforms).sort()
   const parents = new Map<string, string | undefined>()
+  const dependents = new Map<string, Set<string>>()
   const queue: string[] = []
 
   for (const dependency of Object.keys(runtimeDependencies).sort()) {
@@ -65,29 +78,71 @@ export async function verifyRuntimeClosure(
   }
 
   const failures: string[] = []
-  if (presetPaths.length === 0) failures.push(`no agent presets matched ${AGENT_PRESET_GLOB}`)
-  if (targets.length === 0) failures.push('python/sdk-runtime/platforms.json defines no runtime targets')
+  if (includePresets && presetPaths.length === 0) failures.push(`no agent presets matched ${AGENT_PRESET_GLOB}`)
+  if (includePresets && targets.length === 0) failures.push('python/sdk-runtime/platforms.json defines no runtime targets')
   failures.push(...await missingPresetPlugins(root, runtimeDependencies, presetPaths, targets))
   for (let index = 0; index < queue.length; index += 1) {
     const packageName = queue[index]
     if (packageName === undefined) continue
     const current = workspace.get(packageName)
     if (current === undefined) continue
-    const peers = current.manifest.peerDependencies ?? {}
-    const peerMeta = current.manifest.peerDependenciesMeta ?? {}
-    for (const peer of Object.keys(peers).sort()) {
-      if (!workspace.has(peer) || peerMeta[peer]?.optional === true) continue
-      if (runtimeDependencies[peer]?.startsWith('workspace:') === true) continue
-      failures.push(`${formatChain(runtimeName, packageName, parents)} -> ${peer}`)
-    }
     const dependencies = {
       ...current.manifest.dependencies,
       ...current.manifest.optionalDependencies,
     }
     for (const dependency of Object.keys(dependencies).sort()) {
-      if (!workspace.has(dependency) || parents.has(dependency)) continue
-      parents.set(dependency, packageName)
-      queue.push(dependency)
+      if (!workspace.has(dependency)) continue
+      if (!parents.has(dependency)) {
+        parents.set(dependency, packageName)
+        queue.push(dependency)
+      }
+      const recorded = dependents.get(dependency)
+      if (recorded === undefined) dependents.set(dependency, new Set([packageName]))
+      else recorded.add(packageName)
+    }
+  }
+
+  // A peer needs no flat placement at the runtime root: Node reaches it from the
+  // requiring package itself or from any package on the path that pulls that
+  // package in, because the deploy nests each package's dependencies beside it.
+  // The check therefore requires a provider, not a particular location.
+  const providedBy = (provider: string): ReadonlySet<string> => {
+    if (provider === RUNTIME_ROOT) return new Set(Object.keys(runtimeDependencies))
+    const manifest = workspace.get(provider)?.manifest
+    if (manifest === undefined) return new Set()
+    return new Set([...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.optionalDependencies ?? {})])
+  }
+  const providersOf = (packageName: string): ReadonlySet<string> => {
+    // The requiring package resolves its own dependencies first, so it is a
+    // provider for itself before any ancestor on the path is considered.
+    const providers = new Set<string>([RUNTIME_ROOT, packageName])
+    const pending = [packageName]
+    while (pending.length > 0) {
+      const current = pending.pop()
+      if (current === undefined) continue
+      for (const dependent of dependents.get(current) ?? []) {
+        if (providers.has(dependent)) continue
+        providers.add(dependent)
+        pending.push(dependent)
+      }
+    }
+    return providers
+  }
+
+  for (const packageName of [...parents.keys()].sort()) {
+    const current = workspace.get(packageName)
+    if (current === undefined) continue
+    const peers = current.manifest.peerDependencies ?? {}
+    const peerMeta = current.manifest.peerDependenciesMeta ?? {}
+    for (const peer of Object.keys(peers).sort()) {
+      if (!workspace.has(peer) || peerMeta[peer]?.optional === true) continue
+      let provided = false
+      for (const provider of providersOf(packageName)) {
+        if (!providedBy(provider).has(peer)) continue
+        provided = true
+        break
+      }
+      if (!provided) failures.push(`${formatChain(runtimeName, packageName, parents)} -> ${peer}`)
     }
   }
 
@@ -201,7 +256,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function loadWorkspacePackages(root: string): Promise<Map<string, WorkspacePackage>> {
-  const paths = globSync(['packages/*/*/package.json', 'vendor/*/package.json'], { cwd: root })
+  const paths = globSync([...WORKSPACE_PACKAGE_GLOBS], { cwd: root })
     .sort()
     .map(relative => resolve(root, relative))
   const result = new Map<string, WorkspacePackage>()

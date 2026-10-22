@@ -258,8 +258,6 @@ export function TabStrip({ state, pane, callbacks }: TabPanelProps): ReactNode {
                 <div
                   className={clsx(css.slot, stripIndex === index && css.slotCaret)}
                   data-dockkit-caret={stripIndex === index ? index : undefined}
-                  // This slot precedes the chip drawn by the same iteration.
-                  data-next-tab-active={selected || undefined}
                 />
               )}
               <div

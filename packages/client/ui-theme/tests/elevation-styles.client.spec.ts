@@ -56,16 +56,18 @@ describe('elevation tokens', () => {
     }
   })
 
-  it('defines the translucent menu material for both palettes', () => {
+  it('defines an opaque menu material for both palettes', () => {
     expect(bodyOnly.get('--dsw-mask-blur')).toBe('none')
-    expect(bodyOnly.get('--dsw-menu-backdrop-filter')).toBe('blur(40px) saturate(150%)')
+    // Chromium 102 composites a translucent backdrop-filter layer against an
+    // empty backdrop, so the shared menu filter is off and fills stay opaque.
+    expect(bodyOnly.get('--dsw-menu-backdrop-filter')).toBe('none')
     const platformRules = parseRules(platformCss)
     const value = (selector: string, token = '--dsw-menu-surface-fill'): string | undefined => platformRules
       .filter(rule => rule.selectors.includes(selector))
       .flatMap(rule => rule.declarations)
       .findLast(([property]) => property === token)?.[1]
-    expect(value('body')).toBe('rgba(248, 249, 250, 0.58)')
-    expect(value('body[data-ds-dark-theme]')).toBe('rgba(67, 69, 74, 0.45)')
+    expect(value('body')).toBe('var(--dsw-static-neutral-bluish-50)')
+    expect(value('body[data-ds-dark-theme]')).toBe('var(--dsw-static-neutral-bluish-800)')
     expect(value('body', '--dsw-specific-menu')).toBe('var(--dsw-menu-surface-fill)')
     expect(value("html[data-platform='darwin'] body", '--dsw-specific-menu')).toBe('rgba(248, 249, 250, 0.94)')
     expect(value("html[data-platform='darwin'] body[data-ds-dark-theme]", '--dsw-specific-menu')).toBe('rgba(48, 49, 54, 0.94)')

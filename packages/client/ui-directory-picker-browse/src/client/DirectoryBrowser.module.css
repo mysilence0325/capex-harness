@@ -4,6 +4,7 @@
  * instead of clipping them below a fixed overlay. */
 .dialog.dialog {
   width: min(680px, 100%);
+  height: min(500px, calc(100vh - 32px));
   height: min(500px, calc(100dvh - 32px));
   padding: 0;
   gap: 0;
@@ -62,8 +63,9 @@
 
 /* Lit by the affordance the row belongs to, never by a crumb: a crumb's hover
  * offers navigation, not path entry. Editing keeps the outline standing. */
-.crumbBar[data-affordance],
-.crumbBar[data-editing] {
+.crumbBar:has(.crumbEditZone:enabled:hover),
+.crumbBar:has(.crumbEditZone:focus-visible),
+.crumbBar:has(.pathInput) {
   border-color: var(--dsw-alias-border-l2);
 }
 

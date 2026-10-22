@@ -34,11 +34,66 @@ function workspace(root: string, name: string, manifest: Record<string, unknown>
   writeFileSync(path, `${JSON.stringify({ name, ...manifest }, null, 2)}\n`)
 }
 
+function application(root: string, name: string, manifest: Record<string, unknown>): void {
+  const packageName = name.replace('@scope/', '')
+  const path = join(root, 'apps', packageName, 'package.json')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify({ name, ...manifest }, null, 2)}\n`)
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
 describe('verifyRuntimeClosure', () => {
+  it('checks a private worker closure without requiring application presets', async () => {
+    const manifestPath = 'packages/ssh/ssh-helper-runtime/package.json'
+    const root = fixture({ [manifestPath]: { name: 'helper', dependencies: { '@scope/worker': 'workspace:^' } } })
+    workspace(root, '@scope/worker', { peerDependencies: { '@scope/peer': 'workspace:^' } })
+    workspace(root, '@scope/peer', {})
+    expect((await verifyRuntimeClosure(root, manifestPath, false)).failures).toEqual(['helper -> @scope/worker -> @scope/peer'])
+    writeFileSync(join(root, manifestPath), JSON.stringify({ name: 'helper', dependencies: { '@scope/worker': 'workspace:^', '@scope/peer': 'workspace:^' } }))
+    expect(await verifyRuntimeClosure(root, manifestPath, false)).toMatchObject({ failures: [], presetCount: 0 })
+  })
+
+  it('accepts a required peer that any ancestor on the resolution path provides', async () => {
+    const manifestPath = 'python/sdk-runtime/package.json'
+    const root = fixture({ [manifestPath]: { name: 'runtime', dependencies: { '@scope/app': 'workspace:^' } } })
+    application(root, '@scope/app', { dependencies: { '@scope/controller': 'workspace:^', '@scope/picker': 'workspace:^' } })
+    workspace(root, '@scope/controller', { peerDependencies: { '@scope/picker': 'workspace:^' } })
+    workspace(root, '@scope/picker', {})
+
+    expect(await verifyRuntimeClosure(root, manifestPath, false)).toMatchObject({ failures: [] })
+  })
+
+  it('reports a required peer that nothing on the resolution path provides', async () => {
+    const manifestPath = 'python/sdk-runtime/package.json'
+    const root = fixture({ [manifestPath]: { name: 'runtime', dependencies: { '@scope/app': 'workspace:^' } } })
+    application(root, '@scope/app', { dependencies: { '@scope/controller': 'workspace:^' } })
+    workspace(root, '@scope/controller', { peerDependencies: { '@scope/picker': 'workspace:^' } })
+    workspace(root, '@scope/picker', {})
+
+    expect((await verifyRuntimeClosure(root, manifestPath, false)).failures)
+      .toEqual(['runtime -> @scope/app -> @scope/controller -> @scope/picker'])
+  })
+
+  it('traverses packages that only the shipped application reaches', async () => {
+    const manifestPath = 'python/sdk-runtime/package.json'
+    const root = fixture({ [manifestPath]: { name: 'runtime', dependencies: { '@scope/app': 'workspace:^' } } })
+    application(root, '@scope/app', { dependencies: { '@scope/controller': 'workspace:^' } })
+    workspace(root, '@scope/controller', { peerDependencies: { '@scope/picker': 'workspace:^' } })
+    workspace(root, '@scope/picker', {})
+
+    expect((await verifyRuntimeClosure(root, manifestPath, false)).failures)
+      .toEqual(['runtime -> @scope/app -> @scope/controller -> @scope/picker'])
+    writeFileSync(join(root, manifestPath), JSON.stringify({
+      name: 'runtime',
+      dependencies: { '@scope/app': 'workspace:^', '@scope/picker': 'workspace:^' },
+    }))
+    expect(await verifyRuntimeClosure(root, manifestPath, false))
+      .toMatchObject({ failures: [], workspacePackageCount: 3 })
+  })
+
   it('requires only plugins active for each published target', async () => {
     const root = fixture({
       'python/sdk-runtime/package.json': { name: 'runtime', dependencies: { '@scope/shared': 'workspace:^' } },

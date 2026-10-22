@@ -84,6 +84,12 @@
   justify-content: center;
 }
 
+/* The symbol's ink reaches higher above its box than the headline's ideographs
+   do above theirs, so a box-centered mark reads high; this matches the two. */
+.fallbackMark {
+  transform: translateY(1.5px);
+}
+
 /* The swim morph's curves poke slightly past the viewBox edges, so clipping
    would slice the tail mid-wag. The hero mark stays in the same primary ink
    as its headline. */

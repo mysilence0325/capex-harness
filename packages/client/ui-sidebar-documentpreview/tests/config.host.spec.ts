@@ -8,7 +8,7 @@ import * as host from '../src/index.ts'
 it('exposes Client cache and spreadsheet limits on the Host entry', () => {
   expect(host.Config).toBe(Config)
   expect(Config({})).toEqual({ office: {
-    maxCachedEntries: 8, maxCachedBytes: 64 * 1024 * 1024, maxPending: 8, maxReaders: 32,
+    maxCachedEntries: 8, maxCachedBytes: 64 * 1024 * 1024, maxPending: 8, maxReaders: 32, prewarmOnIdle: false,
   }, excel: { maxBytes: 16 * 1024 * 1024, maxCells: 250_000, timeoutMs: 15_000 } })
   for (const key of ['maxCachedEntries', 'maxCachedBytes']) expect(() => Config({ office: { [key]: 0 } })).toThrow()
   for (const key of ['maxBytes', 'maxCells', 'timeoutMs']) expect(() => Config({ excel: { [key]: 0 } })).toThrow()

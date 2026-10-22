@@ -22,6 +22,7 @@ import type { ConnectionIndicatorState } from '@deepseek-ai/dsh-client-ui-primit
 import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
 import css from './SettingsRoot.module.css'
 import { DesktopUpdateIndicator } from './DesktopUpdateIndicator.tsx'
+import { readLocalIdentity } from './local-identity.ts'
 
 const RECOVERY_CONFIRMATION_MS = 2_000
 
@@ -122,6 +123,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
   const [showRecovery, setShowRecovery] = useState(false)
   const [holdConnecting, setHoldConnecting] = useState(false)
   const connectingShownAt = useRef<number | undefined>(undefined)
+  const localIdentity = readLocalIdentity()
 
   // The ledger tick keeps the nav rows fresh: registrants re-register with
   // freshly localized text on locale change, and the trigger/header/close
@@ -218,17 +220,32 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
           wide, settingsOpen: open, openSettings: actions.open,
           ...(shortcut?.keys.length ? { settingsShortcut: { keys: shortcut.keys, aria: shortcut.aria } } : {}),
           openOnboarding: (id) => { close(); setRequestedOnboarding(id) },
-        }, { fallback: <Tooltip disabled={open} label={t('trigger')} shortcutKeys={shortcut?.keys}>
+        }, { fallback: <Tooltip disabled={open}
+          label={localIdentity === undefined
+            ? t('trigger')
+            : localIdentity.login === localIdentity.displayName
+              ? t('localUser.openSettings', { name: localIdentity.displayName })
+              : t('localUser.openIdentitySettings', {
+                name: localIdentity.displayName,
+                login: localIdentity.login,
+              })}
+          shortcutKeys={shortcut?.keys}>
           <button
             type="button"
-            className={clsx(css.trigger, !wide && css.rail)}
-            aria-label={t('trigger')}
+            className={clsx(css.trigger, !wide && css.rail, localIdentity !== undefined && css.localIdentityTrigger)}
+            aria-label={localIdentity === undefined
+              ? t('trigger')
+              : t('localUser.openSettings', { name: localIdentity.displayName })}
             aria-keyshortcuts={shortcut?.aria}
             aria-haspopup="dialog"
             aria-expanded={open}
             onClick={() => { actions.open() }}
           >
-            {renderSlot('settings.trigger', { wide })}
+            {localIdentity === undefined
+              ? renderSlot('settings.trigger', { wide })
+              : wide
+                ? <span className={css.identityLabel}>{localIdentity.displayName}</span>
+                : <IconSettingsOutlineMedium size={18} />}
           </button>
         </Tooltip> })}
         <ConnectionIndicator

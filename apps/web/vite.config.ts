@@ -5,10 +5,8 @@ import { defineConfig } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { clientBuildEnvironmentDefines } from '../../scripts/client-build-environment.ts'
-import {
-  CLIENT_SCRIPT_TARGET, CLIENT_STYLE_TARGETS, downlevelClientCss, loadClientThemeTokens,
-} from '../../scripts/client-browser-floor.ts'
 import { productWebBundleIsolation } from './product-isolation.ts'
+import { katexWoff2Fonts } from './katex-fonts.ts'
 
 const src = (rel: string): string => fileURLToPath(new URL(rel, import.meta.url))
 const STANDALONE_ERROR = 'apps/web is not a standalone application: bare Vite cannot inject window.__DSH_BOOT__. '
@@ -42,28 +40,6 @@ function brandFontLicense(): Plugin {
         fileName: 'assets/fonts/Montserrat-OFL.txt',
         source: await readFile(src('../../packages/client/ui-theme/src/styles/Montserrat-OFL.txt')),
       })
-    },
-  }
-}
-
-/**
- * Rewrite the stylesheet features the browser floor has no compiler lowering
- * for — color-mix() with custom-property operands and the dynamic viewport
- * units — before Vite's own CSS pipeline sees the sheet. Lightning CSS then
- * handles prefixes, nesting, and minification for the same target.
- */
-function clientBrowserFloor(): Plugin {
-  const tokens = loadClientThemeTokens(src('../..'))
-  return {
-    name: 'dsh-client-browser-floor',
-    enforce: 'pre',
-    transform(code, id) {
-      const [file] = id.split('?')
-      if (file === undefined || !file.endsWith('.css')) return null
-      // A token edit changes every sheet that mixes it.
-      for (const sheet of tokens.files) this.addWatchFile(sheet)
-      const lowered = downlevelClientCss(code, tokens)
-      return lowered === code ? null : { code: lowered, map: null }
     },
   }
 }
@@ -174,7 +150,7 @@ const BOOT_GRAMMAR_FILES: readonly string[] = [
   'dist/json.mjs',
 ]
 
-/** Font asset extensions routed to assets/fonts/ (KaTeX's woff2/woff/ttf faces). */
+/** Font asset extensions routed to assets/fonts/. */
 const FONT_EXTENSIONS: readonly string[] = ['.woff2', '.woff', '.ttf']
 
 /**
@@ -195,22 +171,15 @@ export default defineConfig({
   // directory, and the served index resolves identically from the site root.
   base: './',
   plugins: [
-    clientBrowserFloor(), rejectStandaloneServe(), clientDocumentTitle(), brandFontLicense(), react(),
-    emitPreviewPage(), productWebBundleIsolation(src('../..'), src('.')),
+    rejectStandaloneServe(), clientDocumentTitle(), brandFontLicense(), katexWoff2Fonts(), react(), emitPreviewPage(),
+    productWebBundleIsolation(src('../..'), src('.')),
   ],
-  css: {
-    // The shell's stylesheets compile through the same compiler the dynamic
-    // plugin bundles use, at the same target, so one set of vendor prefixes and
-    // minification rules covers both artifacts. Vite's default PostCSS pipeline
-    // adds neither prefixes nor a target.
-    transformer: 'lightningcss',
-    lightningcss: { targets: CLIENT_STYLE_TARGETS },
-  },
   build: {
-    // The browser floor's script target. The worker bootstrap's top-level await
-    // is inside it, and nothing newer reaches an artifact.
-    target: CLIENT_SCRIPT_TARGET,
-    cssTarget: CLIENT_SCRIPT_TARGET,
+    // The worker bootstrap holds its page at top-level await; Vite's default
+    // `modules` target (es2020-era) rejects that syntax.
+    // Chromium 102 is the deployed shell, so nothing newer may be emitted.
+    target: process.env.DSH_CLIENT_TARGET ?? 'chrome102',
+    cssTarget: 'chrome102',
     sourcemap: true,
     rollupOptions: {
       input: {

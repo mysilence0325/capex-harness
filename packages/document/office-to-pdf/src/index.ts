@@ -174,6 +174,34 @@ export class OfficeToPdf extends TypertRemoteService {
   @Remote('generation')
   getGeneration(signal: AbortSignal): OfficeToPdfGeneration { signal.throwIfAborted(); return this.generation }
 
+  /**
+   * Initialize one converter without reading or converting a document.
+   * @param signal - caller cancellation before or during engine initialization.
+   * @returns after a reusable converter is ready or initialization fails.
+   */
+  @Remote('prewarm')
+  async prewarm(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
+    let slot = this.slots.find(candidate => !candidate.busy)
+    if (slot === undefined) {
+      slot = { busy: false }
+      this.slots.push(slot)
+    }
+    slot.busy = true
+    try {
+      slot.converter ??= createConverter(this.options).catch((error: unknown) => {
+        delete slot.converter
+        throw error
+      })
+      await Promise.race([slot.converter, new Promise<never>((_resolve, reject) => {
+        signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+      })])
+      signal.throwIfAborted()
+    } finally {
+      slot.busy = false
+    }
+  }
+
   private async renderFile(
     scope: WorkspaceFileScope, path: string, priority: OfficeToPdfPriority, signal: AbortSignal,
   ): Promise<RenderedDocumentBytes> {

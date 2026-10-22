@@ -5,9 +5,7 @@ import type {} from '../index.ts'
 import { CodeBody } from './CodeBody.tsx'
 import { en, zh } from './locales.ts'
 
-/** Code metadata and keyed body share this package-local implementation identity. */
-export const CODE_BODY_ID = '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/code'
-const ID = CODE_BODY_ID
+const ID = '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/code'
 const NS = 'sidebarCodePreview'
 
 /** @param ctx - owning plugin context. Register localized metadata and the matching keyed document body. */

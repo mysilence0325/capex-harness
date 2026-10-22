@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const SESSION = 'two-process-lease'
 
@@ -49,6 +49,8 @@ describe('two-process write lock (built lib)', () => {
 
       // Excluded while the other process's descriptor holds the kernel lock.
       await expect(mine.open(SessionId(SESSION), 'write')).rejects.toBeInstanceOf(SessionAlreadyOwnedError)
+      await expect(mine.relocate(SessionId(SESSION), join(root, 'trash', 'session')))
+        .rejects.toMatchObject({ code: 'active' })
       // Reads are unaffected across processes.
       const reader = await mine.open(SessionId(SESSION), 'read')
       expect((await reader.read()).events.map(event => event.seq)).toEqual([0, 1])

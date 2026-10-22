@@ -3,6 +3,7 @@
 const VIEWER_STYLE = `
   [data-preview-text-viewer] {
     width: min(960px, calc(100vw - 32px));
+    height: min(720px, calc(100vh - 32px));
     height: min(720px, calc(100dvh - 32px));
     padding: 0;
     box-sizing: border-box;

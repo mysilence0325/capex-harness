@@ -2,13 +2,13 @@
 import type { GlobalStandardProps, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createContext, useContext, type ReactNode } from 'react'
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionListState, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceSnapshot, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import {
-  bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot as sessionFixture,
+  allowAllAccess, bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot as sessionFixture,
 } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
@@ -80,21 +80,6 @@ class ResizeObserverStub {
 function fireResize(el: Element): void {
   for (const entry of resizeObservers) {
     if (entry.targets.includes(el)) entry.callback([], undefined as never)
-  }
-}
-
-/** Fires every recorded observer watching the element with one content-box width. */
-function fireResizeWidth(el: Element, width: number): void {
-  const size: ResizeObserverSize = { blockSize: 0, inlineSize: width }
-  for (const entry of resizeObservers) {
-    if (!entry.targets.includes(el)) continue
-    entry.callback([{
-      target: el,
-      contentRect: new DOMRectReadOnly(0, 0, width, 0),
-      borderBoxSize: [size],
-      contentBoxSize: [size],
-      devicePixelContentBoxSize: [size],
-    }], undefined as never)
   }
 }
 
@@ -193,6 +178,7 @@ function mount(
   const store = createConversationStore().create()
   store.actions.setDraft('ordinary draft')
   const { wiring, sink } = fakeWiring()
+  wiring.setDraft(store.store.getSnapshot().draft)
   const useInput = bindSnapshotSelector(wiring.state)
   const inputActions = wiring.actions
   const stop = vi.fn()
@@ -237,6 +223,7 @@ function mount(
           useSessionStatus={useSessionStatus}
           useSessionRetainInfo={() => undefined}
           useWorkspaces={props.useWorkspaces}
+          {...allowAllAccess}
           useProjection={(() => undefined)}
           useInput={useInput}
           inputActions={inputActions}
@@ -266,13 +253,14 @@ function mount(
           useSessionStatus={useSessionStatus}
           useSessionRetainInfo={() => undefined}
           useWorkspaces={props.useWorkspaces}
+          {...allowAllAccess}
           useProjection={(() => undefined)}
           useInput={useInput}
           inputActions={inputActions}
           useStore={bindSnapshotSelector(store)}
           actions={store.actions}
           renderSlot={renderSlot as never}
-          bindDraftMirror={write => wiring.bindMirror(write)}
+          bindDraftPersistence={write => wiring.bindDraftPersistence(write)}
           openView={(view, focus) => { store.actions.openView(view, focus) }}
         />
       )
@@ -293,6 +281,7 @@ function mount(
           useSessionStatus={useSessionStatus}
           useSessionRetainInfo={() => undefined}
           useWorkspaces={props.useWorkspaces}
+          {...allowAllAccess}
           useProjection={(() => undefined)}
           useInput={useInput}
           inputActions={inputActions}
@@ -351,6 +340,7 @@ function mount(
       useSessionStatus,
       useSessionRetainInfo: () => undefined,
       useWorkspaces: bindSnapshotSelector(workspaces),
+      ...allowAllAccess,
       useProjection: (() => undefined),
       useComposerBlock: select => select(options.composerBlock),
       useInput,
@@ -381,6 +371,7 @@ function mount(
     useSessionRetainInfo: () => undefined,
     useResource,
     useWorkspaces: bindSnapshotSelector(workspaces),
+    ...allowAllAccess,
     useProjection: (() => undefined),
     useInput,
     inputActions,
@@ -395,11 +386,11 @@ function mount(
 }
 
 describe('Hero chrome', () => {
-  it('renders the English preview badge through the hero locale seat', () => {
+  it('renders the English hero headline without a preview badge', () => {
     const renderSlot = vi.fn<HeroShellProps['renderSlot']>(() => null)
     const view = render(<HeroShell t={makeTranslate(en, commonEn)} renderSlot={renderSlot} />)
     expect(view.getByText('Into the Unknown')).toBeTruthy()
-    expect(view.getByText('Preview')).toBeTruthy()
+    expect(view.queryByText('Preview')).toBeNull()
     expect(renderSlot).toHaveBeenCalledOnce()
     expect(renderSlot.mock.calls[0]?.[0]).toBe('conversation.hero.brand.mark')
     const brandMarkOwner = renderSlot.mock.calls[0]?.[1]
@@ -420,35 +411,6 @@ describe('ConversationRoot resident composer', () => {
     expect(b.slotCalls).not.toContain('conversation.session.header')
     expect(b.view.queryByRole('tablist')).toBeNull()
     expect(b.view.queryByTestId('view-conversation.session.header.corner')).toBeNull()
-  })
-
-  it('marks the title row holding the header slots at both occupant widths', () => {
-    const b = mount(sessionSnapshotOf())
-    const row = b.view.container.querySelector('header [data-narrow]')
-    // The row the header slot content lands in, not the leading or body seats.
-    expect(row?.contains(b.view.container.querySelector('[data-conversation-header-corner]'))).toBe(true)
-    // jsdom measures a zero-width box, which is inside both cuts.
-    expect(row?.hasAttribute('data-tight')).toBe(true)
-
-    act(() => { fireResizeWidth(row!, 600) })
-    expect(row?.hasAttribute('data-narrow')).toBe(false)
-    expect(row?.hasAttribute('data-tight')).toBe(false)
-
-    act(() => { fireResizeWidth(row!, 500) })
-    expect(row?.hasAttribute('data-narrow')).toBe(true)
-    expect(row?.hasAttribute('data-tight')).toBe(false)
-
-    act(() => { fireResizeWidth(row!, 480) })
-    expect(row?.hasAttribute('data-narrow')).toBe(true)
-    expect(row?.hasAttribute('data-tight')).toBe(true)
-  })
-
-  it('marks the empty title row the header keeps before a Session exists', () => {
-    const b = mount(sessionSnapshotOf(), [], undefined, { sessionId: undefined })
-    const row = b.view.container.querySelector('header [data-narrow]')
-    expect(row).not.toBeNull()
-    expect(row?.hasAttribute('data-tight')).toBe(true)
-    expect(row?.className).not.toBe('')
   })
 
   it('does not redispatch composer child slots for an unrelated Session publication', () => {
@@ -511,7 +473,7 @@ describe('ConversationRoot resident composer', () => {
     const box = b.view.getByRole('textbox')
     expect(b.wiring.snapshot.draft).toBe('ordinary draft')
     act(() => { b.wiring.setDraft('ordinary revised') })
-    expect(b.store.store.getSnapshot().draft).toBe('ordinary revised')
+    expect(b.store.store.getSnapshot().draft).toEqual({ text: 'ordinary revised', references: [] })
     fireEvent.keyDown(box, { key: 'Enter' })
     expect(b.sink).toHaveBeenCalledWith('ordinary revised', [], 'queue', expect.any(AbortSignal))
     // The current crumb is plain text (a drag surface on darwin), not a button.
@@ -592,7 +554,9 @@ describe('ConversationRoot resident composer', () => {
     expect(b.slotCalls).not.toContain('conversation.session.header.utilities')
     expect(b.slotCalls).not.toContain('conversation.session.header.actions')
     expect(b.view.getByText('探索未至之境')).toBeTruthy()
-    expect(b.view.getByText('预览版')).toBeTruthy()
+    // The offline product ships as a release build, so the hero carries no
+    // preview badge.
+    expect(b.view.queryByText('预览版')).toBeNull()
     expect(b.view.queryByTestId('view-chat')).toBeNull()
     // The same machine-backed textarea is live in the hero, and the
     // persistence mirror stays bound (ConversationSession mounts chrome-hidden
@@ -600,7 +564,7 @@ describe('ConversationRoot resident composer', () => {
     const box = b.view.getByRole('textbox')
     expect(host?.contains(box)).toBe(true)
     act(() => { b.wiring.setDraft('draft in hero') })
-    expect(b.store.store.getSnapshot().draft).toBe('draft in hero')
+    expect(b.store.store.getSnapshot().draft).toEqual({ text: 'draft in hero', references: [] })
     // Picker: open through the chip; a pick switches to the other
     // workspace's blank session (draft carry is apply-layer wiring).
     fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
@@ -673,7 +637,7 @@ describe('ConversationRoot resident composer', () => {
     const after = b.view.getByRole('textbox')
     expect(after).toBe(before)
     expect(b.wiring.snapshot.draft).toBe('kept across flip')
-    expect(b.store.store.getSnapshot().draft).toBe('kept across flip')
+    expect(b.store.store.getSnapshot().draft).toEqual({ text: 'kept across flip', references: [] })
     expect(b.view.container.querySelector('[data-conversation-scroll]')?.contains(after)).toBe(true)
     expect(b.view.queryByTestId('hero-headline')).toBeNull()
     expect(b.view.getByTestId('view-chat')).toBeTruthy()
@@ -699,21 +663,6 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByRole('tab', { name: 'New view' }).getAttribute('aria-selected')).toBe('false')
     // The browser drag lane anchors its header tab-strip probe on this marker.
     expect(b.view.getByRole('tablist').hasAttribute('data-conversation-tabs')).toBe(true)
-  })
-
-  it('mirrors the tab strip marker onto the header as tabs come and go', async () => {
-    const b = mount(sessionSnapshotOf())
-    const header = b.view.container.querySelector('header')!
-    // The session's tab strip renders inside the header's slot, so the header
-    // carries the marker its padding rule selects on.
-    expect(header.hasAttribute('data-header-tabs')).toBe(true)
-    const tabs = header.querySelector('[data-conversation-tabs]')!
-    tabs.remove()
-    await act(async () => { await Promise.resolve() })
-    expect(header.hasAttribute('data-header-tabs')).toBe(false)
-    header.append(tabs)
-    await act(async () => { await Promise.resolve() })
-    expect(header.hasAttribute('data-header-tabs')).toBe(true)
   })
 
   it('rolls the pending workspace label back when switching fails', async () => {
@@ -742,6 +691,18 @@ describe('ConversationRoot resident composer', () => {
     // The agent-preset chip sits in the same row, for the same reason: both
     // choices are only open before the first message.
     expect(b.slotCalls).toContain('conversation.hero.agentPreset')
+    expect(b.slotCalls).toContain('conversation.hero.options')
+  })
+
+  it('seats the New Session options after the agent-preset chip, and only for a Session', () => {
+    const b = mount(sessionSnapshotOf({ blank: true }))
+    const preset = within(b.view.container).getByTestId('view-conversation.hero.agentPreset')
+    const options = within(b.view.container).getByTestId('view-conversation.hero.options')
+    expect(options.parentElement?.previousElementSibling).toBe(preset)
+
+    const cold = mount(sessionSnapshotOf(), [], undefined, { sessionId: undefined })
+    expect(cold.slotCalls).toContain('conversation.hero.agentPreset')
+    expect(cold.slotCalls).not.toContain('conversation.hero.options')
   })
 
   it('prompt failure renders the promptError strip (ordinary failure, no transaction UI)', () => {

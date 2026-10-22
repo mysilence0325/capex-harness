@@ -32,7 +32,11 @@ interface DefaultWeb {
 export async function withDefaultWeb(
   test: TestContext,
   inspect: (app: DefaultWeb) => Promise<void>,
-  options: { patches?: readonly string[]; prepare?: (root: string) => Promise<void> } = {},
+  options: {
+    patches?: readonly string[]
+    prepare?: (root: string) => Promise<void>
+    env?: (root: string) => Readonly<Record<string, string | undefined>>
+  } = {},
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-web-default-isolation-'))
   let removal: Promise<void> | undefined
@@ -73,6 +77,7 @@ export async function withDefaultWeb(
         DSH_TELEMETRY_DISABLED: '1',
         DEEPSEEK_API_KEY: 'keyless-default-web-no-call',
         NODE_NO_WARNINGS: '1',
+        ...options.env?.(root),
       },
     })
     test.signal.throwIfAborted()

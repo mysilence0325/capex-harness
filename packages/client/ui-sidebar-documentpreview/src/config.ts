@@ -13,6 +13,8 @@ export interface Config {
     maxPending: number
     /** Maximum readers including source and renderer metadata lookups. */
     maxReaders: number
+    /** Warm one converter after first paint instead of waiting for a document read. */
+    prewarmOnIdle: boolean
   }
   /** Browser spreadsheet parser and dense cell allocation limits. */
   excel: {
@@ -32,6 +34,7 @@ export const Config: z<{ office?: Partial<Config['office']>; excel?: Partial<Con
     maxCachedBytes: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(64 * 1024 * 1024),
     maxPending: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(8),
     maxReaders: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(32),
+    prewarmOnIdle: z.boolean().default(false),
   }),
   excel: z.object({
     maxBytes: z.natural().min(1).max(Number.MAX_SAFE_INTEGER).default(16 * 1024 * 1024),

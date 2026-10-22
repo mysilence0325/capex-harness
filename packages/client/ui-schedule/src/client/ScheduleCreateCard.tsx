@@ -50,7 +50,7 @@ export function ScheduleCreateCard({ block, toolName, openTaskDetail, t, current
   const title = currentTask === undefined || currentTask === null ? model.title : taskName(currentTask)
   const openable = task !== undefined && !deleted
   return (
-    <div className={css.card} data-tool="schedule_create" data-openable={openable || undefined}>
+    <div className={css.card} data-tool="schedule_create">
       {openable
         ? (
           <button

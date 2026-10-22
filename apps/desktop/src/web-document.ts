@@ -7,7 +7,11 @@ const MIME: Readonly<Record<string, string>> = {
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json',
   '.woff2': 'font/woff2', '.png': 'image/png', '.ico': 'image/x-icon',
 }
-const BOOT = '<script>globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()</script>'
+// Inline rather than `Promise.withResolvers`: this runs before any bundle, so
+// the shell's compatibility shim cannot be installed yet.
+const BOOT = '<script>globalThis.__DSH_BOOT_READY__ = (() => {'
+  + 'let resolve, reject; const promise = new Promise((res, rej) => { resolve = res; reject = rej });'
+  + 'return { promise, resolve, reject } })()</script>'
 
 /**
  * Read an application-owned static asset; the index waits for asynchronous Host injections.

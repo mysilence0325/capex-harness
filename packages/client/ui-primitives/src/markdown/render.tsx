@@ -216,32 +216,8 @@ export function renderBlocks(
   context: MarkdownRenderContext,
 ): ReactNode[] {
   return blocks
-    .map((block, index) => renderNode(block.node, block.key, context, followingRendered(blocks, index, entry => entry.node)))
+    .map(block => renderNode(block.node, block.key, context))
     .filter(element => element !== null)
-}
-
-/** Block types that render no element, so they are not a DOM sibling. */
-const UNRENDERED_BLOCKS: ReadonlySet<string> = new Set(['definition', 'footnoteDefinition'])
-
-/**
- * The next sibling that materializes an element, which is what a sibling
- * selector in the stylesheet sees: definition and footnote-definition nodes
- * render nothing, so the block after one is that block's DOM neighbour.
- * @param items - siblings in document order.
- * @param index - index of the item whose follower is wanted.
- * @param nodeOf - the markdown node each sibling carries.
- * @returns the following rendered node, or undefined at the end.
- */
-function followingRendered<T>(
-  items: readonly T[],
-  index: number,
-  nodeOf: (item: T) => Md.RootContent,
-): Md.RootContent | undefined {
-  for (const item of items.slice(index + 1)) {
-    const node = nodeOf(item)
-    if (!UNRENDERED_BLOCKS.has(node.type)) return node
-  }
-  return undefined
 }
 
 /**
@@ -291,30 +267,17 @@ function renderChildren(
   nodes: readonly Md.RootContent[],
   context: MarkdownRenderContext,
 ): ReactNode[] {
-  return nodes.map((node, index) => renderNode(node, index, context, followingRendered(nodes, index, entry => entry)))
+  return nodes.map((node, index) => renderNode(node, index, context))
 }
 
-function renderNode(
-  node: Md.RootContent,
-  key: Key,
-  context: MarkdownRenderContext,
-  next?: Md.RootContent,
-): ReactNode {
+function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderContext): ReactNode {
   switch (node.type) {
     case 'text':
       return node.value
     case 'paragraph':
-      return (
-        <p key={key} data-has-math={rendersMath(node.children, context.streaming) ? 'true' : undefined}>
-          {renderChildren(node.children, context)}
-        </p>
-      )
+      return <p key={key}>{renderChildren(node.children, context)}</p>
     case 'heading':
-      return createElement(`h${node.depth}`, {
-        key,
-        'data-followed-by-list': next?.type === 'list' ? 'true' : undefined,
-        'data-has-math': rendersMath(node.children, context.streaming) ? 'true' : undefined,
-      }, ...renderChildren(node.children, context))
+      return createElement(`h${node.depth}`, { key }, ...renderChildren(node.children, context))
     case 'blockquote':
       return (
         <blockquote key={key}>
@@ -421,7 +384,7 @@ function renderCode(node: Md.Code, key: Key, context: MarkdownRenderContext): Re
   }
   // The replaced pipeline recovered the grammar id from the hast class with
   // /language-([\w-]+)/, which truncates at the first non-word character.
-  const lang = fenceLanguage(language)
+  const lang = language === undefined ? undefined : /^[\w-]+/.exec(language)?.[0]
   if (!context.streaming && lang === 'math') {
     // ```math fences render as display TeX once settled (rehype-katex parity);
     // its text extraction saw the code block's trailing newline.
@@ -448,37 +411,6 @@ function renderCode(node: Md.Code, key: Key, context: MarkdownRenderContext): Re
   )
 }
 
-/**
- * The grammar id a fence's info string names: everything up to the first
- * character outside `[\w-]`, which is what the replaced pipeline recovered
- * from the hast class.
- * @param language - The info string as authored, or undefined when absent.
- * @returns The grammar id, or undefined when the info string names none.
- */
-function fenceLanguage(language: string | undefined): string | undefined {
-  return language === undefined ? undefined : /^[\w-]+/.exec(language)?.[0]
-}
-
-/**
- * Whether a block renders KaTeX anywhere in its subtree. The compact variant
- * scrolls the blocks that hold formulas, which the stylesheet used to decide
- * with a descendant test. TeX nodes always render KaTeX; a `math` fence does
- * only once settled, because streaming keeps fences literal. TeX KaTeX
- * rejects renders its error span instead and still counts: the raw source
- * needs the scroller too.
- * @param nodes - The block's children, walked depth-first.
- * @param streaming - Whether this pass renders a growing message.
- * @returns True when the subtree contains a rendered formula.
- */
-function rendersMath(nodes: readonly Md.RootContent[], streaming: boolean): boolean {
-  for (const node of nodes) {
-    if (node.type === 'math' || node.type === 'inlineMath') return true
-    if (node.type === 'code' && !streaming && fenceLanguage(node.lang ?? undefined) === 'math') return true
-    if ('children' in node && rendersMath(node.children, streaming)) return true
-  }
-  return false
-}
-
 /** A list is loose when it or any of its items is spread; every item then keeps its paragraphs. */
 function listLoose(list: Md.List): boolean {
   return (list.spread ?? false) || list.children.some(listItemLoose)
@@ -490,12 +422,11 @@ function listItemLoose(item: Md.ListItem): boolean {
 
 function renderList(node: Md.List, key: Key, context: MarkdownRenderContext): ReactNode {
   const loose = listLoose(node)
-  const properties: { start?: number; className?: string; 'data-has-math'?: string } = {}
+  const properties: { start?: number; className?: string } = {}
   if (typeof node.start === 'number' && node.start !== 1) properties.start = node.start
   if (node.children.some(item => typeof item.checked === 'boolean')) {
     properties.className = 'contains-task-list'
   }
-  if (rendersMath(node.children, context.streaming)) properties['data-has-math'] = 'true'
   return createElement(
     node.ordered === true ? 'ol' : 'ul',
     { key, ...properties },

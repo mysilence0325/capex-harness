@@ -6,25 +6,37 @@
  * lightningcss inside the bundle: `x.module.css` yields its hashed class map
  * and injects a tagged style at factory execution, while `x.css?inline`
  * exports compiled text for a plugin-owned lifecycle effect. The virtual
- * loaders register each real stylesheet as a watch dependency.
+ * loaders register each real stylesheet as a watch dependency. SVG, PNG, and
+ * WebP imports become watched base64 data URLs inside the bundle.
  * Non-experimental client outputs reject experimental module and stylesheet
  * inputs, including origins recorded by chained source maps.
  */
 import { readFile, stat, utimes } from 'node:fs/promises'
-import { existsSync, globSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createRequire, isBuiltin } from 'node:module'
-import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Rolldown, type TsdownPlugin, type UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 import { optionalStringArray } from './modules/src/client/manifest.ts'
 import { PLATFORM_MODULES, PRELOADED_CLIENT_EXTERNALS } from './web/src/platform.ts'
-import { clientBuildEnvironmentDefines } from '../../scripts/client-build-environment.ts'
-import {
-  CLIENT_SCRIPT_TARGET, CLIENT_STYLE_TARGETS, downlevelClientCss, loadClientThemeTokens,
-} from '../../scripts/client-browser-floor.ts'
-import type { ClientThemeTokens } from '../../scripts/client-browser-floor.ts'
+import { clientBuildEnvironmentDefines, clientBuildValueDefines } from '../../scripts/client-build-environment.ts'
+import { isExperimentalPackageName } from '../../scripts/experimental-package-policy.ts'
 import { BundleInputIsolation, physicalBundleInput } from '../../scripts/bundle-input-isolation.ts'
+import { rewriteColorMix } from '../../scripts/compat/color-mix.ts'
+import { addScrollbarFallbacks, rewriteContainerQueries } from '../../scripts/compat/css-fallbacks.ts'
+
+// The token table is JSON so the config graph stays loadable by Node's native
+// TypeScript stripping, which rejects some generated modules.
+const MIX_TOKENS: ReadonlyMap<string, { token: string; fallback: string }> = new Map(Object.entries(
+  JSON.parse(readFileSync(new URL('../../scripts/compat/mix-token-map.json', import.meta.url), 'utf8')) as Record<string, { token: string; fallback: string }>,
+))
+
+/** Apply every stylesheet downgrade the deployment baseline needs. */
+function compileStylesheet(source: Buffer): Buffer {
+  const text = addScrollbarFallbacks(rewriteContainerQueries(rewriteColorMix(source.toString(), MIX_TOKENS)))
+  return Buffer.from(text)
+}
 
 /**
  * Virtual-id wrapper keeping module CSS away from tsdown's own css pipeline
@@ -36,6 +48,9 @@ const GLOBAL_CSS_VIRTUAL_PREFIX = '\0dsh-global-css:'
 const INLINE_CSS_VIRTUAL_PREFIX = '\0dsh-inline-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 const INLINE_CSS_QUERY = '?inline'
+
+/** Image imports become base64 data URLs embedded in the plugin's own bundle. */
+const IMAGE_MEDIA_TYPES = new Map([['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.webp', 'image/webp']])
 
 /** Emit one plugin-owned style injector and an optional CSS Modules export. */
 function styleInjectionModule(
@@ -86,41 +101,14 @@ const SKIP_WORKSPACE_BUILD: UserConfig = { entry: '' }
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 
-/** Design-token tables the stylesheet rewrites resolve against; read once per build process. */
-let themeTokens: ClientThemeTokens | undefined
-
 /**
- * Load the client theme's token tables for the stylesheet rewrites.
- * @returns the light and dark custom-property tables.
+ * Browser baseline for every client artifact. The offline deployment ships
+ * Chromium 102 shells, so both the JavaScript target and the stylesheet targets
+ * have to stay at that version: a newer target lets the minifier emit range
+ * media syntax and other constructs those shells drop on the floor.
  */
-function clientThemeTokens(): ClientThemeTokens {
-  themeTokens ??= loadClientThemeTokens(REPOSITORY_ROOT)
-  return themeTokens
-}
-
-/**
- * Compile one plugin stylesheet for the browser floor: rewrite what Lightning
- * CSS cannot lower, then let it add the floor's prefixes and minify.
- * @param fileId - absolute stylesheet path, used for diagnostics and maps.
- * @param source - stylesheet text.
- * @param cssModules - whether the sheet's class names are scoped.
- * @returns the compiled stylesheet and its class map, when scoped.
- */
-function compileClientStylesheet(
-  fileId: string,
-  source: string,
-  cssModules: boolean,
-): ReturnType<typeof transform> {
-  const tokens = clientThemeTokens()
-  const lowered = downlevelClientCss(source, tokens)
-  return transform({
-    filename: fileId,
-    code: Buffer.from(lowered),
-    targets: CLIENT_STYLE_TARGETS,
-    ...cssModules ? { cssModules: { pattern: '[hash]_[local]' } } : {},
-    minify: true,
-  })
-}
+const CLIENT_TARGET = process.env.DSH_CLIENT_TARGET ?? 'chrome102'
+const CLIENT_CSS_TARGETS = { chrome: 102 << 16 }
 
 /** Rebase a physical lib-relative source onto a browser URL that mirrors the repository directories. */
 function browserSourcePath(source: string, sourcemapPath: string): string {
@@ -128,40 +116,6 @@ function browserSourcePath(source: string, sourcemapPath: string): string {
   const physicalSource = resolvePath(dirname(sourcemapPath), source)
   const repositoryPath = relative(REPOSITORY_ROOT, physicalSource).split(sep).join('/')
   return repositoryPath.startsWith('packages/') ? `../../../${repositoryPath}` : source
-}
-
-/**
- * Lower one raw JavaScript payload to the script floor.
- *
- * A payload embedded as text — a third-party Worker script, for example — never
- * passes through the bundle's own transform, so it carries whatever syntax its
- * publisher emitted and the artifact can ship a construct the floor cannot
- * parse. A bare Rolldown build applies exactly the floor's lowering and nothing
- * else: no bundling graph, no wrapping, and the payload stays a module.
- * @param code - Payload source to lower.
- * @param id - Module id reported in diagnostics, usually the payload's file.
- * @returns Lowered module source.
- */
-export async function downlevelClientScript(code: string, id: string): Promise<string> {
-  const virtualId = 'dsh-floor-payload.mjs'
-  const build = await Rolldown.rolldown({
-    input: virtualId,
-    platform: 'browser',
-    transform: { target: CLIENT_SCRIPT_TARGET },
-    plugins: [{
-      name: 'dsh-floor-payload',
-      resolveId: (source: string) => (source === virtualId ? virtualId : null),
-      load: (candidate: string) => (candidate === virtualId ? code : null),
-    }],
-  })
-  try {
-    const result = await build.generate({ format: 'esm', minify: true })
-    const chunk = result.output[0]
-    if (chunk?.type !== 'chunk') throw new Error(`client browser floor: ${id} did not emit a JavaScript chunk`)
-    return chunk.code
-  } finally {
-    await build.close()
-  }
 }
 
 /**
@@ -173,30 +127,34 @@ export async function downlevelClientScript(code: string, id: string): Promise<s
  * the package without lib/index.js and the host Loader cannot import its node
  * half. The Client build consumes `lib/types` and chains those tsc maps, with
  * original source content, into the standalone plugin map.
- * @param id - plugin id (package name), stamped into the __ModuleLoader__.load
- * handoff and onto the injected style tags.
- * @param libEntry - node-half entries, spelled at the call site so the
- * package-invariants gate can see `lib/types/invariant.js` in each package's
- * own tsdown.config.ts (a preset-side glob hides it from the mechanical check).
- * @param options - phase placement, lib overrides, companion Node configs, and optional per-file Client banner.
+ * @param packageDir - the package's own directory, normally the config's
+ * `import.meta.dirname`. Its `package.json` name is the plugin id stamped into
+ * the __ModuleLoader__.load handoff and onto the injected style tags.
+ * @param libEntry - node-half entries.
+ * @param options - phase placement, lib overrides, optional independently bundled Node Client, companion configs, and per-file Client banner.
  * @returns ENV-selected tsdown config for the current build face.
+ * @throws {Error} when `<packageDir>/package.json` is unreadable or declares no name.
  */
 export function clientBundle(
-  id: string,
+  packageDir: string,
   libEntry: readonly string[],
   options: ClientBundleOptions = {},
 ): BuildFaceConfig {
-  const lib = clientLibraryConfig(id, libEntry, options.lib)
+  const manifest = readPackageManifest(packageDir)
+  const lib = clientLibraryConfig(manifest, libEntry, options.lib)
   return ({ env }) => {
     const face = buildFace(env?.DSH_BUILD_FACE)
     const clientEntry = face === undefined ? 'src/client/index.ts' : 'lib/types/client/index.js'
-    const client = clientConfig(id, clientEntry, options.clientBanner)
+    const client = clientConfig(manifest, clientEntry, options.clientBanner, options.dualClient === true)
     const node = [lib, ...(options.companions ?? [])]
+    const clientFaces = options.dualClient === true
+      ? [nodeClientConfig(manifest, clientEntry), client]
+      : [client]
     if (face === 'host') return options.hostPhase === true ? node : [SKIP_WORKSPACE_BUILD]
     if (face === 'client') {
-      return options.hostPhase === true ? [client] : [...node, client]
+      return options.hostPhase === true ? clientFaces : [...node, ...clientFaces]
     }
-    return [...node, client]
+    return [...node, ...clientFaces]
   }
 }
 
@@ -222,13 +180,16 @@ export function clientBundle(
  * 4. stylesheets ship with the package: a relative `.css` import survives as a
  *    relative external and the sheet is emitted under `lib/` at its
  *    `src`-relative path, so vite stays the only owner of class hashing.
- * @param id - package name, used in tsdown diagnostics.
+ * @param packageDir - the package's own directory, normally the config's
+ * `import.meta.dirname`; its `package.json` name is used in tsdown diagnostics.
  * @param libEntry - emitted JavaScript entries consumed from `lib/types`, one
  * bundle each: a multi-entry build would emit a hash-named shared chunk that
  * the exact `files` list cannot publish.
  * @returns ENV-selected tsdown config for the Client build face.
+ * @throws {Error} when `<packageDir>/package.json` is unreadable or declares no name.
  */
-export function staticLinked(id: string, libEntry: readonly string[]): BuildFaceConfig {
+export function staticLinked(packageDir: string, libEntry: readonly string[]): BuildFaceConfig {
+  const id = readPackageManifest(packageDir).name
   // Each entry names its own output file, so two entries with the same basename
   // would overwrite one artifact instead of emitting two.
   const names = new Set(libEntry.map(entry => basename(entry, '.js')))
@@ -252,12 +213,14 @@ export function isStaticLinkedConfig(configs: readonly UserConfig[]): boolean {
 
 /**
  * Build a Client-only Node library during the Client pass.
- * @param id - Package name used in tsdown diagnostics.
+ * @param packageDir - The package's own directory, normally the config's
+ * `import.meta.dirname`; its `package.json` name is used in tsdown diagnostics.
  * @param libEntry - Emitted JavaScript entries consumed from `lib/types`.
  * @returns ENV-selected tsdown config for the Client build face.
+ * @throws {Error} when `<packageDir>/package.json` is unreadable or declares no name.
  */
-export function clientLibrary(id: string, libEntry: readonly string[]): BuildFaceConfig {
-  const lib = clientLibraryConfig(id, libEntry)
+export function clientLibrary(packageDir: string, libEntry: readonly string[]): BuildFaceConfig {
+  const lib = clientLibraryConfig(readPackageManifest(packageDir), libEntry)
   return clientOnly([lib])
 }
 
@@ -275,6 +238,8 @@ export function clientOnly(configs: readonly UserConfig[]): BuildFaceConfig {
 interface ClientBundleOptions {
   /** Emit the Node-side artifacts during the Host pass instead of the Client pass. */
   readonly hostPhase?: boolean
+  /** Emit independent ESM `client.node.js` and browser-factory `client.browser.js` from the same Client entry. */
+  readonly dualClient?: boolean
   /** Additional Node-side configs emitted alongside the package library. */
   readonly companions?: readonly UserConfig[]
   /** Overrides for the package's primary Node-side library config. */
@@ -293,14 +258,15 @@ function buildFace(value: unknown): BuildFace {
 }
 
 function clientLibraryConfig(
-  id: string,
+  manifest: PackageManifest,
   libEntry: readonly string[],
   overrides: UserConfig = {},
 ): UserConfig {
+  let externals: readonly RegExp[] | undefined
   const isProductionDependency = (specifier: string): boolean =>
-    matchesSpecifier(productionExternals(id), specifier)
+    matchesSpecifier(externals ??= productionExternals(manifest), specifier)
   return {
-    name: id,
+    name: manifest.name,
     entry: [...libEntry],
     outDir: 'lib',
     format: ['esm'],
@@ -309,6 +275,8 @@ function clientLibraryConfig(
     fixedExtension: false,
     dts: false,
     clean: false,
+    // Public client build values are fixed into the Node half as they are into the browser half.
+    define: clientBuildValueDefines(process.env),
     deps: {
       // The Node half runs from a real install: a production dependency is on
       // disk there and stays an import, everything else inlines. Stating both
@@ -341,9 +309,7 @@ function staticLinkedConfig(id: string, entry: string, outputName = basename(ent
     outDir: 'lib',
     format: ['esm'],
     platform: 'browser',
-    // The shell compiles this artifact for the same browsers the shell itself
-    // targets, so it carries the browser floor's script target.
-    target: CLIENT_SCRIPT_TARGET,
+    target: CLIENT_TARGET,
     fixedExtension: false,
     dts: false,
     clean: false,
@@ -407,9 +373,10 @@ function stylesheetAsset(source: string, importer: string): { readonly file: str
   return { file, fileName: file.slice(boundary + SOURCE_MARKER.length).split(sep).join('/') }
 }
 
-/** The manifest fields the build faces read to state their own module edges. */
-interface WorkspaceManifest {
-  readonly name?: string
+/** The manifest fields the build faces read to name the package and state its own module edges. */
+interface PackageManifest {
+  /** Package name: the tsdown config name, the Client loader id, and the diagnostic subject. */
+  readonly name: string
   /** Sections a real install materializes on disk next to the built package. */
   readonly dependencies?: Record<string, string>
   readonly peerDependencies?: Record<string, string>
@@ -417,52 +384,44 @@ interface WorkspaceManifest {
   readonly dsh?: { readonly client?: { readonly external?: unknown } }
 }
 
-const manifestCache = new Map<string, WorkspaceManifest>()
-const productionExternalCache = new Map<string, readonly RegExp[]>()
-const clientExternalCache = new Map<string, ReadonlySet<string>>()
-
 /**
- * Read one workspace package's manifest. Located by package name rather than by
- * cwd, because tsdown evaluates every package config with the repository root as
- * `process.cwd()` during a workspace build. Callers read it on the first
- * resolveId of a build, not while a config is built, so selecting a build face
- * never touches a manifest.
- * @param id - package name, as spelled at the preset call site.
+ * Read the manifest of the package whose config calls a preset. The caller
+ * passes its directory because tsdown evaluates every package config with the
+ * repository root as `process.cwd()` during a workspace build.
+ * @param packageDir - the package's own directory.
  * @returns the parsed manifest.
- * @throws {Error} when no workspace package declares that name.
+ * @throws {Error} when `package.json` is unreadable, is not JSON, or declares no string name.
  */
-function workspaceManifest(id: string): WorkspaceManifest {
-  const cached = manifestCache.get(id)
-  if (cached !== undefined) return cached
-  for (const manifestPath of globSync('packages/*/*/package.json', { cwd: REPOSITORY_ROOT })) {
-    const manifest = JSON.parse(
-      readFileSync(resolvePath(REPOSITORY_ROOT, manifestPath), 'utf8'),
-    ) as WorkspaceManifest
-    if (manifest.name !== id) continue
-    manifestCache.set(id, manifest)
-    return manifest
+function readPackageManifest(packageDir: string): PackageManifest {
+  const manifestPath = resolvePath(packageDir, 'package.json')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch (error) {
+    throw new Error(
+      `tsdown: cannot read ${manifestPath}; pass the package directory (the import.meta.dirname of its tsdown.config.ts)`,
+      { cause: error },
+    )
   }
-  throw new Error(`tsdown: no packages/*/*/package.json declares the name ${id}`)
+  if (typeof parsed !== 'object' || parsed === null || !('name' in parsed) || typeof parsed.name !== 'string') {
+    throw new Error(`tsdown: ${manifestPath} declares no string package name`)
+  }
+  return parsed as PackageManifest
 }
 
 /**
  * External patterns for one package's Node half: its own production sections,
  * subpaths included.
- * @param id - package name, as spelled at the preset call site.
+ * @param manifest - the package's own manifest.
  * @returns one `^name(/|$)` pattern per production dependency, name-sorted.
  */
-function productionExternals(id: string): readonly RegExp[] {
-  const cached = productionExternalCache.get(id)
-  if (cached !== undefined) return cached
-  const manifest = workspaceManifest(id)
+function productionExternals(manifest: PackageManifest): readonly RegExp[] {
   const names = new Set([
     ...Object.keys(manifest.dependencies ?? {}),
     ...Object.keys(manifest.peerDependencies ?? {}),
     ...Object.keys(manifest.optionalDependencies ?? {}),
   ])
-  const patterns = [...names].sort().map(name => new RegExp(`^${escapeSpecifier(name)}(/|$)`))
-  productionExternalCache.set(id, patterns)
-  return patterns
+  return [...names].sort().map(name => new RegExp(`^${escapeSpecifier(name)}(/|$)`))
 }
 
 /**
@@ -485,19 +444,15 @@ export function requestedExternals(
  * Module-table specifiers one package requests. The shell baseline is implicit
  * for every dynamic bundle; `dsh.client.external` only adds package-specific
  * dynamic rows or subpaths.
- * @param id - package name, as spelled at the preset call site.
+ * @param manifest - the package's own manifest, whose `dsh.client` declaration adds requests.
  * @returns the baseline plus the package's explicit requests.
  */
-function clientExternals(id: string): ReadonlySet<string> {
-  const cached = clientExternalCache.get(id)
-  if (cached !== undefined) return cached
-  const externals = new Set([
+function clientExternals(manifest: PackageManifest): ReadonlySet<string> {
+  return new Set([
     ...PLATFORM_MODULES,
     ...PRELOADED_CLIENT_EXTERNALS,
-    ...requestedExternals(id, workspaceManifest(id).dsh?.client ?? {}),
+    ...requestedExternals(manifest.name, manifest.dsh?.client ?? {}),
   ])
-  clientExternalCache.set(id, externals)
-  return externals
 }
 
 /** Escape a package name for literal use inside a RegExp source. */
@@ -546,129 +501,43 @@ function asyncChunkRequirePlugin(): TsdownPlugin {
   }
 }
 
-/** Static sibling-chunk require: the graph the shell's module table cannot resolve. */
-const SIBLING_CHUNK_REQUIRE = /\brequire\("\.\/(client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js)"\)/gu
-
-/** Module-table view the runtime-helper inliner needs. */
-interface RuntimeModuleLookup {
-  getModuleIds(): Iterable<string>
-  getModuleInfo(moduleId: string): { code: string | null; importedIds: readonly string[] } | null
-}
-
-/** Import statement of a compiler runtime module: its dependency is inlined beside it. */
-const RUNTIME_IMPORT = /^\s*import\s+([^;]*?)\s+from\s+["'][^"']+["']\s*;?\s*$/gmu
-
-/**
- * The compiler runtime modules one helper needs, dependencies first.
- * @param context - Plugin context exposing the compiler runtime modules.
- * @param id - Client package the bundle belongs to, for failure messages.
- * @param moduleId - The helper module the sibling chunk is named for.
- * @returns Every module body to inline, in dependency order.
- */
-function runtimeModuleBodies(context: RuntimeModuleLookup, id: string, moduleId: string): string[] {
-  const ordered: string[] = []
-  const visited = new Set<string>()
-  const visit = (candidate: string): void => {
-    if (visited.has(candidate)) return
-    visited.add(candidate)
-    const info = context.getModuleInfo(candidate)
-    if (info === null) throw new Error(`client bundle ${id}: compiler runtime module ${candidate} has no module record`)
-    if (info.code === null) throw new Error(`client bundle ${id}: compiler runtime module ${candidate} has no source`)
-    for (const dependency of info.importedIds) {
-      if (!dependency.startsWith('\0')) {
-        throw new Error(`client bundle ${id}: compiler runtime module ${candidate} imports ${dependency}, which is not inlined with it`)
-      }
-      visit(dependency)
-    }
-    ordered.push(info.code)
-  }
-  visit(moduleId)
-  return ordered
-}
-
-/**
- * One compiler runtime helper as an inline module object.
- *
- * Rolldown splits a helper that both a package entry and one of its dynamic
- * chunks need into its own chunk; the browser floor's target is what makes them
- * share one, because lowering class fields emits the helper. The module table
- * answers a factory's synchronous `require` with platform seeds and registered
- * factories only, so no sibling chunk can satisfy it. The expression renders on
- * one line: rewriting in `generateBundle` cannot move any other mapped line.
- * @param context - Plugin context exposing the compiler runtime modules.
- * @param id - Client package the bundle belongs to, for failure messages.
- * @param fileName - Published sibling chunk file name being replaced.
- * @returns The inline module-object expression for the require call.
- */
-function inlineRuntimeHelper(context: RuntimeModuleLookup, id: string, fileName: string): string {
-  const name = fileName.slice('client.'.length, -'.js'.length)
-  const moduleId = [...context.getModuleIds()]
-    .find(candidate => candidate.startsWith('\0') && basename(candidate) === `${name}.js`)
-  if (moduleId === undefined) {
-    throw new Error(`client bundle ${id}: no compiler runtime module backs sibling chunk ${fileName}`)
-  }
-  const bodies = runtimeModuleBodies(context, id, moduleId).map(source => source
-    .replace(RUNTIME_IMPORT, '')
-    // The consumer reads the helper under the name the compiler imported it by,
-    // which is the local declaration name, never the module's export alias.
-    .replace(/\bexport\s*\{([^}]*)\}\s*;?/gu, (_match, list: string) => list
-      .split(',')
-      .map(entry => entry.split(/\s+as\s+/u)[0]?.trim() ?? '')
-      .filter(entry => entry.length > 0)
-      .map(entry => `exports.${entry} = ${entry};`)
-      .join(' ')))
-  const body = bodies.join(' ').replace(/\s+/gu, ' ')
-  if (/\b(?:export|import)\b/u.test(body)) {
-    throw new Error(`client bundle ${id}: compiler runtime module ${moduleId} uses a module form this inliner does not rewrite`)
-  }
-  return `(() => { var module = { exports: {} }; var exports = module.exports; ${body} return module.exports })()`
-}
-
-/**
- * Keep package-local chunks self-contained.
- *
- * The shell hands every factory a synchronous `require` that answers platform
- * seeds and registered factories only, so a static sibling edge in the chunk
- * graph throws at materialization. Rolldown only attaches the shared runtime
- * import while finalizing a chunk, after every render hook, so the rewrite runs
- * once the bundle exists and the chunk file it replaces is dropped with its map.
- * @param id - Client package the bundle belongs to, for failure messages.
- * @returns The plugin enforcing the flat chunk graph.
- */
-function selfContainedChunkPlugin(id: string): TsdownPlugin {
-  return {
-    name: 'dsh-client-self-contained-chunks',
-    generateBundle(_options, bundle) {
-      for (const output of Object.values(bundle)) {
-        if (output.type !== 'chunk') continue
-        const matches = [...output.code.matchAll(SIBLING_CHUNK_REQUIRE)]
-        if (matches.length === 0) continue
-        const transformed = new Rolldown.RolldownMagicString(output.code)
-        for (const match of matches) {
-          const fileName = match[1] ?? ''
-          transformed.overwrite(match.index, match.index + match[0].length, inlineRuntimeHelper(this, id, fileName))
-          delete bundle[fileName]
-          delete bundle[`${fileName}.map`]
-        }
-        output.code = transformed.toString()
-      }
+/** Bundle the Client entry for plain Node independently of the Host entry and browser factory. */
+function nodeClientConfig(manifest: PackageManifest, entry: string): UserConfig {
+  const isolation = clientInputIsolation(manifest.name)
+  return clientLibraryConfig(manifest, [entry], {
+    name: `${manifest.name}/client-node`,
+    entry: { 'client.node': entry },
+    sourcemap: true,
+    inputOptions: { resolve: { conditionNames: ['node', 'import', 'module', 'default'] } },
+    plugins: [tscSourceMapPlugin(), isolation.plugin],
+    outputOptions: {
+      entryFileNames: 'client.node.js',
+      chunkFileNames: 'client.node.[name].js',
+      sourcemapExcludeSources: false,
+      sourcemapPathTransform: isolation.sourcePath,
     },
-  }
+  })
 }
 
-function clientConfig(id: string, entry: string, clientBanner?: (fileName: string) => string | undefined): UserConfig {
-  const isRequested = (specifier: string): boolean => clientExternals(id).has(specifier)
+function clientConfig(
+  manifest: PackageManifest,
+  entry: string,
+  clientBanner?: (fileName: string) => string | undefined,
+  dualClient = false,
+): UserConfig {
+  const id = manifest.name
+  let requested: ReadonlySet<string> | undefined
+  const isRequested = (specifier: string): boolean => (requested ??= clientExternals(manifest)).has(specifier)
   const isolation = clientInputIsolation(id)
   return {
     name: `${id}/client`,
     entry: { client: entry },
-    // Browser bundle lands next to the node half (single lib/ artifact dir;
-    // the entryFileNames pin keeps it exactly lib/client.js). clean must stay
-    // off — a default clean would wipe the node-half output emitted above.
+    // Browser bundle lands beside the Node artifacts. clean must stay off:
+    // cleaning this invocation would wipe the independently emitted Node entry.
     outDir: 'lib',
     format: 'cjs',
     platform: 'browser',
-    target: 'chrome90',
+    target: CLIENT_TARGET,
     // Types ship from lib/types (tsc); dts here would wrap the banner/footer into .d.cts and break parsing.
     dts: false,
     // Plugin code is fetched outside Vite's module graph, so its own bundle
@@ -678,7 +547,7 @@ function clientConfig(id: string, entry: string, clientBanner?: (fileName: strin
     deps: {
       neverBundle: isRequested,
       // Anything NOT requested from the loader module table must inline
-      // (wire/type layers, zod, clsx — every non-shared dep). A require() the
+      // (wire/type layers, clsx — every non-shared dep). A require() the
       // table cannot answer is a guaranteed runtime throw, so the rule is the
       // package's own request list: requested specifiers stay imports,
       // everything else is bundled.
@@ -731,7 +600,7 @@ function clientConfig(id: string, entry: string, clientBanner?: (fileName: strin
           + '(type-only imports are erased and never reach this gate)',
         )
       },
-    }, tscSourceMapPlugin(), asyncChunkRequirePlugin(), selfContainedChunkPlugin(id), isolation.plugin, {
+    }, tscSourceMapPlugin(), asyncChunkRequirePlugin(), isolation.plugin, {
       name: 'dsh-css-modules-inline',
       resolveId(source: string, importer: string | undefined) {
         if (!source.endsWith('.module.css')) return null
@@ -743,10 +612,16 @@ function clientConfig(id: string, entry: string, clientBanner?: (fileName: strin
         const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
         // The virtual id otherwise hides the physical stylesheet from Rolldown's watch graph.
         this.addWatchFile(fileId)
-        const source = await readFile(fileId)
-        const tokens = clientThemeTokens()
-        for (const sheet of tokens.files) this.addWatchFile(sheet)
-        const { code, exports: cssExports } = compileClientStylesheet(fileId, source.toString(), true)
+        // Precompute every color-mix() the palette can resolve: the shipped
+        // shell has no color-mix(), and the generated tokens keep both themes.
+        const source = compileStylesheet(await readFile(fileId))
+        const { code, exports: cssExports } = transform({
+          filename: fileId,
+          code: source,
+          cssModules: { pattern: '[hash]_[local]' },
+          minify: true,
+          targets: CLIENT_CSS_TARGETS,
+        })
         const classMap: Record<string, string> = {}
         const exportEntries = Object.entries(cssExports ?? {})
           .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
@@ -765,11 +640,9 @@ function clientConfig(id: string, entry: string, clientBanner?: (fileName: strin
         if (!virtualId.startsWith(INLINE_CSS_VIRTUAL_PREFIX)) return null
         const fileId = virtualId.slice(INLINE_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
         this.addWatchFile(fileId)
-        const source = await readFile(fileId)
-        const tokens = clientThemeTokens()
-        for (const sheet of tokens.files) this.addWatchFile(sheet)
-        const { code } = compileClientStylesheet(fileId, source.toString(), false)
-        return 'export default ' + JSON.stringify(code.toString()) + ';'
+        const source = compileStylesheet(await readFile(fileId))
+        const { code } = transform({ filename: fileId, code: source, minify: true, targets: CLIENT_CSS_TARGETS })
+        return `export default ${JSON.stringify(code.toString())};`
       },
     }, {
       name: 'dsh-css-global-inline',
@@ -782,18 +655,29 @@ function clientConfig(id: string, entry: string, clientBanner?: (fileName: strin
         if (!virtualId.startsWith(GLOBAL_CSS_VIRTUAL_PREFIX)) return null
         const fileId = virtualId.slice(GLOBAL_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
         this.addWatchFile(fileId)
-        const source = await readFile(fileId)
-        const tokens = clientThemeTokens()
-        for (const sheet of tokens.files) this.addWatchFile(sheet)
-        const { code } = compileClientStylesheet(fileId, source.toString(), false)
+        const source = compileStylesheet(await readFile(fileId))
+        const { code } = transform({ filename: fileId, code: source, minify: true, targets: CLIENT_CSS_TARGETS })
         return styleInjectionModule(id, fileId, code.toString())
+      },
+    }, {
+      name: 'dsh-image-inline',
+      resolveId(source: string, importer: string | undefined) {
+        if (importer === undefined || !IMAGE_MEDIA_TYPES.has(extname(source))) return null
+        return sourceAssetPath(source, importer)
+      },
+      async load(fileId: string) {
+        const mediaType = IMAGE_MEDIA_TYPES.get(extname(fileId))
+        if (mediaType === undefined) return null
+        this.addWatchFile(fileId)
+        const data = await readFile(fileId)
+        return `export default ${JSON.stringify(`data:${mediaType};base64,${data.toString('base64')}`)};`
       },
     }],
     outputOptions: {
-      entryFileNames: 'client.js',
+      entryFileNames: dualClient ? 'client.browser.js' : 'client.js',
       // The imported source basename becomes the published chunk name; package
       // files lists and artifact tests pin every intentional chunk.
-      chunkFileNames: 'client.[name].js',
+      chunkFileNames: dualClient ? 'client.browser.[name].js' : 'client.[name].js',
       sourcemapExcludeSources: false,
       // The map is served from /plugins/<scoped-package>/client.js.map. The
       // browser resolves its local sources back into URLs that mirror the
@@ -819,7 +703,7 @@ function clientInputIsolation(id: string): {
   plugin: TsdownPlugin
   sourcePath: (source: string, mapPath: string) => string
 } {
-  const experimental = id.startsWith('@deepseek-ai/dsh-experimental-')
+  const experimental = isExperimentalPackageName(id)
   const inputs = new BundleInputIsolation(REPOSITORY_ROOT, `client bundle isolation (${id})`)
   return {
     plugin: {

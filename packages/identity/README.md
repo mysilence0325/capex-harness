@@ -23,6 +23,7 @@ The identity group provides one anonymous id per harness home that the installat
 | Package | Role |
 |---|---|
 | [`anonymous-user-id`](anonymous-user-id/README.md) | Gives every harness home one anonymous id that telemetry, feedback, and DeepSeek requests attach to their records, so records from one installation can be recognized without identifying the user |
+| [`local-user`](local-user/README.md) | Resolves the process owner's GECOS or login name and publishes it to the offline settings shell |
 
 <a id="related-documentation"></a>
 ## Related documentation

@@ -1,4 +1,2 @@
 - menu:
   - menuitem "设置"
-  - menuitem "意见反馈"
-  - menuitem "登录"

@@ -492,7 +492,6 @@ export function DirectoryBrowser({ open, listDirectory, createDirectory, onOpen,
   const refocusPick = useRef(false)
   const refocusEditZone = useRef(false)
   const pathInputRef = useRef<HTMLInputElement | null>(null)
-  const crumbBarRef = useRef<HTMLDivElement | null>(null)
   const editZoneRef = useRef<HTMLButtonElement | null>(null)
 
   /**
@@ -818,7 +817,7 @@ export function DirectoryBrowser({ open, listDirectory, createDirectory, onOpen,
       >
         <div className={css.header}>
           <h2 className={css.title}>{t('browser.title')}</h2>
-          <div className={css.crumbBar} ref={crumbBarRef} data-editing={pathDraft === null ? undefined : true}>
+          <div className={css.crumbBar}>
             {pathDraft === null
               ? (
                 <>
@@ -853,12 +852,6 @@ export function DirectoryBrowser({ open, listDirectory, createDirectory, onOpen,
                     // remaining way forward.
                     disabled={parentInert}
                     ref={editZoneRef}
-                    // The bar lights while the affordance itself is pointed at or
-                    // focused; a crumb's hover never counts (a crumb navigates).
-                    onMouseEnter={() => { crumbBarRef.current?.setAttribute('data-affordance', '') }}
-                    onMouseLeave={() => { crumbBarRef.current?.removeAttribute('data-affordance') }}
-                    onFocus={() => { crumbBarRef.current?.setAttribute('data-affordance', '') }}
-                    onBlur={() => { crumbBarRef.current?.removeAttribute('data-affordance') }}
                     onClick={() => {
                     // Opening the editor supersedes any pending listing: a
                     // settlement landing before the first keystroke would

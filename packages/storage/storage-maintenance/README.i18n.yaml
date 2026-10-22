@@ -1,0 +1,34 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/storage/storage-maintenance/README.md
+/:
+  en: 1ee80be196bdae4a
+  zh: d76c5a904a2c8232
+/deepseek-ai-dsh-storage-maintenance:
+  en: ba3a818aa994bc76
+  zh: eb975f8e481e4192
+/deepseek-ai-dsh-storage-maintenance/summary:
+  en: 77ebbcb8edae14fa
+  zh: 2d2ff1667bd4b284
+/deepseek-ai-dsh-storage-maintenance/table-of-contents:
+  en: 2fee9973f19f9401
+  zh: ecc02ac572f117b8
+/deepseek-ai-dsh-storage-maintenance/use-this-package:
+  en: d158c48abd9f4098
+  zh: ccf2e254562f0b0f
+/deepseek-ai-dsh-storage-maintenance/understand-the-implementation:
+  en: 981fefe841a69f04
+  zh: 459d7ec9daec4010
+/deepseek-ai-dsh-storage-maintenance/model-experience:
+  en: 85cbff53524a339c
+  zh: 6e0652e83bd7dcb5
+/deepseek-ai-dsh-storage-maintenance/model-experience/kv-cache-effect:
+  en: 4f0eadf94828e66e
+  zh: 97d3eb3e79199354
+/deepseek-ai-dsh-storage-maintenance/known-limitations-and-deferred-work:
+  en: 01d5d0f0d256ffc1
+  zh: a59f11b1e5b61418
+/deepseek-ai-dsh-storage-maintenance/known-limitations-and-deferred-work/dev-note:
+  en: e67f633dc6fe7773
+  zh: 3ca05c47cf910648

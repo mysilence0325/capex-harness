@@ -51,16 +51,6 @@ describe('Tooltip', () => {
     expect(screen.queryByRole('tooltip')).toBeNull()
   })
 
-  it('states a shortcut-only bubble as having no label', () => {
-    const view = render(<Tooltip label="" shortcutKeys={['⌘', 'R']}><button>anchor</button></Tooltip>)
-    fireEvent.focus(screen.getByText('anchor'))
-    const bubble = view.container.querySelector<HTMLElement>('[role="tooltip"]')!
-    // The keycap-only bubble drops its label padding through the absent mark.
-    expect(bubble.hasAttribute('data-has-shortcut')).toBe(true)
-    expect(bubble.hasAttribute('data-has-label')).toBe(false)
-    expect(bubble.querySelector('kbd')).not.toBeNull()
-  })
-
   it('fits from observed sizes without synchronously measuring the bubble', () => {
     automaticResize = false
     const measured = vi.spyOn(Element.prototype, 'getBoundingClientRect')

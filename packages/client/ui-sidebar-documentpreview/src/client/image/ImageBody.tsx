@@ -113,7 +113,7 @@ function LoadedImage({ url, name, preference, onPreference, labels, signal, scro
   const [width, setWidth] = useState<number>()
   return <ZoomViewport preference={preference} intrinsicWidth={width} horizontalInset={24}
     labels={labels} signal={signal} scrollportRef={scrollportRef} onPreference={onPreference}>
-    <div className={css.frame} data-image-preview data-loading={state === 'loading' || undefined}>
+    <div className={css.frame} data-image-preview>
       {state === 'loading' && <LoadingIndicator label={t('loading')} />}
       {state === 'failed' && <p className={css.status} role="alert">{t('failed')}</p>}
       <div className={`${css.surface} ${zoomSurfaceClass}`} data-document-zoom-surface

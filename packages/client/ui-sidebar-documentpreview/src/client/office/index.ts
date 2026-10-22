@@ -114,6 +114,25 @@ export function apply(ctx: Context, config: Config['office']): void {
       const closing = previous.dispose().finally(() => { retired.delete(closing) })
       retired.add(closing)
     })
+    if (config.prewarmOnIdle) {
+      const controller = new AbortController()
+      const request = (globalThis as typeof globalThis & {
+        requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+        cancelIdleCallback?: (handle: number) => void
+      })
+      const run = (): void => {
+        void scope.remote.officeToPdf.prewarm(controller.signal).catch(() => {
+          // Prewarming is speculative and never blocks or degrades an explicit preview.
+        })
+      }
+      const handle = request.requestIdleCallback?.(run, { timeout: 2_000 })
+      const timer = handle === undefined ? setTimeout(run, 1_000) : undefined
+      scope.effect(() => () => {
+        controller.abort()
+        if (handle !== undefined) request.cancelIdleCallback?.(handle)
+        if (timer !== undefined) clearTimeout(timer)
+      }, 'office-preview: idle prewarm')
+    }
     scope.effect(() => async () => { read = unavailable; await Promise.all([...retired, cache.dispose()]) })
   })
 }

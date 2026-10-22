@@ -46,7 +46,7 @@ export const CompactionItem = memo(function CompactionItem({
     : fallbackSummary
       ?? (expandable ? t('message.compaction.expand') : t('message.compaction.unavailable'))
   return (
-    <div className={css.compactionRow} data-open={open || undefined}>
+    <div className={css.compactionRow}>
       <button
         type="button"
         className={css.compactionButton}

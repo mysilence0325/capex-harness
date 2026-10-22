@@ -1,6 +1,6 @@
 <div class="_markdown_404681">
   <div class="_block_9aea57 md-code-block">
-    <div class="_bannerWrap_9aea57" data-code-block-banner-wrap="true">
+    <div class="_bannerWrap_9aea57">
       <div class="_banner_9aea57" data-code-block-banner="true">
         <div class="_infostring_9aea57">
           #text "ts"
@@ -25,7 +25,7 @@
               <span style="color:var(--shiki-token-constant)">
                 #text " 42"
   <div class="_block_9aea57 md-code-block">
-    <div class="_bannerWrap_9aea57" data-code-block-banner-wrap="true">
+    <div class="_bannerWrap_9aea57">
       <div class="_banner_9aea57" data-code-block-banner="true">
         <div class="_infostring_9aea57">
         <div class="_action_9aea57">
@@ -36,7 +36,7 @@
         <code>
           #text "no language"
   <div class="_block_9aea57 md-code-block">
-    <div class="_bannerWrap_9aea57" data-code-block-banner-wrap="true">
+    <div class="_bannerWrap_9aea57">
       <div class="_banner_9aea57" data-code-block-banner="true">
         <div class="_infostring_9aea57">
           #text "unknown-lang"
@@ -48,7 +48,7 @@
         <code>
           #text "plain fallback"
   <div class="_block_9aea57 md-code-block">
-    <div class="_bannerWrap_9aea57" data-code-block-banner-wrap="true">
+    <div class="_bannerWrap_9aea57">
       <div class="_banner_9aea57" data-code-block-banner="true">
         <div class="_infostring_9aea57">
           #text "ts"
@@ -71,7 +71,7 @@
   <pre>
     <code>
   <div class="_block_9aea57 md-code-block">
-    <div class="_bannerWrap_9aea57" data-code-block-banner-wrap="true">
+    <div class="_bannerWrap_9aea57">
       <div class="_banner_9aea57" data-code-block-banner="true">
         <div class="_infostring_9aea57">
         <div class="_action_9aea57">

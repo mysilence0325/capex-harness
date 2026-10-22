@@ -1,5 +1,6 @@
 /** Browser lifetime for the isolated spreadsheet parser. */
 import workerSource from './worker.ts?raw'
+import { WORKER_COMPAT_SOURCE } from '../worker-compat.ts'
 import type { ExcelFormat } from './format.ts'
 import { EXCEL_UNSUPPORTED_FEATURES, type ExcelLimits, type ExcelPreview } from './model.ts'
 
@@ -17,7 +18,7 @@ export function parseExcel(
   signal.throwIfAborted()
   if (bytes.byteLength > limits.maxBytes) return Promise.reject(new Error('tooLarge'))
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }))
+    const url = URL.createObjectURL(new Blob([WORKER_COMPAT_SOURCE, workerSource], { type: 'text/javascript' }))
     let worker: Worker
     try {
       worker = new Worker(url, { name: 'dsh-excel' })

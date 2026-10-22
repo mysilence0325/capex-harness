@@ -71,5 +71,8 @@ describe('SidebarRoot.module.css', () => {
     expect(declarations('.brandName')?.get('font-size')).toBe('18px')
     expect(declarations('.fallbackBrandName')?.get('font-size')).toBe('17px')
     expect(declarations('.fallbackBrandName')?.get('white-space')).toBe('nowrap')
+    expect(declarations('.brandSuffix')?.get('height')).toBe('16px')
+    expect(declarations('.brandSuffix')?.get('background')).toBe('var(--dsw-alias-label-primary)')
+    expect(declarations('.brandSuffix')?.get('color')).toBe('var(--dsw-alias-label-primary-inverted)')
   })
 })

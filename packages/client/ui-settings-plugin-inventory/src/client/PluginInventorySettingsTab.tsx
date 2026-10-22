@@ -122,8 +122,7 @@ function presetLabel(preset: AgentPresetGroup, t: Translate, presetName: (preset
 
 /** One expandable plugin card; the caller owns the trailing status content. */
 function PluginCard({
-  rowKey, moduleName, title, description, metadataError, entryId, trailing, ariaLabel, failed, expanded, followedByOpen, onToggle,
-  children,
+  rowKey, moduleName, title, description, metadataError, entryId, trailing, ariaLabel, failed, expanded, onToggle, children,
 }: {
   readonly rowKey: string
   readonly moduleName: string
@@ -135,7 +134,6 @@ function PluginCard({
   readonly ariaLabel: string
   readonly failed: boolean
   readonly expanded: string | null
-  readonly followedByOpen: boolean
   readonly onToggle: (key: string) => void
   readonly children: ReactNode
 }): ReactNode {
@@ -149,9 +147,6 @@ function PluginCard({
       data-plugin-module={moduleName}
       data-failed={failed ? 'true' : undefined}
       data-open={open ? 'true' : undefined}
-      // The grid draws the gap between an open card and the one before it, which
-      // is a fact about this card rather than something a selector can ask for.
-      data-followed-by-open={followedByOpen ? 'true' : undefined}
     >
       <button
         className={css.cardContent}
@@ -310,13 +305,6 @@ export function PluginInventorySettingsTab(
   const filteredFailed = failedEntries.filter(entryMatch)
   const filteredRegular = regularEntries.filter(entryMatch)
   const globalCount = filteredFailed.length + filteredRegular.length
-  /** The row key of the card rendered after the global list's `index`-th card, or null at its end. */
-  const globalFollowerKey = (index: number): string | null => {
-    const follower = index < filteredFailed.length
-      ? filteredFailed[index + 1] ?? filteredRegular[0]
-      : filteredRegular[index - filteredFailed.length + 1]
-    return follower === undefined ? null : `global:${follower.entryId}`
-  }
   const selectedRows = selected === undefined ? [] : selected.rows.filter(rowMatch)
   const otherPresetMatches = searching
     ? presets.filter(preset => preset !== selected && preset.rows.some(rowMatch))
@@ -339,7 +327,7 @@ export function PluginInventorySettingsTab(
   }
 
   /** Trailing status and detail facts for one row of the selected preset. */
-  const presetRowCard = (preset: AgentPresetGroup, row: AgentPresetRow, index: number, followerKey: string | null): ReactNode => {
+  const presetRowCard = (preset: AgentPresetGroup, row: AgentPresetRow, index: number): ReactNode => {
     const key = `preset:${preset.id}:${String(index)}`
     const { title, description } = pluginText(row, resolveText)
     const failed = row.fiberPhase === 'failed'
@@ -358,7 +346,6 @@ export function PluginInventorySettingsTab(
         entryId={row.entryId}
         failed={failed}
         expanded={expanded}
-        followedByOpen={followerKey !== null && expanded === followerKey}
         onToggle={toggleRow}
         ariaLabel={cardLabel(title, row.entryId, stateText)}
         trailing={(
@@ -388,7 +375,6 @@ export function PluginInventorySettingsTab(
   /** One global-plane row; a preset-provided row carries the presets that enable it. */
   const globalRowCard = (
     entry: PluginInventoryEntry,
-    followerKey: string | null,
     providers?: readonly [AgentPresetGroup, ...AgentPresetGroup[]],
   ): ReactNode => {
     const key = `global:${entry.entryId}`
@@ -409,7 +395,6 @@ export function PluginInventorySettingsTab(
         entryId={entry.entryId}
         failed={failed}
         expanded={expanded}
-        followedByOpen={followerKey !== null && expanded === followerKey}
         onToggle={toggleRow}
         ariaLabel={cardLabel(title, entry.entryId, stateText)}
         trailing={(
@@ -428,18 +413,7 @@ export function PluginInventorySettingsTab(
           facts={providers !== undefined
             ? [
               [t('configuration'), t('presetProvidedDetail')],
-              [t('enabledIn'), (
-                <span className={css.enabledIn}>
-                  <span>{providers.map(preset => presetName(preset)).join(' · ')}</span>
-                  <button
-                    type="button"
-                    className={css.jumpLink}
-                    onClick={() => { setChosenPreset(providers[0].id) }}
-                  >
-                    {t('viewInPreset')}
-                  </button>
-                </span>
-              )],
+              [t('enabledIn'), providers.map(preset => presetName(preset)).join(' · ')],
             ]
             : [
               [t('configuration'), t(entry.enabled ? 'enabledTag' : 'disabledTag')],
@@ -542,12 +516,7 @@ export function PluginInventorySettingsTab(
                   />
                 </div>
               </div>
-              <p className={css.groupSub}>
-                <span>{t('presetSubtitle')}</span>
-                <span data-preset-plugin-count={selectedRows.length}>
-                  {`${String(selectedRows.length)} ${t('countUnit')}`}
-                </span>
-              </p>
+              <p className={css.groupSub}>{t('presetSubtitle')}</p>
               {presetEffectiveOpen ? (
                 <div id={`${sectionId}-preset`} className={css.groupBody}>
                   {selected.broken !== undefined ? (
@@ -555,8 +524,7 @@ export function PluginInventorySettingsTab(
                   ) : null}
                   {selectedRows.length > 0 ? (
                     <ul className={css.cards}>
-                      {selectedRows.map((row, index) => presetRowCard(selected, row, index,
-                        index + 1 < selectedRows.length ? `preset:${selected.id}:${String(index + 1)}` : null))}
+                      {selectedRows.map((row, index) => presetRowCard(selected, row, index))}
                     </ul>
                   ) : null}
                   {otherMatchCount > 0 ? (
@@ -593,19 +561,12 @@ export function PluginInventorySettingsTab(
                   <span className={css.groupTitle}>{t('globalTitle')}</span>
                 </button>
               </div>
-              <p className={css.groupSub}>
-                <span>{t('globalSubtitle')}</span>
-                <span data-plugin-count={globalCount}>{`${String(globalCount)} ${t('countUnit')}`}</span>
-                {filteredFailed.length > 0 ? (
-                  <span className={css.failedCount}>{filteredFailed.length} {t('failedCountLabel')}</span>
-                ) : null}
-              </p>
+              <p className={css.groupSub}>{t('globalSubtitle')}</p>
               {globalEffectiveOpen && globalCount > 0 ? (
                 <ul className={css.cards} id={`${sectionId}-global`}>
-                  {filteredFailed.map((entry, index) => globalRowCard(entry, globalFollowerKey(index)))}
-                  {filteredRegular.map((entry, index) => globalRowCard(
+                  {filteredFailed.map(entry => globalRowCard(entry))}
+                  {filteredRegular.map(entry => globalRowCard(
                     entry,
-                    globalFollowerKey(filteredFailed.length + index),
                     entry.enabled ? undefined : enabledIn.get(entry.moduleName),
                   ))}
                 </ul>

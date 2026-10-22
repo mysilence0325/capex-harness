@@ -344,7 +344,7 @@
    slots beside it go blank, so the row reads as the tab between bare
    chips. A caret in either slot still draws. */
 .tabActive + .slot:not(.slotCaret)::before,
-.slot:not(.slotCaret)[data-next-tab-active]::before {
+.slot:not(.slotCaret):has(+ .tabActive)::before {
   background: transparent;
 }
 
@@ -554,15 +554,9 @@
   border: 0.5px solid var(--dsw-alias-border-l2);
 }
 
-/* A menu holding no item — an extras component that renders nothing — hides
-   rather than drops: React cannot know what an extras node renders, so the
-   menu publishes the fact as `data-dockkit-menu-empty`, the way the
-   conversation header mirrors its own tab strip. The `:has()` selector that
-   read it directly is one Chromium 90 drops whole. */
-.menu[data-dockkit-menu-empty] {
+.menu:not(:has([role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'])) {
   display: none;
 }
-
 
 .menuItem {
   padding: 4px 7px;
@@ -622,7 +616,7 @@
      is a lighter bluish step than the column's `bg-base`, which tinted the
      whole scrim away from the content beneath it. */
   background: color-mix(in srgb, var(--dsw-alias-bg-base) 72%, transparent);
-  backdrop-filter: blur(6px);
+  backdrop-filter: none;
   animation: dockScrimIn 140ms ease-out;
 }
 

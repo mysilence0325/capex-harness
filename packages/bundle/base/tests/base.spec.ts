@@ -32,7 +32,9 @@ describe('dsh-base bundle', () => {
     )
     expect(rows.length).toBeGreaterThan(50)
     expect(rows.some(row => row.id === 'agent-loop')).toBe(true)
-    expect(rows.find(row => row.id === 'session-telemetry-otel')?.disabled).toBeUndefined()
+    // Private deployments keep every session record inside their network.
+    expect(rows.find(row => row.id === 'session-telemetry-otel')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'session-log-deepseek')?.config).toMatchObject({ enabled: false })
     expect(rows.find(row => row.id === 'session-telemetry-otel')?.config?.['mode']).toEqual({
       __jsExpr: "process.env.DSH_TELEMETRY_MODE || 'FEEDBACK_ONLY'",
     })
@@ -41,9 +43,14 @@ describe('dsh-base bundle', () => {
     })
     expect(rows.filter(row => row.id === 'subagent-codex')).toHaveLength(0)
     expect(rows.filter(row => row.id === 'subagent-claude-code')).toHaveLength(0)
-    expect(rows.find(row => row.id === 'web')?.config).toMatchObject({ fetchProvider: 'http' })
-    expect(rows.find(row => row.id === 'web-fetch-http')).toBeDefined()
-    expect(rows.find(row => row.id === 'tool-web')?.config).toMatchObject({ fetch: true })
+    // The profile offers no tool that could only reach the public internet.
+    expect(rows.find(row => row.id === 'web')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'web-fetch-http')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'web-search-deepseek')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'web-deepseek-api')?.disabled).toBe(true)
+    expect(rows.find(row => row.id === 'tool-web')?.disabled).toBe(true)
+    // Installs ask the operator's own registry alone.
+    expect(rows.find(row => row.id === 'plugin-manager')?.config).toMatchObject({ fallbackRegistries: [] })
     expect(manifest.dependencies).not.toHaveProperty('@deepseek-ai/dsh-subagent-codex')
     expect(manifest.dependencies).not.toHaveProperty('@deepseek-ai/dsh-subagent-claude-code')
     expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-web-fetch-http')

@@ -13,7 +13,7 @@
   white-space: normal;
 }
 
-.frame[data-loading] {
+.frame:has([data-document-loading]) {
   height: 100%;
 }
 

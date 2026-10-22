@@ -16,6 +16,13 @@
   }
 }
 
+/* Chromium 102 lacks `dvh`; the dialog still needs a viewport ceiling there. */
+@supports not (height: 100dvh) {
+  .confirmation {
+    max-height: calc(100vh - 48px);
+  }
+}
+
 .warning {
   display: flex;
   align-items: flex-start;

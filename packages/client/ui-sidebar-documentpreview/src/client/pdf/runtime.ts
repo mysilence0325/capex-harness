@@ -3,6 +3,7 @@ import { getDocument, PDFWorker } from 'pdfjs-dist'
 import { createPdfBinaryDataFactory, workerSource } from './assets.ts'
 import type { PdfSession } from './document.ts'
 import { PdfWorkerFailure } from './errors.ts'
+import { WORKER_COMPAT_SOURCE } from '../worker-compat.ts'
 
 const WORKER_READY = 'dsh-pdf-worker-ready'
 
@@ -70,6 +71,7 @@ export function openPdf(data: Uint8Array<ArrayBuffer>, signal: AbortSignal, repo
     const BinaryDataFactory = createPdfBinaryDataFactory()
     const bytes = data.slice()
     url = URL.createObjectURL(new Blob([
+      WORKER_COMPAT_SOURCE,
       workerSource,
       `\nself.postMessage({type:${JSON.stringify(WORKER_READY)}});\n`,
     ], { type: 'text/javascript' }))

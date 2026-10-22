@@ -86,9 +86,9 @@
 .body {
   --dsh-chat-flow-gap: 6px;
   max-height: min(400px, 50vh);
-  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
-  overflow-y: scroll;
+  overflow-y: auto;
   overscroll-behavior-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .label {
@@ -135,4 +135,16 @@
 .expandedBody {
   max-height: none;
   overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+/* Member spacing changes share the closing body's timing. */
+:global([data-chat-motion]) .content > :not([data-chat-motion]) {
+  transition: margin-top 160ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :global([data-chat-motion]) .content > :not([data-chat-motion]) {
+    transition: none;
+  }
 }

@@ -42,16 +42,10 @@ interface DetailContentProps {
 
 function DetailItem({ item, t, onOpenFile }: { item: ToolDetailItem } & DetailContentProps) {
   const status = item.status
-  // A bare code block is the item's only content: it then carries the item's
-  // padding itself instead of sitting inside one.
-  const onlyCode = item.code !== undefined
-    && item.title === undefined && item.subtitle === undefined && item.description === undefined
-    && item.markdown === undefined && item.lines === undefined
-    && item.fields.length === 0 && (item.groups === undefined || item.groups.length === 0)
   return (
-    <li className={css.item} data-change={item.change?.value} data-only-code={onlyCode || undefined}>
+    <li className={css.item} data-change={item.change?.value}>
       {item.title !== undefined && (
-        <div className={css.heading} data-has-status={status === undefined ? undefined : true}>
+        <div className={css.heading}>
           {status !== undefined && (
             <span className={css.status} role="img" aria-label={item.change?.label ?? status.label}>
               {item.change?.value === 'added' ? '+'

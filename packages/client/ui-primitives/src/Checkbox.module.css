@@ -22,7 +22,7 @@
   outline-offset: 2px;
 }
 
-.checkbox[data-disabled] {
+.checkbox:has(input:disabled) {
   cursor: default;
   opacity: 0.5;
 }

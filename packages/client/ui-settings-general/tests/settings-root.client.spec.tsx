@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { createSettingsShellStore } from '../src/client/shell-store.ts'
-import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { allowAllAccess, bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SettingsRootComponentProps } from '../src/client/shell-contract.ts'
@@ -21,6 +21,7 @@ const usePanelInfo: GlobalStandardProps['usePanelInfo'] = selector => selector({
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  Reflect.deleteProperty(globalThis, '__DSH_IDENTITY__')
 })
 
 type Row = { id: string; order: number; label: string }
@@ -104,6 +105,7 @@ function mount({
     useSessionStatus,
     usePanelInfo, useSessionRetainInfo: () => undefined, useResource,
     useWorkspaces: unusedHook,
+    ...allowAllAccess,
     wide,
     reconnect,
     openDesktopUpdate: () => {},
@@ -169,6 +171,35 @@ function openPanel() {
 }
 
 describe('SettingsRoot trigger', () => {
+  it('shows the local user name in the wide fallback and opens Settings', () => {
+    Reflect.set(globalThis, '__DSH_IDENTITY__', {
+      version: 1,
+      login: 'user01',
+      displayName: '张三',
+      source: 'gecos',
+      resolvedAt: '2026-10-22T00:00:00.000Z',
+    })
+    mount({ onboardingActive: false })
+    const trigger = screen.getByRole('button', { name: 'Open settings (张三)' })
+    expect(trigger.textContent).toBe('张三')
+    fireEvent.click(trigger)
+    expect(screen.getByRole('dialog')).toBeTruthy()
+  })
+
+  it('keeps the local identity in a rail icon accessible name', () => {
+    Reflect.set(globalThis, '__DSH_IDENTITY__', {
+      version: 1,
+      login: 'user01',
+      displayName: '张三',
+      source: 'gecos',
+      resolvedAt: '2026-10-22T00:00:00.000Z',
+    })
+    mount({ onboardingActive: false, wide: false })
+    const trigger = screen.getByRole('button', { name: 'Open settings (张三)' })
+    expect(trigger.textContent).toBe('')
+    expect(trigger.querySelector('svg')).not.toBeNull()
+  })
+
   it('shows installation instead of expected backend reconnection and restores connection feedback after failure', () => {
     const presentation = { phase: 'installing' as const, version: '1.0.1' }
     const f = mount({ dictionary: zh, connectionState: 'connecting',

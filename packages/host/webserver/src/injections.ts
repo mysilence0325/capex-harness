@@ -84,10 +84,8 @@ function splice(html: string, at: number, markup: string): string {
  * it in one statement, because every row is already in the document text.
  */
 const READY_MARKUP = '<script>(globalThis.__DSH_BOOT_READY__ ??= (() => {'
-  + ' let resolve, reject;'
-  + ' const promise = new Promise((settle, fail) => { resolve = settle; reject = fail });'
-  + ' return { promise, resolve, reject };'
-  + '})()).resolve()</script>'
+  + 'let resolve, reject; const promise = new Promise((res, rej) => { resolve = res; reject = rej });'
+  + 'return { promise, resolve, reject } })()).resolve()</script>'
 
 /**
  * Render rows into an index.html body: head rows immediately after the

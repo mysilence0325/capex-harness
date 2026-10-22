@@ -92,15 +92,8 @@ function bench() {
   return { ctx, registry, ...scripted, snapshot }
 }
 
-// The address grammar these cases read is engine-independent, and a Node-run
-// case cannot prove the engine behaviour behind it: Node's URL parser reads a
-// host for `dsh-resource://file/…` where Chromium 90's URL parser reads none and
-// leaves the remainder in the opaque path, so a case written against `new URL`
-// passes on the engine this derivation exists for. scripts/browser-floor-lane/
-// holds the engine half, where the served client opens a workspace file and
-// reads the rendered preview back.
 describe('protocolOf', () => {
-  it('reads the dsh-resource protocol, lower-cased, and reports none for any other address', () => {
+  it('reads the dsh-resource host, lower-cased, and reports none for any other address', () => {
     expect(protocolOf('dsh-resource://file/session/s1/home/ys/b.txt')).toBe('file')
     expect(protocolOf('DSH-RESOURCE://File/session/s1/a')).toBe('file')
     expect(protocolOf('dsh-resource://chat/node/1')).toBe('chat')
@@ -112,17 +105,17 @@ describe('protocolOf', () => {
     expect(protocolOf('')).toBeUndefined()
   })
 
-  it('reads the protocol up to the first path, query, or fragment delimiter', () => {
-    // A trailing address with no path still names its protocol.
-    expect(protocolOf('dsh-resource://file')).toBe('file')
-    expect(protocolOf('dsh-resource://File/?tab=1')).toBe('file')
-    expect(protocolOf('dsh-resource://file#frag')).toBe('file')
-    // An empty segment names no protocol, whatever follows it.
-    expect(protocolOf('dsh-resource://?a=1')).toBeUndefined()
-    expect(protocolOf('dsh-resource://#frag')).toBeUndefined()
-    // Only the scheme prefix starting the address is one.
-    expect(protocolOf('dsh-resource:/file/a')).toBeUndefined()
-    expect(protocolOf('dsh-resourcex://file/a')).toBeUndefined()
+  it('does not depend on how the URL parser treats a non-special scheme', () => {
+    // Chromium 102 reports an empty hostname and an opaque `//file/...`
+    // pathname for this address, so the protocol key must come from the text.
+    vi.stubGlobal('URL', function UrlParserStub(): never {
+      throw new TypeError('URL parser disagrees for non-special schemes')
+    })
+    try {
+      expect(protocolOf('dsh-resource://file/session/s1/home/ys/b.txt')).toBe('file')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

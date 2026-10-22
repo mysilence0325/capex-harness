@@ -59,6 +59,7 @@ async function harness(config: Partial<Config['office']> = {}, missing?: 'remote
   const removeLocale = vi.fn()
   const locale = { register: vi.fn(() => removeLocale), bind: (name: string) => name === 'sidebarDocumentPreview' ? makeTranslate(documentEn) : makeTranslate(en) }
   const render = vi.fn<ClientRemote['officeToPdf']['render']>().mockResolvedValue(converted)
+  const prewarm = vi.fn<ClientRemote['officeToPdf']['prewarm']>().mockResolvedValue({ ok: true, value: undefined })
   const rendererGeneration = vi.fn<ClientRemote['officeToPdf']['generation']>().mockResolvedValue({ ok: true, value: generation })
   const stat = vi.fn<ClientRemote['workspaceFiles']['stat']>().mockResolvedValue({ ok: true, value: source })
   const readBytes = vi.fn<ClientRemote['workspaceFiles']['readBytes']>().mockResolvedValue({ ok: true, value: { ...source, data: pdf.subarray(0, 1), eof: false } })
@@ -69,9 +70,14 @@ async function harness(config: Partial<Config['office']> = {}, missing?: 'remote
   ctx.provide('slots', { inject: (_name: string, effect: () => () => void) => effect(), register } as never)
   ctx.provide('locale', locale as never)
   if (missing !== 'remote') {
-    ctx.provide('remote', { workspaceFiles: { stat, readBytes }, officeToPdf: { render, generation: rendererGeneration } } as never)
+    ctx.provide('remote', {
+      workspaceFiles: { stat, readBytes },
+      officeToPdf: { render, prewarm, generation: rendererGeneration },
+    } as never)
     if (missing !== 'files') ctx.provide('remote.workspaceFiles', { stat, readBytes } as never)
-    if (missing !== 'render') ctx.provide('remote.officeToPdf', { render, generation: rendererGeneration } as never)
+    if (missing !== 'render') {
+      ctx.provide('remote.officeToPdf', { render, prewarm, generation: rendererGeneration } as never)
+    }
   }
   const fiber = ctx.plugin({ apply: (scope: Context) => {
     apply(scope, Config({ office: config }).office)
@@ -81,7 +87,7 @@ async function harness(config: Partial<Config['office']> = {}, missing?: 'remote
   const instance = entry.store.create()
   const injected = entry.inject(file.sessionId, instance.actions)
   const [read, describeFailure] = vi.mocked(officeFace).mock.calls.at(-1)!
-  return { ctx, registry, instance, injected, describeFailure, recorded, locale, removeLocale, render, rendererGeneration,
+  return { ctx, registry, instance, injected, describeFailure, recorded, locale, removeLocale, render, prewarm, rendererGeneration,
     stat, readBytes, register, removeNotice,
     read: (signal = new AbortController().signal, path = file.path) => read({ ...file, path }, signal),
     close: () => fiber.dispose(),
@@ -108,6 +114,30 @@ it.each(['remote', 'render', 'files'] as const)('keeps Word and PowerPoint regis
     name: 'sidebar.right.tab.document', key: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/office', locale: 'sidebarOffice',
   }), OfficeBody)
   expect(h.removeNotice).toHaveBeenCalledTimes(3)
+})
+
+it('prewarms one converter when the browser becomes idle and cancels it on disposal', async () => {
+  const idle: Array<() => void> = []
+  const cancelIdle = vi.fn()
+  vi.stubGlobal('requestIdleCallback', (callback: () => void) => {
+    idle.push(callback)
+    return idle.length
+  })
+  vi.stubGlobal('cancelIdleCallback', cancelIdle)
+  const h = await harness({ prewarmOnIdle: true })
+  try {
+    expect(h.prewarm).not.toHaveBeenCalled()
+    idle[0]!()
+    expect(h.prewarm).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal))
+    const signal = h.prewarm.mock.calls[0]![0]
+    expect(signal).toBeDefined()
+    await h.close()
+    expect(signal?.aborted).toBe(true)
+    expect(cancelIdle).toHaveBeenCalledWith(1)
+  } finally {
+    vi.unstubAllGlobals()
+    await h.close()
+  }
 })
 
 it('requests a Host PDF with source identity and borrows the same binary cache result', async () => {

@@ -33,6 +33,8 @@ const coreActionOrder = new Map<string, number>([
   'session.fork',
   'session.archive',
   'settings.open',
+  'fontSize.increase',
+  'fontSize.decrease',
   'workspace.openLocal',
   'sidebar.right.toggle',
   'workspace.files',
@@ -181,13 +183,12 @@ export function ShortcutReference({
           if (rows.length === 0) return null
           return <section key={group} aria-label={t(group)}>
             {group !== 'application' && <h3 className={css.group}>{t(group)}</h3>}
-            <ul className={css.rows}>{rows.map(row => <li key={row.id} className={css.row}
-              data-editable={'modified' in row && target?.id !== row.id && !busy && config.status === 'ready' || undefined}>
+            <ul className={css.rows}>{rows.map(row => <li key={row.id} className={css.row}>
               {'modified' in row && target?.id !== row.id && <button type="button" className={css.rowButton}
                 aria-label={t('edit-label', { command: row.label })} disabled={busy || config.status !== 'ready'}
                 onClick={() => { setTarget(row) }} />}
               <span className={css.commandLabel}>{row.label}</span>
-              <span className={css.binding} data-editing={'modified' in row && target?.id === row.id || undefined}>
+              <span className={css.binding}>
                 {'modified' in row
                   ? target?.id === row.id
                     ? <ShortcutEditor key={row.id} target={row} {...editorProps} />

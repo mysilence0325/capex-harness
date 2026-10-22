@@ -82,6 +82,7 @@ describe('product icon set', () => {
       [primitives.PermissionIconReadOnlyRegular, primitives.PermissionIconReadOnlyMedium],
       [primitives.PermissionIconWorkspaceWriteRegular, primitives.PermissionIconWorkspaceWriteMedium],
       [primitives.PermissionIconFullAccessRegular, primitives.PermissionIconFullAccessMedium],
+      [primitives.PermissionIconAutoReviewRegular, primitives.PermissionIconAutoReviewMedium],
     ] as const
     for (const [Regular, Medium] of pairs) {
       const regular = render(<Regular />)
@@ -132,6 +133,50 @@ describe('FishLogo', () => {
     expect(container.querySelectorAll('path')).toHaveLength(1)
     expect(container.innerHTML).toContain('currentColor')
     expect(container.innerHTML).not.toContain('M0 0L23.16')
+  })
+})
+
+describe('CapexLogo', () => {
+  it('renders the mark in the inherited text color by default', () => {
+    const { container } = render(<primitives.CapexLogo />)
+    const svg = container.querySelector('svg')
+    expect(svg?.getAttribute('width')).toBe('24')
+    expect(svg?.getAttribute('viewBox')).toBe('0 0 512 512')
+    expect(container.innerHTML).toContain('currentColor')
+    expect(container.querySelectorAll('linearGradient')).toHaveLength(0)
+    expect(container.querySelectorAll('mask')).toHaveLength(1)
+  })
+
+  it('keeps the artwork gradients in the brand tone, scoped to each instance', () => {
+    const { container } = render(
+      <><primitives.CapexLogo tone="brand" /><primitives.CapexLogo tone="brand" size={48} /></>,
+    )
+    const marks = container.querySelectorAll('svg')
+    expect(marks).toHaveLength(2)
+    expect(marks[1]?.getAttribute('width')).toBe('48')
+    expect(container.querySelectorAll('linearGradient')).toHaveLength(6)
+    expect(container.innerHTML).toContain('#FFE600')
+    const ids = [...container.querySelectorAll('[id]')].map(node => node.getAttribute('id'))
+    expect(ids.length).toBeGreaterThan(0)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+describe('CapexWordmark', () => {
+  it('scales the outlined lettering by height and keeps it in the text color', () => {
+    const { container } = render(<><primitives.CapexWordmark /><primitives.CapexWordmark height={34} /></>)
+    const marks = container.querySelectorAll('svg')
+    expect(marks).toHaveLength(2)
+    expect(marks[0]?.getAttribute('height')).toBe('17')
+    expect(marks[0]?.getAttribute('viewBox')).toBe('40 -716 3063 918')
+    expect(marks[1]?.getAttribute('height')).toBe('34')
+    expect(marks[1]?.getAttribute('width')).toBe(String((34 * 3063) / 918))
+    expect(container.textContent).toBe('')
+    const path = container.querySelector('path')
+    expect(path?.getAttribute('d')).toBe(primitives.CAPEX_WORDMARK_PATH)
+    expect(path?.getAttribute('fill')).toBe('currentColor')
+    expect(path?.getAttribute('stroke-width')).toBe(String(primitives.CAPEX_WORDMARK_STROKE))
+    expect(path?.getAttribute('paint-order')).toBe('stroke fill')
   })
 })
 

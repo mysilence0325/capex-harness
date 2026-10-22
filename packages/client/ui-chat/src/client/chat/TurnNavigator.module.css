@@ -8,8 +8,7 @@
      the composer, so its preview never needs to cross the footer. */
   z-index: 7;
   height: 0;
-  /* Spans the transcript's usable width while staying full-bleed; the preview
-     sizes its `cqw` against that width. */
+  /* Query the transcript's usable width while keeping the rail full-bleed. */
   padding-inline: calc(var(--dsh-composer-side-clearance) + 16px);
   container-type: inline-size;
   pointer-events: none;
@@ -24,8 +23,11 @@
      stack covering its floor. ConversationRoot publishes both measurements on
      the scrollport; the fallbacks carry the first paint before its observer
      fires. */
+  /* Chromium 102 has no `dvh`, and an unresolvable unit invalidates the whole
+     declaration. ConversationRoot publishes the measured height, so the
+     fallback only covers the first paint and stays in `vh`. */
   --turn-rail-band: calc(
-    var(--dsh-conversation-viewport-height, 100dvh) - var(--dsh-composer-height, 152px)
+    var(--dsh-conversation-viewport-height, 100vh) - var(--dsh-composer-height, 152px)
   );
   --turn-preview-height: 100px;
 
@@ -205,10 +207,10 @@
   50% { opacity: 0.35; }
 }
 
-/* The band hides its frame in a narrow transcript. TurnNavigator.tsx marks the
-   band's own width, because Chromium 90 has no container queries (chrome 105). */
-[data-narrow] .frame {
-  display: none;
+@container (max-width: 900px) {
+  .frame {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

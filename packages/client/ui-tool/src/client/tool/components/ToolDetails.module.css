@@ -72,7 +72,7 @@
   border-radius: 2px;
 }
 
-.heading[data-has-status] .text {
+.heading:has(.statusText) .text {
   flex-basis: 12em;
 }
 
@@ -232,10 +232,10 @@
   overflow: auto;
 }
 
-.root .item[data-only-code] { padding: 0; }
+.root .item:has(> .code:only-child) { padding: 0; }
 .root .item > .code:only-child { margin: 0; }
 
-.root .group .item[data-only-code] {
+.root .group .item:has(> .code:only-child) {
   padding: 4px 0 0 20px;
 }
 

@@ -140,19 +140,19 @@ describe('chat flow font-size axis', () => {
     // absence, not an override, keeps the latest turn's row shown.
     const css = read('MessageIconActions.module.css')
     expect(css).toContain("[data-actions-reveal='hover'] .actions,")
-    expect(css).toMatch(/\[data-chat-followed-by-input\] \.actions \{\s*opacity: 0/)
+    expect(css).toMatch(/\) \.actions \{\s*opacity: 0/)
     expect(css).toContain("[data-actions-reveal='hover']:hover .actions,")
     expect(css).toContain("[data-actions-reveal='hover']:focus-within .actions,")
-    expect(css).toMatch(/\[data-chat-followed-by-input\]:focus-within \.actions \{\s*opacity: 1/)
+    expect(css).toMatch(/\):focus-within \.actions \{\s*opacity: 1/)
     expect(css).not.toContain("[data-actions-reveal='always']")
   })
 
-  it('reveals the actions of only the latest user-authored row', () => {
+  it('uses flow sibling selectors to reveal only the latest user-authored row', () => {
     const css = read('MessageIconActions.module.css')
     const userKinds = ":is([data-chat-flow-kind='user'], [data-chat-flow-kind='steering'])"
-    expect(css).toContain(`${userKinds}[data-chat-followed-by-input] .actions`)
-    expect(css).toContain(')[data-chat-followed-by-input]:hover .actions')
-    expect(css).toContain(')[data-chat-followed-by-input]:focus-within .actions')
+    expect(css).toContain(`${userKinds}:has(\n    ~ ${userKinds}\n  ) .actions`)
+    expect(css).toContain('):hover .actions')
+    expect(css).toContain('):focus-within .actions')
   })
 
   it('keeps empty outer Seats in flow without adding height or sibling gaps', () => {
@@ -161,7 +161,7 @@ describe('chat flow font-size axis', () => {
     const empty = declarationsFrom(css, emptySelector)
     expect(empty).toContain('height: 0')
     expect(empty).not.toContain('display: none')
-    expect(css).toContain(`.column > :not([hidden]):not(${emptySelector})`)
+    expect(css).toContain(`:is(.column, :global([data-slot="conversation.chat.flow"])) > :not([hidden]):not(${emptySelector})`)
     expect(css).toContain(`~ :not([hidden]):not(${emptySelector})`)
   })
 

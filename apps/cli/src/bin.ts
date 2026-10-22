@@ -67,6 +67,16 @@ export async function runCli(options: RunCliOptions = {}): Promise<void> {
       await runDumpConfigSchema(invocation.profile, invocation.patches, invocation.fromDefaultProfile)
       break
     }
+    case 'doctor': {
+      const { runDoctor } = await import('./doctor.ts')
+      process.exit(await runDoctor(invocation.args))
+      break
+    }
+    case 'clean': {
+      const { runClean } = await import('./clean.ts')
+      process.exit(await runClean(invocation.args))
+      break
+    }
     default:
       invocation satisfies never
       throw new Error(`dsh: unhandled invocation mode ${JSON.stringify(invocation)}`)

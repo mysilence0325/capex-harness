@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.3/capex-productization/guide.md
+/:
+  en: 5089361eaf8e6aaa
+  zh: ed1ef2cfd5dc0542
+/capex-launches-the-capex-profile:
+  en: 31435528730469f7
+  zh: f83eb9626f46dd76
+/capex-launches-the-capex-profile/change:
+  en: 7e645695fd18c9c0
+  zh: 888a9d5cf9c689e0
+/capex-launches-the-capex-profile/migration:
+  en: 72e8b0f622f2e1f1
+  zh: 32830115825dabff

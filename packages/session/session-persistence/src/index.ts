@@ -10,6 +10,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { SessionEvent, SessionHeader, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionHandle, SessionAccess } from './handle.ts'
 import type { SessionPersistenceRevision } from './revision.ts'
+import type { SessionRelocationFailureCode } from './errors.ts'
 
 // Re-export the metadata vocabulary so Consumers import it from the Service Definition.
 export type { SessionHeader } from '@deepseek-ai/dsh-session'
@@ -34,6 +35,26 @@ export {
   sessionFormatVersionRefusal,
 } from './errors.ts'
 export type { SessionLocation } from './errors.ts'
+export type { SessionRelocationFailureCode } from './errors.ts'
+
+/** A Session could not be moved intact into a caller-owned maintenance archive. */
+export class SessionRelocationError extends Error {
+  /**
+   * @param code - stable reason for user routing and diagnostics.
+   * @param sessionId - Session selected for relocation.
+   * @param message - actionable summary.
+   * @param options - original failure, when one exists.
+   */
+  constructor(
+    readonly code: SessionRelocationFailureCode,
+    readonly sessionId: SessionId,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'SessionRelocationError'
+  }
+}
 export {
   assertContiguous,
   assertStoredId,
@@ -50,12 +71,16 @@ export {
 export interface SessionPersistenceSnapshot {
   /** Detached metadata for one stored session. */
   readonly header: SessionHeader
+  /** Header-only format classification; absent without versioned artifact metadata. */
+  readonly formatStatus?: 'current' | 'migration-required'
   /** Opaque change token; see {@link SessionPersistence.stat}. */
   readonly revision: SessionPersistenceRevision
   /** Logical event count, when the backend can provide it cheaply from metadata; otherwise absent. */
   readonly eventCount?: number
   /** Physical artifact byte size, when the backend can provide it cheaply (JSONL); otherwise absent. */
   readonly sizeBytes?: number
+  /** Physical artifact modification time in Unix milliseconds, when cheaply available. */
+  readonly modifiedAt?: number
 }
 
 /** Options for {@link SessionPersistence.create}. */
@@ -199,6 +224,33 @@ export abstract class SessionPersistence extends Service {
    * @returns one snapshot per stored session.
    */
   abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+  /**
+   * Move one idle Session's complete durable artifact set to a caller-owned
+   * maintenance destination. This is the explicit retention exception to the
+   * ordinary read/write API: no generation content changes, destination
+   * publication is atomic with the source removal, and an unsupported backend
+   * rejects without touching the Session.
+   *
+   * The destination is an absolute final Session directory. Existing
+   * destinations, active in-process handles, a writer lease held by another
+   * process, pending creation, and cross-filesystem moves are refused.
+   * @param id - Session to move.
+   * @param destination - absolute final directory outside the active root.
+   * @param options - optional cancellation observed before the filesystem move.
+   * @returns the moved source and final destination directories.
+   */
+  relocate(
+    id: SessionId,
+    destination: string,
+    options?: SessionPersistenceStatOptions,
+  ): Promise<{ readonly source: string; readonly destination: string }> {
+    options?.signal?.throwIfAborted()
+    void destination
+    return Promise.reject(new SessionRelocationError(
+      'unsupported', id, `session "${id}" cannot be relocated by this persistence backend`,
+    ))
+  }
 }
 
 export default SessionPersistence

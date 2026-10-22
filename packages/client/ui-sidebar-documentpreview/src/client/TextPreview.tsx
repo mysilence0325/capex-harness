@@ -24,12 +24,10 @@ import { emptyFailureRecourse, failureLine } from './failure-line.ts'
 import { LoadingIndicator } from './LoadingIndicator.tsx'
 import { hostFileOf } from './rpc.ts'
 import type { TextStore } from './store.ts'
-import { CODE_BODY_ID } from './code/index.ts'
 import type { DocumentContent } from './document/contract.ts'
 import { binaryDocumentPath, matchingDocumentPreviews } from './document/registry.ts'
 import type { DocumentPreviewDefinition } from './document/registry.ts'
 import { unviewableBinaryPath } from './document/unviewable.ts'
-import { PDF_BODY_ID } from './pdf/index.ts'
 import { PLAIN_BODY_ID } from './text/index.ts'
 import { loadedPages, lastLineLoaded, scrollToLine } from './text/lines.ts'
 import css from './TextPreview.module.css'
@@ -226,9 +224,6 @@ export function TextPreview({
     )
   }
   const next = loadedThrough + 1
-  // The body's layout follows the elected renderer: a code body owns its own
-  // scrolling, and a PDF body paints the document surface behind its pages.
-  const previewKind = selected.id === CODE_BODY_ID ? 'code' : selected.id === PDF_BODY_ID ? 'pdf' : undefined
   const { name } = pathPartsOf(displayPath)
   const loadNext = (): void => {
     if (!canRead || current?.loading || current?.eof) return
@@ -334,7 +329,6 @@ export function TextPreview({
         ref={bindBody}
         className={clsx(css.body, state.wrap && css.wrap)}
         data-textpreview-body
-        data-preview-kind={previewKind}
         data-textpreview-wrap={state.wrap ? '' : undefined}
         onScrollCapture={(event) => {
           const body = scrollportRef.current

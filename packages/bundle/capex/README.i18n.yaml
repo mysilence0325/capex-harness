@@ -1,0 +1,34 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/bundle/capex/README.md
+/:
+  en: 27319177225ac2d6
+  zh: 6e16c2a8905a1457
+/deepseek-ai-dsh-capex:
+  en: 4b1a2923d5506c57
+  zh: ece55a91a9cc6727
+/deepseek-ai-dsh-capex/summary:
+  en: 721a545b568d9ac2
+  zh: 66a637b493bd8ef4
+/deepseek-ai-dsh-capex/table-of-contents:
+  en: 2fee9973f19f9401
+  zh: ecc02ac572f117b8
+/deepseek-ai-dsh-capex/use-this-package:
+  en: 85144b93432ebf8f
+  zh: 4c4fe774dd715a8a
+/deepseek-ai-dsh-capex/understand-the-implementation:
+  en: ca1d63022d75aba6
+  zh: a45459bde90cea0f
+/deepseek-ai-dsh-capex/model-experience:
+  en: 28cc6a59db39fd37
+  zh: ca8431079a81eaa5
+/deepseek-ai-dsh-capex/model-experience/kv-cache-effect:
+  en: 4f0eadf94828e66e
+  zh: 97d3eb3e79199354
+/deepseek-ai-dsh-capex/known-limitations-and-deferred-work:
+  en: a0160d4e59a32bdc
+  zh: adab2357967522ee
+/deepseek-ai-dsh-capex/known-limitations-and-deferred-work/dev-note:
+  en: e67f633dc6fe7773
+  zh: 3ca05c47cf910648

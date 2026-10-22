@@ -56,6 +56,18 @@
   white-space: nowrap;
 }
 
+.localIdentityTrigger {
+  padding-left: 10px;
+}
+
+.identityLabel {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
 /* Full-viewport layer (figma Mask 501:29946 #000@24%): mask tokens match the
    Modal primitive (--dsw-alias-bg-mask-1 + --dsw-mask-blur). */
 .overlay {

@@ -21,13 +21,13 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* Second sacrifice after the preset label: at 480px the title row marks
-   itself data-tight (published by ui-conversation
-   skeleton/title-row-markers.ts) and the trigger keeps only its icon.
-   TeamAction reads the collapsed state off this rule to switch from hover-open
-   to click-only. */
-[data-tight] .triggerLabel {
-  display: none;
+/* Second sacrifice after the preset label: past this title-row width the
+   trigger keeps only its icon. TeamAction reads the collapsed state off this
+   rule to switch from hover-open to click-only. */
+@container (max-width: 480px) {
+  .triggerLabel {
+    display: none;
+  }
 }
 
 .count {
@@ -91,8 +91,8 @@
   flex: 1 1 auto;
   min-height: 0;
   padding: 0 9px 16px 14px;
-  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
-  overflow-y: scroll;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .taskTitle {

@@ -488,52 +488,52 @@
   width: 100%;
 }
 
-/* The pane states its own width through the marker below: Chromium 90 has no
-   container queries (chrome 105). */
-[data-narrow] .eventColumn {
-  width: 50px;
-}
+@container trajectory-table (max-width: 620px) {
+  .eventColumn {
+    width: 50px;
+  }
 
-[data-narrow] .event {
-  padding-right: 3px !important;
-  padding-left: 28px !important;
-}
+  .event {
+    padding-right: 3px !important;
+    padding-left: 28px !important;
+  }
 
-[data-narrow] .requestBoundaryControl {
-  --request-boundary-base-left: 6px;
-}
+  .requestBoundaryControl {
+    --request-boundary-base-left: 6px;
+  }
 
-[data-narrow] .kindSlot {
-  width: 19px;
-}
+  .kindSlot {
+    width: 19px;
+  }
 
-[data-narrow] .kindTag,
-[data-narrow] .table .kindSlot .message {
-  justify-content: center;
-  width: 19px;
-  padding-right: 0;
-  padding-left: 0;
-}
+  .kindTag,
+  .table .kindSlot .message {
+    justify-content: center;
+    width: 19px;
+    padding-right: 0;
+    padding-left: 0;
+  }
 
-[data-narrow] .kindTagIcon {
-  width: 13px;
-  opacity: 1;
-  transform: scale(1);
-}
+  .kindTagIcon {
+    width: 13px;
+    opacity: 1;
+    transform: scale(1);
+  }
 
-[data-narrow] .kindTagLabel {
-  max-width: 0;
-  opacity: 0;
-}
+  .kindTagLabel {
+    max-width: 0;
+    opacity: 0;
+  }
 
-[data-narrow] .turnLabelFull {
-  max-width: 0;
-  opacity: 0;
-}
+  .turnLabelFull {
+    max-width: 0;
+    opacity: 0;
+  }
 
-[data-narrow] .turnLabelCompact {
-  max-width: 64px;
-  opacity: 1;
+  .turnLabelCompact {
+    max-width: 64px;
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -1009,9 +1009,9 @@
   flex: 1;
   min-height: 0;
   overflow-x: hidden;
-  /* Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
-  overflow-y: scroll;
+  overflow-y: auto;
   padding-bottom: var(--dsh-trajectory-bottom-clearance, 0px);
+  scrollbar-gutter: stable;
 }
 
 .detailBodySummary {

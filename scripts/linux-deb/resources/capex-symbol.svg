@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Capex refined symbol</title>
+  <desc id="desc">A refined blue five-sector turbine C surrounding a clean yellow and red ascending aircraft.</desc>
+  <defs>
+    <linearGradient id="shell" x1="82" y1="420" x2="420" y2="72" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00AFFF"/>
+      <stop offset="0.5" stop-color="#087CF4"/>
+      <stop offset="1" stop-color="#174FEA"/>
+    </linearGradient>
+    <linearGradient id="upper-wing" x1="168" y1="284" x2="452" y2="82" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFE600"/>
+      <stop offset="0.58" stop-color="#FFAA00"/>
+      <stop offset="1" stop-color="#FF3154"/>
+    </linearGradient>
+    <linearGradient id="lower-wing" x1="242" y1="329" x2="452" y2="82" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF9F00"/>
+      <stop offset="0.55" stop-color="#FF5538"/>
+      <stop offset="1" stop-color="#FF3154"/>
+    </linearGradient>
+    <mask id="c-cut">
+      <rect width="512" height="512" fill="#000"/>
+      <path fill="#fff" d="M256 54c44 0 81 24 102 60 40-3 78 19 96 54 18 36 11 78-16 107 17 39 5 85-29 111-34 27-80 28-115 6-32 28-80 34-118 12-38-22-58-64-51-106-38-17-64-54-61-96 3-42 35-77 75-88 20-37 64-61 105-57 4-2 8-3 12-3Z"/>
+      <path fill="#000" d="M258 143c-63 0-114 51-114 114 0 62 50 113 113 113 41 0 78-22 98-55l-68-24c-9 11-22 18-37 18-28 0-51-23-51-51 0-29 23-52 51-52 18 0 34 9 43 23l43-66c-22-13-49-20-78-20Z"/>
+      <path fill="#000" d="m277 208 215-143-99 211 100 98-221-66 45-52Z"/>
+    </mask>
+  </defs>
+  <path fill="url(#shell)" mask="url(#c-cut)" d="M256 54c44 0 81 24 102 60 40-3 78 19 96 54 18 36 11 78-16 107 17 39 5 85-29 111-34 27-80 28-115 6-32 28-80 34-118 12-38-22-58-64-51-106-38-17-64-54-61-96 3-42 35-77 75-88 20-37 64-61 105-57 4-2 8-3 12-3Z"/>
+  <path fill="url(#upper-wing)" d="m168 263 284-181-157 191-52 11-36 70-17-68-22-23Z"/>
+  <path fill="url(#lower-wing)" d="M242 307 452 82 309 329l-46-3-21-19Z"/>
+</svg>

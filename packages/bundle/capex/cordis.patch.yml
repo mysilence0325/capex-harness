@@ -1,0 +1,54 @@
+# Capex offline Web composition. Applied after dsh-base and dsh-web-app.
+#
+# Keep credentials-local mounted: client-connection stores its signed browser
+# session secret through that provider. Only cloud-account consumers are
+# removed from this deployment.
+
+- id: authorization
+  disabled: true
+- id: deepseek-account
+  disabled: true
+- id: llm-deepseek-account
+  disabled: true
+- id: account-controller
+  disabled: true
+- id: ui-settings-account
+  disabled: true
+
+# Belt-and-braces network posture for an offline product. The base bundle
+# already disables these rows; this layer prevents a future Web override from
+# silently re-enabling them without an explicit Capex patch.
+- id: web-search-deepseek
+  disabled: true
+- id: web-deepseek-api
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: tool-web
+  disabled: true
+
+- id: ui-sidebar-documentpreview
+  config:
+    office:
+      maxCachedEntries: 8
+      maxCachedBytes: 67108864
+      maxPending: 8
+      maxReaders: 32
+      prewarmOnIdle: true
+    excel:
+      maxBytes: 16777216
+      maxCells: 250000
+      timeoutMs: 15000
+
+- insert:
+    - id: local-user
+      name: '@deepseek-ai/dsh-local-user'
+
+    - id: desktop-open
+      name: '@deepseek-ai/dsh-client-ui-desktop-open'
+
+    - id: storage-maintenance
+      name: '@deepseek-ai/dsh-storage-maintenance'
+
+    - id: ui-settings-storage
+      name: '@deepseek-ai/dsh-client-ui-settings-storage'

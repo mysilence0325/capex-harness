@@ -21,7 +21,7 @@ function declarationsFrom(source: string, selector: string): string[] {
 describe('pinned collapsible headers', () => {
   it('pins an open Think header to the scrollport top and masks the prose under it', () => {
     expect(
-      declarationsFrom(read('ReasoningRow.module.css'), '.root[data-expanded] [data-open] [data-disclosure-row]'),
+      declarationsFrom(read('ReasoningRow.module.css'), '.root[data-expanded] [data-open] [data-disclosure-header]'),
     ).toEqual(expect.arrayContaining([
       'position: sticky',
       'top: 0',
@@ -32,7 +32,7 @@ describe('pinned collapsible headers', () => {
 
   it('ranks the pinned compaction header above the code-block banner', () => {
     expect(
-      declarationsFrom(read('MessageItem.module.css'), '.compactionRow[data-open] .compactionButton'),
+      declarationsFrom(read('MessageItem.module.css'), '.compactionRow:has(.compactionBody) .compactionButton'),
     ).toEqual(expect.arrayContaining([
       'position: sticky',
       'top: 0',
@@ -57,14 +57,14 @@ describe('pinned collapsible headers', () => {
     expect(declarationsFrom(css, '.compactionButton')).toEqual(expect.arrayContaining([
       'height: var(--dsh-compaction-header-height)',
     ]))
-    expect(declarationsFrom(css, '.compactionBody [data-code-block-banner-wrap]')).toEqual(expect.arrayContaining([
+    expect(declarationsFrom(css, '.compactionBody :has(> [data-code-block-banner])')).toEqual(expect.arrayContaining([
       'top: var(--dsh-compaction-header-height)',
     ]))
   })
 
   it('keeps the pinned compaction header opaque under hover', () => {
     expect(
-      declarationsFrom(read('MessageItem.module.css'), '.compactionRow[data-open] .compactionButton:hover'),
+      declarationsFrom(read('MessageItem.module.css'), '.compactionRow:has(.compactionBody) .compactionButton:hover'),
     ).toEqual(expect.arrayContaining(['background: var(--dsw-alias-interactive-bg-hover-solid)']))
   })
 })

@@ -46,26 +46,26 @@ interface ResourceRecord {
 export const RESOURCE_SCHEME = 'dsh-resource'
 
 /**
- * The protocol key of one address: the host of a `dsh-resource://` address
- * between `://` and the first `/`, `?`, or `#`, lower-cased. Any other string —
- * another scheme, or an address whose host segment is empty — names no protocol
- * and is treated like an address whose protocol has no provider.
+ * Scheme and host of one resource address, split without the URL parser.
  *
- * The host is read from the string rather than from `new URL`, because a
- * non-special scheme's host parsing is engine-dependent: Chromium 90 reads no
- * host for `dsh-resource://file/…`, reports `hostname === ''`, and leaves the
- * whole remainder in the opaque path, so a URL-based read calls every such
- * address protocol-less on that engine.
+ * The URL parser does not agree on non-special schemes: Chromium 102 leaves
+ * `dsh-resource://file/...` with an empty `hostname` and an opaque
+ * `//file/...` pathname, while later versions report `file` as the host.
+ * Reading the address text keeps every shell on the same protocol key.
+ */
+const RESOURCE_ADDRESS = new RegExp(`^${RESOURCE_SCHEME}://([^/?#]+)`, 'i')
+
+/**
+ * The protocol key of one address: the host of a `dsh-resource://` URL, as the
+ * URL parser reads it (lower-cased). Any other string — another scheme, or one
+ * the URL parser rejects — names no protocol and is treated like an address
+ * whose protocol has no provider.
  * @param address - the full address.
  * @returns the protocol key, or `undefined` when the address is not a resource address.
  */
 export function protocolOf(address: string): string | undefined {
-  const prefix = `${RESOURCE_SCHEME}://`
-  if (address.slice(0, prefix.length).toLowerCase() !== prefix) return undefined
-  const rest = address.slice(prefix.length)
-  const end = rest.search(/[/?#]/)
-  const protocol = end === -1 ? rest : rest.slice(0, end)
-  return protocol === '' ? undefined : protocol.toLowerCase()
+  const host = RESOURCE_ADDRESS.exec(address)?.[1]
+  return host === undefined || host === '' ? undefined : host.toLowerCase()
 }
 
 function idle(status: 'none' | 'loading'): ResourceSnapshot<unknown> {

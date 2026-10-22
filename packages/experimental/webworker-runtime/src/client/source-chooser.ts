@@ -33,6 +33,7 @@ const CHOOSER_STYLE = `
   }
   [data-preview-source-card] {
     width: min(600px, 100%);
+    max-height: calc(100vh - 48px);
     max-height: calc(100dvh - 48px);
     box-sizing: border-box;
     padding: 28px;

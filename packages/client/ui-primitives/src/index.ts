@@ -22,6 +22,7 @@ export { SegmentedControl } from './SegmentedControl.tsx'
 export type { SegmentedControlOption } from './SegmentedControl.tsx'
 export { Checkbox } from './Checkbox.tsx'
 export { Input } from './Input.tsx'
+export { InlineEditor } from './InlineEditor.tsx'
 export { Menu, MenuItemButton } from './Menu.tsx'
 export { MenuSurface } from './MenuSurface.tsx'
 export type { MenuSurfaceProps } from './MenuSurface.tsx'
@@ -30,9 +31,9 @@ export type { MenuItemButtonProps, MenuEntry, MenuItem, MenuSeparator, MenuLabel
 export { useAnchoredMaxHeight } from './useAnchoredMaxHeight.ts'
 export { useAnchoredPosition } from './useAnchoredPosition.ts'
 export type { AnchoredPositionOptions } from './useAnchoredPosition.ts'
-export { useNarrowAttribute } from './useNarrowAttribute.ts'
 export { useDismissOnOutsidePointer } from './useDismissOnOutsidePointer.ts'
 export { HoverCard } from './HoverCard.tsx'
+export { HoverCardGroup } from './HoverCardGroup.tsx'
 export { ShortcutKeys } from './ShortcutKeys.tsx'
 export { observeComposition } from './keyboard-composition.ts'
 export { focusWithoutRing } from './focus.ts'
@@ -43,9 +44,19 @@ export type { RiskConfirmationProps } from './RiskConfirmation.tsx'
 export { ConnectionIndicator } from './ConnectionIndicator.tsx'
 export type { ConnectionIndicatorState } from './ConnectionIndicator.tsx'
 export { FishLogo, FISH_LOGO_PATH, FISH_LOGO_VIEWBOX } from './FishLogo.tsx'
+export {
+  CapexLogo, CAPEX_LOGO_CUT_PATHS, CAPEX_LOGO_LOWER_WING_PATH, CAPEX_LOGO_SHELL_PATH,
+  CAPEX_LOGO_UPPER_WING_PATH, CAPEX_LOGO_VIEWBOX,
+} from './CapexLogo.tsx'
+export {
+  CapexWordmark, CAPEX_WORDMARK_PATH, CAPEX_WORDMARK_STROKE, CAPEX_WORDMARK_VIEWBOX,
+} from './CapexWordmark.tsx'
+export type { CapexWordmarkProps } from './CapexWordmark.tsx'
+export { HIDDEN_MODEL_PROVIDERS, isHiddenModelProvider } from './hidden-providers.ts'
 export { BrandWordmark } from './BrandWordmark.tsx'
 export type { BrandWordmarkProps } from './BrandWordmark.tsx'
 export {
+  PermissionIconAutoReviewMedium, PermissionIconAutoReviewRegular,
   PermissionIconFullAccessMedium, PermissionIconFullAccessRegular,
   PermissionIconReadOnlyMedium, PermissionIconReadOnlyRegular,
   PermissionIconWorkspaceWriteMedium, PermissionIconWorkspaceWriteRegular,
@@ -58,7 +69,7 @@ export { FileTypeIcon, classifyFileType, fileExtension } from './FileTypeIcon.ts
 export type {
   CodeFileType, FileType, FileTypeIconProps, FileTypeKind, FileTypeProjectContext,
 } from './FileTypeIcon.tsx'
-export { projectUserText, type UserTextReferences } from './user-text.tsx'
+export { UserTextRun, ReferenceChip, type UserTextRunProps, type ReferenceChipProps } from './user-text.tsx'
 export { Tooltip } from './Tooltip.tsx'
 export type { TooltipSide } from './Tooltip.tsx'
 export { pointerModality } from './input-modality.ts'
@@ -83,6 +94,8 @@ export type { RelativeTime, RelativeTimeUnit } from './relative-time.ts'
 export { JsonTree } from './JsonTree.tsx'
 export type { JsonTreeProps, JsonTreeLabels } from './JsonTree.tsx'
 export { TerminalBlock, DEFAULT_TERMINAL_MAX_LINES } from './TerminalBlock.tsx'
+export { CommandText } from './CommandText.tsx'
+export type { CommandTextProps } from './CommandText.tsx'
 export type { TerminalBlockProps, TerminalBlockLabels } from './TerminalBlock.tsx'
 export { ReadBlock, DEFAULT_READ_MAX_LINES } from './ReadBlock.tsx'
 export type { ReadBlockProps, ReadBlockLine, ReadBlockLabels } from './ReadBlock.tsx'

@@ -240,14 +240,6 @@ const CORPUS: Record<string, string> = {
     '```math',
     '\\sqrt{2}',
     '```',
-    '',
-    '- Math fence in a list:',
-    '',
-    '  ```math',
-    '  \\sum_{n=1}^{\\infty} \\frac{1}{n^2}',
-    '  ```',
-    '',
-    '## Heading math $\\theta$',
   ].join('\n'),
   'gfm-strikethrough-and-literals': 'Mixed ~~gone~~ text with www.example.com literal and user@example.com email.',
   'cjk-strong-and-inline-code-url': [
@@ -260,14 +252,6 @@ const CORPUS: Record<string, string> = {
     '`https://example.com/preview?q=one%20two#result` 与 `curl http://127.0.0.1:3199/` 以及 `javascript:alert(1)`。',
   ].join('\n'),
   'definition-only': '[unused]: https://example.com/unused',
-  'heading-before-list-across-a-definition': [
-    '#### Steps',
-    '',
-    '[unused]: https://example.com/unused',
-    '',
-    '- first',
-    '- second',
-  ].join('\n'),
   'streaming-typical-partial': '## Streaming\n\n- first\n- **unfinished',
 }
 

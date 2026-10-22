@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write scripts/linux-deb/README.md
+/linux-arm64-debian-package:
+  en: 8eeebd7d97c0054f
+  zh: e99d9a5d1a15351a
+/linux-arm64-debian-package/build-host-requirements:
+  en: d23f5c45f008286e
+  zh: 805b239e2617909d
+/linux-arm64-debian-package/usage:
+  en: 567fc94aa7e2b649
+  zh: 232d57f06028ef55
+/linux-arm64-debian-package/offline-deployment:
+  en: 738710285183886a
+  zh: cb0b98a18396bba6
+/linux-arm64-debian-package/browser-baseline:
+  en: 3af0b8711655413f
+  zh: d127314bb931e30b
+/linux-arm64-debian-package/stages:
+  en: b414abd574c6de15
+  zh: 1df3696ea3ffbdd5
+/linux-arm64-debian-package/output:
+  en: 735d7d8891576ceb
+  zh: 72b870675c1204ce
+/linux-arm64-debian-package/offline-python-extras-and-wps-conversion:
+  en: 23bbf1398b9cd4ec
+  zh: d845e6ca3e6b93e8
+/linux-arm64-debian-package/verification-and-limits:
+  en: 3ba61b8a6265ed69
+  zh: a509e922dd1a7c28

@@ -1,0 +1,64 @@
+# ARM64 offline authoring, analysis, and development extras installed into both bundled
+# CPython environments. The build records the exact resolved versions and wheel
+# hashes in the artifact manifest; only binary wheels are accepted.
+
+# PDF
+pypdf
+pdfplumber
+pypdfium2
+reportlab
+
+# Markdown and HTML
+markdown
+markdown-it-py
+mdit-py-plugins
+pymdown-extensions
+python-frontmatter
+beautifulsoup4
+markdownify
+
+# Office and WPS compatibility
+python-docx
+python-pptx
+openpyxl
+XlsxWriter
+xlrd
+pyxlsb
+python-calamine
+olefile
+msoffcrypto-tool
+defusedxml
+
+# General development
+requests
+httpx
+PyYAML
+tomlkit
+orjson
+jsonschema
+Jinja2
+click
+typer
+rich
+tqdm
+python-dotenv
+filelock
+tenacity
+GitPython
+SQLAlchemy
+pytest
+pytest-cov
+coverage
+pydantic
+
+# Offline package-manager bootstrap
+pip
+setuptools
+wheel
+
+# Data analysis
+scipy
+matplotlib
+seaborn
+pyarrow
+tabulate

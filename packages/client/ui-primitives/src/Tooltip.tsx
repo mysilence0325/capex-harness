@@ -14,8 +14,8 @@ import { pointerModality } from './input-modality.ts'
 export type TooltipSide = 'right' | 'bottom' | 'top'
 
 /**
- * Suppression channel for enclosing tooltip and hover-card anchors: a visible
- * tooltip within an anchor withdraws the enclosing preview while its bubble is shown.
+ * Suppression channel for nested tooltips: a visible descendant tooltip
+ * withdraws the enclosing tooltip while its bubble is shown.
  */
 export const TooltipSuppression = createContext<((suppressed: boolean) => void) | null>(null)
 
@@ -213,7 +213,6 @@ export function Tooltip({ label, shortcutKeys, side = 'right', align = 'center',
       data-pinned={pinned || undefined}
       data-align={align}
       data-has-shortcut={shortcutKeys?.length ? true : undefined}
-      data-has-label={resolvedLabel ? true : undefined}
       style={{ left: pos.x, top: y, visibility: 'hidden', ...maxWidth === undefined ? {} : { maxWidth } }}
       role="tooltip"
       aria-label={shortcutKeys?.length ? [resolvedLabel, shortcutKeys.join(' ')].filter(Boolean).join(' ') : undefined}

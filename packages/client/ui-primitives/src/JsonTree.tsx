@@ -540,8 +540,6 @@ function JsonTreeNode({
       className={css.row}
       role="treeitem"
       aria-expanded={ariaExpanded}
-      data-string-row={typeof value === 'string' || undefined}
-      data-copy-slot={renderCopy === undefined ? undefined : true}
       onMouseOver={(event) => {
         event.stopPropagation()
         onRowHover(event.currentTarget, { path, value })
@@ -707,44 +705,21 @@ export function JsonTree({
       : pathId([Array.isArray(data) ? firstExpandableIndex : firstExpandableEntry[0]])
     : isExpandableValue(data) && rootEntries.length > 0 ? pathId([]) : null
   const activeRowRef = useRef<HTMLElement>()
-  const hoveredRowRef = useRef<HTMLElement>()
-  const topLevelRef = useRef<HTMLDivElement>(null)
   const resetTimer = useRef<ReturnType<typeof setTimeout>>()
   const copySequence = useRef(0)
   const [copyStore] = useState(createCopyStore)
   const [tabStopId, setTabStopId] = useState<string | null>(initialTabStopId)
 
-  // The expanded top level highlights as one block while either of its bracket
-  // rows is the hover or copy target; the block is the container, so the mark
-  // lives on it rather than on the bracket row.
-  const syncTopLevelMark = () => {
-    const block = topLevelRef.current
-    if (block === null) return
-    const marked = hoveredRowRef.current?.hasAttribute('data-json-root-row') === true
-      || activeRowRef.current?.hasAttribute('data-json-root-row') === true
-    if (marked) block.setAttribute('data-json-hover', '')
-    else block.removeAttribute('data-json-hover')
-  }
-
-  const setHoveredRow = (row: HTMLElement | undefined) => {
-    hoveredRowRef.current?.removeAttribute('data-json-hover')
-    hoveredRowRef.current = row
-    row?.setAttribute('data-json-hover', '')
-    syncTopLevelMark()
-  }
-
   const setActiveRow = (row: HTMLElement | undefined) => {
     activeRowRef.current?.removeAttribute('data-json-copy-active')
     activeRowRef.current = row
     row?.setAttribute('data-json-copy-active', '')
-    syncTopLevelMark()
   }
 
   const clearCopyTarget = () => {
     copySequence.current += 1
     if (resetTimer.current !== undefined) clearTimeout(resetTimer.current)
     setActiveRow(undefined)
-    setHoveredRow(undefined)
     copyStore.set(undefined)
   }
 
@@ -752,7 +727,6 @@ export function JsonTree({
     copySequence.current += 1
     if (resetTimer.current !== undefined) clearTimeout(resetTimer.current)
     activeRowRef.current?.removeAttribute('data-json-copy-active')
-    hoveredRowRef.current?.removeAttribute('data-json-hover')
   }, [])
 
   useEffect(() => {
@@ -761,9 +735,6 @@ export function JsonTree({
   }, [data, expandTopLevel, initialTabStopId])
 
   const handleRowHover = (row: HTMLElement, target: RowTarget) => {
-    // Rows stop propagation, so this is the innermost hovered row — the one the
-    // row highlight keys on, whether or not the tree offers copy actions.
-    setHoveredRow(row)
     if (!copyable || copyStore.get()?.menuOpen) return
     if (activeRowRef.current === row) return
     setActiveRow(row)
@@ -774,10 +745,7 @@ export function JsonTree({
     if (!copyable || copyStore.get()?.menuOpen) return
     /* v8 ignore next -- browser mouse events delivered through React target an Element. */
     if (!(event.target instanceof Element)) return
-    if (event.target.closest('[data-json-copy-button]') === null) {
-      setHoveredRow(undefined)
-      clearCopyTarget()
-    }
+    if (event.target.closest('[data-json-copy-button]') === null) clearCopyTarget()
   }
 
   const copy = async (target: RowTarget, mode: CopyMode) => {
@@ -815,13 +783,12 @@ export function JsonTree({
       style={{ '--json-tree-collapsed-lines': collapsedStringLines } as CSSProperties}
       onMouseOver={handleRootMouseOver}
       onMouseLeave={() => {
-        setHoveredRow(undefined)
         if (!copyStore.get()?.menuOpen) clearCopyTarget()
       }}
     >
       {expandTopLevel
         ? (
-          <div className={css.expandedTopLevel} ref={topLevelRef}>
+          <div className={css.expandedTopLevel}>
             <div
               className={clsx(css.row, css.topLevelBracket)}
               data-json-root-row

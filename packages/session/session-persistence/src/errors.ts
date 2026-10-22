@@ -101,6 +101,16 @@ export class SessionPersistenceCorruptionError extends Error {
   }
 }
 
+/** Stable reasons a maintenance archive move cannot proceed. */
+export type SessionRelocationFailureCode =
+  | 'unsupported'
+  | 'active'
+  | 'not-found'
+  | 'invalid-destination'
+  | 'destination-exists'
+  | 'cross-device'
+  | 'failed'
+
 /**
  * The stored log is intact but this runtime cannot faithfully interpret it:
  * the header carries an unsupported format version, or an event's type is

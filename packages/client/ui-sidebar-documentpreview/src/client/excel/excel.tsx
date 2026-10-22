@@ -7,10 +7,12 @@ import type { ExcelFormat } from './format.ts'
 import type { ExcelPreview } from './model.ts'
 import type { LoadedExcelBodyProps } from './LazyExcelBody.tsx'
 import { parseExcel } from './parse.ts'
+import { scopeStyles } from './scope-styles.ts'
 import css from './ExcelBody.module.css'
 
 type State = { data: Uint8Array<ArrayBuffer>; format: ExcelFormat } & ({ value: ExcelPreview } | { error: string })
-const scopedStyles = `@scope ([data-excel-preview]) { ${fortuneCss} }`
+
+const scopedStyles = scopeStyles('[data-excel-preview]', fortuneCss)
 
 /**
  * Display stored spreadsheet values and formats without editing or recalculation.

@@ -1,6 +1,10 @@
 /** Browser entry for the Web client. */
 import '@deepseek-ai/dsh-client-ui-theme/brand-font.css'
-import { AppWebEntry, applyIndexInjections } from '@deepseek-ai/dsh-client-web'
+import { AppWebEntry, applyIndexInjections, installBrowserCompat } from '@deepseek-ai/dsh-client-web'
+
+// Before anything else: the shell's first statements and every plugin bundle
+// after them run on a Chromium 102 base that lacks several standard members.
+installBrowserCompat()
 
 interface DesktopBootGlobal {
   dshDesktopBoot?: {

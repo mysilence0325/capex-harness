@@ -22,7 +22,7 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
-.header:not([data-header-tabs]) {
+.header:where(:not(:has(.tabs))) {
   min-height: 0;
   padding-bottom: 10px;
 }
@@ -63,12 +63,11 @@
 
 .titleRow {
   grid-column: 2;
-  /* Kept for the containment it applies where container queries exist; header
-     occupants such as the preset label and slot actions now shed their text on
-     the row's own data-narrow (540px) and data-tight (480px) attributes
-     (skeleton/title-row-markers.ts), because Chromium 90 has no container
-     queries (chrome 105). The minmax(0, 1fr) column sizes the row, so
-     inline-size containment cannot collapse it. */
+  /* Anonymous inline-size container (CSS modules hash container-names per
+     module, so occupants match the nearest container): header occupants such
+     as the preset label and slot actions shed their text at row-width
+     breakpoints. The minmax(0, 1fr) column sizes the row, so inline-size
+     containment cannot collapse it. */
   container-type: inline-size;
   display: flex;
   align-items: center;
@@ -327,7 +326,7 @@ button.crumb:hover {
 
 /* Views that elect a composer overlay (trajectory etc.) own their full-bleed
    scrollers; the strips would sit over their content and steal clicks. */
-.root[data-composer-overlay] .widthHandle {
+.root:has([data-conversation-composer-overlay]) .widthHandle {
   display: none;
 }
 
@@ -408,12 +407,12 @@ button.crumb:hover {
      `.list`, ui-sidebar-files FilesBody `.body`): the bar sits 2px clear of
      the column's edge instead of flush against it. */
   margin-right: 2px;
+  overflow-y: auto;
   /* Reserved unconditionally: the composer seat rides this box's content box in
      Chat and its padding box under a view's composer overlay, so an `auto`
      gutter moves the input card sideways by the bar's width whenever the two
-     differ ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)).
-     Chromium 90 has no scrollbar-gutter (chrome 94); an always-present bar reserves the same space. */
-  overflow-y: scroll;
+     differ ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
+  scrollbar-gutter: stable;
 }
 
 /* The bar also stops 2px short of the scroller's ends, matching its 2px edge
@@ -464,7 +463,7 @@ button.crumb:hover {
 
 /* Views may opt into a composer overlay while ConversationRoot retains
    ownership of the seat geometry and its active-phase precedence. */
-.root[data-composer-overlay] .scrollBody {
+.scrollBody:has([data-conversation-composer-overlay]) {
   position: relative;
   /* A clipping box nothing scrolls out of, stated as a scroll container on both
      axes rather than `overflow: hidden`: a single-axis scroller computes the
@@ -474,19 +473,19 @@ button.crumb:hover {
   overflow-y: auto;
   /* The view owns its own scrollers (the trajectory ledger scrolls inside the
      view), so this box never scrolls here; reserving a gutter would only
-     narrow the view's content by the bar's width, and `overflow-y: auto`
-     drops the base rule's reservation here. Chat keeps the reservation on the
-     same element, so the seat below compensates with the bar's width
+     narrow the view's content by the bar's width. Chat keeps the reservation
+     on the same element, so the seat below compensates with the bar's width
      ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
+  scrollbar-gutter: auto;
 }
 
-.root[data-composer-overlay] .scrollBody > :global([data-slot='conversation.session']) > .viewArea {
+.scrollBody:has([data-conversation-composer-overlay]) > :global([data-slot='conversation.session']) > .viewArea {
   flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
 }
 
-.root[data-composer-overlay] .scrollBody > .composerSeat {
+.scrollBody:has([data-conversation-composer-overlay]) > .composerSeat {
   position: absolute;
   /* Chat's seat rides this box's content box, which its own scrolling shortens
      by the bar's width; the overlay seat is against the padding box, so it
@@ -528,6 +527,20 @@ button.crumb:hover {
      closer to the card's inner controls below; right keeps the trailing
      preset seat off the card edge. */
   padding: 0 16px 0 20px;
+}
+
+/* Plugin options share the row, pushed to its right edge. */
+.heroOptions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.heroOptions:empty {
+  display: none;
 }
 
 /* Hero: the composer sits inside the session scroll body; center there so
