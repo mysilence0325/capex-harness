@@ -75,10 +75,9 @@ describe('identity injection', () => {
     })
     const rows: object[] = []
     for (const listener of listeners) listener(rows)
-    expect(rows).toEqual([{
-      kind: 'global',
-      name: LOCAL_USER_IDENTITY_GLOBAL,
-      value: expect.objectContaining({ displayName: '张三', login: 'user01' }),
-    }])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      kind: 'global', name: LOCAL_USER_IDENTITY_GLOBAL, value: { displayName: '张三', login: 'user01' },
+    })
   })
 })

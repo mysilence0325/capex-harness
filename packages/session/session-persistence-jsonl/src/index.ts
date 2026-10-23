@@ -375,7 +375,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     const source = dirname(current.currentPath)
     const target = resolve(destination)
-    if (await stat(target).then(() => true, error => {
+    if (await stat(target).then(() => true, (error: unknown) => {
       if (isENOENT(error)) return false
       throw error
     })) {

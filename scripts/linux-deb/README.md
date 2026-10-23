@@ -79,10 +79,29 @@ not run inside the arm64 container. The payload phase then runs in the arm64
 container, reinstalls the workspace for arm64, and assembles everything else.
 `--js-image` names the image for the first phase and defaults to the base image.
 
+## Build performance
+
+A full first build is dominated by arm64 execution under qemu, workspace installation, SDK/runtime generation, and compression of the approximately 1.1 GB payload. On the current VM, four vCPUs are the primary limit.
+
+- Reuse the same `--work` and `--cache` for iterative packages. Run `prepare` when source dependencies, toolchains, native modules, resources, or generated runtime inputs change; otherwise run only `package` and `reports`.
+- Use `--skip-smoke` only to shorten intermediate iterations. The delivery build always runs the installed-package smoke.
+- Never delete the dependency cache to make a routine rebuild faster; deleting it forces network downloads and regeneration.
+- Increasing VM vCPUs is the largest hardware improvement. QEMU still limits each arm64 process, but independent compiler, packaging, and runtime jobs can use additional cores.
+- The `--cache` directory does not replace the work store or installed workspace closure. Preserve `work/store`, `work/.pnpm-store`, and the existing dependency tree when reusing a work tree, or allow one online prepare to populate them.
+- Do not blindly reuse state markers after changing static bundle files. Refresh the product tree or patch the corresponding packaged file; otherwise tests can pass against source while the artifact retains an older profile.
+- Native binaries are not guaranteed to exist in the source tree. Build the platform addons and verify `bin/glibc/system.node`, `bin/musl/system.node`, `bin/landlock-run`, and `node-pty` before packaging; loading the module without exercising a lock is insufficient.
+- ELF discovery dominates package time under qemu. Cache the version-info result while the product is unchanged, and prefilter non-ELF files in future packaging changes.
+- Default xz compression can take tens of minutes on this VM. A lower xz level retained broadly compatible dpkg support and reduced packaging to about 17 minutes while producing a 1.13 GB deb in the rc.3 build.
+- Treat registry/CDN timeouts as a cache defect first. Mount npm and pnpm metadata caches, reuse the locked store, and keep full smoke for the final artifact.
+- Runtime verification must execute the packaged launcher, not grep its text. Test the stale URL left after reboot, the complete browser argv, a real native lock, and plugin activation.
+
 ## Output
 
 - `capex-harness_<version>_arm64.deb` — the package. It installs `/usr/bin/dsh` (source-built closure on the bundled Node.js), `/usr/bin/dsh-sdk` (the packaged Python runtime wheel's console script with a default `DSH_HOME`), `/usr/bin/dsh-python` (bundled CPython), `/usr/bin/dsh-pip` (offline pip over the bundled wheelhouse), `/usr/bin/dsh-office-convert` (WPS-aware Office conversion), and the payload under `/usr/lib/capex-harness`.
-- Desktop integration: an application-menu entry (`Capex Harness`) and the launcher a click runs (`/usr/bin/dsh-web`) start the `capex` profile, wait for its authenticated URL, and open it in a Chromium application window when available. The entry accepts file URIs through `%U`; `/usr/bin/dsh-web-register-file-types` opts the current user into supported document associations. Run the desktop-icon helper as the desktop user, never with `sudo`. `--python-only` ships no shortcut, because the launcher runs the bundled Node.js CLI.
+- Desktop integration: an application-menu entry (`Capex Harness`) and the launcher a click runs (`/usr/bin/dsh-web`) start the `capex` profile, wait for its authenticated URL, and open it in the current default browser. The launcher honors `DSH_BROWSER`, preserves the default browser's desktop-entry arguments, requests `--app` from Chromium-compatible browsers, retains the installed QiAnXin launcher as a fallback, and finally uses `xdg-open`. Packaged Web builds use `Capex Harness` for both the document and application-frame title. The entry accepts file URIs through `%U`; `/usr/bin/dsh-web-register-file-types` opts the current user into supported document associations. Run the desktop-icon helper as the desktop user, never with `sudo`. `--python-only` ships no shortcut, because the launcher runs the bundled Node.js CLI.
+- Each OS user gets a separate `$HOME/.dsh` and private runtime URL under `$XDG_RUNTIME_DIR` (or `/tmp/capex-harness-<uid>`), so a shared host does not reuse another user's Host. The Settings fallback identifies the Host process owner.
+- The `capex` profile defaults to the `capexai` OpenAI Chat Completions route at `http://15.11.40.44:3100/v1` and the `deepseek-flash` model. Its credential reference is `CAPEXAI_API_KEY`; the package contains no secret. Users can add further providers in Settings.
+- The arm64 payload includes the glibc and musl `system.node` addons, the static `landlock-run` launcher, and the `node-pty` addon. Package smoke loads `system.node` and acquires a real exclusive file lock.
 - `DEPENDENCIES.md` — every apt package, npm tarball, PyPI distribution, locked archive, image, and locally built artifact the build resolved, with versions, sources, digests, and whether the bytes ship inside the package.
 - `manifest.json` — the same inventory in machine-readable form, with the source revision and the payload's glibc symbol ceiling.
 - `verify-on-target.sh` — run it on the target machine after installing: it checks the architecture, glibc, installed commands, and that the seeded resource cache serves the runtime with downloads disabled.

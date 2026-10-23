@@ -204,7 +204,7 @@ async function checkTempAndSpawn(): Promise<DoctorCheck> {
   }
 }
 
-async function checkProxy(url: string | undefined): Promise<DoctorCheck> {
+function checkProxy(url: string | undefined): DoctorCheck {
   const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.HTTP_PROXY ?? process.env.http_proxy
   if (proxy === undefined || proxy === '') return check('proxy', 'pass', 'No outbound HTTP proxy is set')
   if (url === undefined) return check('proxy', 'warn', 'An HTTP proxy is set; verify it excludes the model host', proxy.replace(/\/\/[^/@]+@/u, '//***@'))
@@ -278,14 +278,14 @@ export async function runDoctor(args: readonly string[]): Promise<number> {
         error instanceof Error ? error.message : String(error)))
     }
   }
-  checks.push(await checkProxy([...urls][0]))
+  checks.push(checkProxy([...urls][0]))
   checks.push(await checkFonts())
   checks.push(await checkTempAndSpawn())
   try {
     if (process.platform === 'linux') {
       const root = process.env.DSH_ROOT ?? '/usr/lib/capex-harness'
       const info = await statfs(root === '' ? '/' : root)
-      const available = Number(info.bavail) * Number(info.bsize)
+      const available = info.bavail * info.bsize
       checks.push(available >= 5 * 1024 * 1024 * 1024
         ? check('disk', 'pass', 'At least 5 GiB is available', `${(available / 1024 / 1024 / 1024).toFixed(1)} GiB`)
         : check('disk', 'fail', 'Less than 5 GiB is available', `${(available / 1024 / 1024 / 1024).toFixed(1)} GiB`))

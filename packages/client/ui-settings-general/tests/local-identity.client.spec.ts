@@ -27,7 +27,7 @@ describe('parseLocalIdentity', () => {
     { version: 2, login: 'user01', displayName: '张三' },
     { version: 1, login: 1, displayName: '张三' },
     { version: 1, login: '', displayName: '' },
-  ])('rejects malformed or empty payload %#', value => {
+  ])('rejects malformed or empty payload %#', (value) => {
     expect(parseLocalIdentity(value)).toBeUndefined()
   })
 })

@@ -1,6 +1,8 @@
-import { existsSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   DESKTOP_ENTRY_PATH,
   DESKTOP_ICON_HELPER_PATH,
@@ -12,11 +14,31 @@ import {
   desktopIconHelper,
   desktopFileAssociationHelper,
   DESKTOP_MIME_TYPES,
+  desktopBrowserResolverRuntime,
   desktopLauncher,
   desktopPackageFiles,
 } from '../desktop.ts'
 
 const pluginDirectory = join(import.meta.dirname, '..')
+const temporaryDirectories: string[] = []
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
+})
+
+function runBrowserResolver(defaultBrowser: string, defaultHttpHandler: string, environment: NodeJS.ProcessEnv) {
+  return spawnSync(process.execPath, [
+    '-e',
+    desktopBrowserResolverRuntime(),
+    'resolve',
+    defaultBrowser,
+    defaultHttpHandler,
+    'http://127.0.0.1:3080/?token=test',
+  ], {
+    encoding: 'utf8',
+    env: environment,
+  })
+}
 
 describe('desktopEntry', () => {
   it('runs the launcher without a terminal window', () => {
@@ -62,17 +84,127 @@ describe('desktopLauncher', () => {
     expect(launcher).toContain('launch_url')
   })
 
-  it('opens the browser through xdg-open with a gio fallback', () => {
-    expect(launcher).toContain('command -v xdg-open')
-    expect(launcher).toContain('command -v gio')
-    expect(launcher).toContain('open_in_browser')
+  it('isolates each OS user\'s Host, runtime URL, and harness home', () => {
+    expect(launcher).toContain('DSH_HOME="${DSH_HOME:-$HOME/.dsh}"')
+    expect(launcher).toContain('RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/capex-harness-$(id -u)}"')
+    expect(launcher).toContain('URL_FILE="$RUNTIME_DIR/web-url"')
+    expect(launcher).toContain('stat -c %u "$RUNTIME_DIR"')
   })
 
-  it('opens supported launches through a Chromium app window', () => {
-    expect(launcher).toContain('--app="$1"')
-    expect(launcher).toContain('qaxbrowser')
-    expect(launcher).toContain('searchParams.set("open"')
-    expect(launcher).toContain('searchParams.set("workspace"')
+  it("keeps the system default browser's complete QiAnXin launch arguments", () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-qaxbrowser-'))
+    temporaryDirectories.push(home)
+    const applications = join(home, '.local', 'share', 'applications')
+    const browser = join(home, 'opt', 'qianxin', 'qaxbrowser-safe-stable')
+    mkdirSync(applications, { recursive: true })
+    mkdirSync(join(home, 'opt', 'qianxin'), { recursive: true })
+    writeFileSync(browser, '#!/bin/sh\n')
+    chmodSync(browser, 0o755)
+    writeFileSync(join(applications, 'qaxbrowser.desktop'), [
+      '[Desktop Entry]',
+      'Type=Application',
+      'Name=QiAnXin Trusted Browser',
+      `Exec="${browser.replaceAll('\\', '/')}" --flag-switches-begin --flag-switches-end --qax-dsi --qax-dws %U`,
+      '',
+    ].join('\n'))
+
+    const result = runBrowserResolver('qaxbrowser.desktop', '', {
+      HOME: home,
+      PATH: join(home, 'opt', 'qianxin'),
+      XDG_DATA_HOME: join(home, '.local', 'share'),
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      command: realpathSync(browser),
+      args: [
+        '--flag-switches-begin',
+        '--flag-switches-end',
+        '--qax-dsi',
+        '--qax-dws',
+        '--app=http://127.0.0.1:3080/?token=test',
+      ],
+    })
+  })
+
+  it('does not force app mode on a non-Chromium default browser', () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-firefox-'))
+    temporaryDirectories.push(home)
+    const applications = join(home, '.local', 'share', 'applications')
+    const browser = join(home, 'opt', 'firefox', 'firefox')
+    mkdirSync(applications, { recursive: true })
+    mkdirSync(join(home, 'opt', 'firefox'), { recursive: true })
+    writeFileSync(browser, '#!/bin/sh\n')
+    chmodSync(browser, 0o755)
+    writeFileSync(join(applications, 'firefox.desktop'), [
+      '[Desktop Entry]',
+      'Type=Application',
+      'Name=Firefox',
+      `Exec="${browser.replaceAll('\\', '/')}" %U`,
+      '',
+    ].join('\n'))
+
+    const result = runBrowserResolver('firefox.desktop', '', {
+      HOME: home,
+      PATH: '/usr/bin:/bin',
+      XDG_DATA_HOME: join(home, '.local', 'share'),
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      command: realpathSync(browser),
+      args: ['http://127.0.0.1:3080/?token=test'],
+    })
+  })
+
+  it('honors an explicit browser override', () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-browser-override-'))
+    temporaryDirectories.push(home)
+    const browser = join(home, 'custom-browser')
+    writeFileSync(browser, '#!/bin/sh\n')
+    chmodSync(browser, 0o755)
+
+    const result = runBrowserResolver('', '', {
+      DSH_BROWSER: browser,
+      HOME: home,
+      PATH: '/usr/bin:/bin',
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      command: realpathSync(browser),
+      args: ['--app=http://127.0.0.1:3080/?token=test'],
+    })
+  })
+
+  it('falls back to xdg-open when no browser entry can be resolved', () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-xdg-open-'))
+    temporaryDirectories.push(home)
+    const bin = join(home, 'bin')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(join(bin, 'xdg-open'), '#!/bin/sh\n')
+    chmodSync(join(bin, 'xdg-open'), 0o755)
+
+    const result = runBrowserResolver('', '', {
+      HOME: home,
+      PATH: bin,
+      XDG_DATA_DIRS: join(home, 'empty'),
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      command: realpathSync(join(bin, 'xdg-open')),
+      args: ['http://127.0.0.1:3080/?token=test'],
+    })
+  })
+
+  it('opens supported launches through the default browser app window', () => {
+    expect(launcher).toContain(' launch "$default_web_browser" "$default_http_handler" "$1"')
+    expect(launcher).toContain('BROWSER_RESOLVER_B64=')
+    expect(launcher).toContain('eval(Buffer.from(process.env.BROWSER_RESOLVER_B64, "base64").toString())')
+    expect(launcher).toContain('notify-send "Capex Harness"')
+    expect(launcher).toContain('searchParams.set(\\"open\\"')
+    expect(launcher).toContain('searchParams.set(\\"workspace\\"')
   })
 })
 

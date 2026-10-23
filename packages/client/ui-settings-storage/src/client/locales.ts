@@ -11,6 +11,10 @@ export const zh = {
   cache: '缓存 {size}',
   trash: '回收站 {size}',
   cleanHint: '在终端运行 dsh clean 预览可回收的数据',
+  bytes: 'B',
+  kibibytes: 'KiB',
+  mebibytes: 'MiB',
+  gibibytes: 'GiB',
 } satisfies Record<string, string>
 
 /** Message keys for the local-data settings row. */
@@ -29,4 +33,8 @@ export const en = {
   cache: 'Cache {size}',
   trash: 'Trash {size}',
   cleanHint: 'Run dsh clean in a terminal to preview reclaimable data',
+  bytes: 'B',
+  kibibytes: 'KiB',
+  mebibytes: 'MiB',
+  gibibytes: 'GiB',
 } satisfies Record<StorageSettingsKey, string>

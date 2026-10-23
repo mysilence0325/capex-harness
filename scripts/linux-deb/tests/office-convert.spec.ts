@@ -29,6 +29,8 @@ async function fakeLibreOffice(root: string): Promise<string> {
   await writeFile(cli, [
     "import { writeFileSync } from 'node:fs'",
     "const output = process.argv[process.argv.indexOf('--output') + 1]",
+    "const timeout = Number(process.argv[process.argv.indexOf('--timeout-ms') + 1])",
+    'if (!Number.isSafeInteger(timeout) || timeout <= 0) process.exit(9)',
     "writeFileSync(output, '%PDF-1.4\\n')",
     '',
   ].join('\n'))

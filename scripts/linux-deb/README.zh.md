@@ -74,10 +74,29 @@ apt 镜像必须通过明文 HTTP 提供，因为构建会先安装 `ca-certific
 
 `prepare` 会针对同一个 work tree 运行两个容器。JavaScript 阶段在 daemon 自身架构上运行，并在 `build:artifacts` 后停止；bundler 会加载模拟环境无法执行的原生绑定，因此该阶段不能放进 arm64 容器。payload 阶段随后在 arm64 容器中运行，为 arm64 重新安装 workspace，并组装其余内容。`--js-image` 指定第一阶段的镜像，默认使用基础镜像。
 
+## 构建性能
+
+首次全量构建主要耗时在 qemu 运行 arm64、安装 workspace、生成 SDK/runtime，以及压缩约 1.1 GB 的 payload。当前 VM 只有 4 个 vCPU，这是主要瓶颈。
+
+- 迭代构建复用同一个 `--work` 和 `--cache`。源码依赖、工具链、原生模块、资源或生成运行时输入变化时运行 `prepare`；其他情况只运行 `package` 和 `reports`。
+- `--skip-smoke` 只用于缩短中间迭代；交付构建始终执行已安装包 smoke。
+- 常规重构建不要删除依赖缓存；删除后会强制重新下载和生成。
+- 增加 VM vCPU 是最直接的硬件加速。qemu 仍会限制单个 arm64 进程，但独立编译、打包和运行时任务可以使用额外核心。
+- `--cache` 目录不替代 work store 或已安装的 workspace 闭包。复用 work tree 时保留 `work/store`、`work/.pnpm-store` 和现有依赖树，或者先通过一次联网 prepare 填充。
+- 修改静态 bundle 文件后不要盲目复用 state 标记。要刷新产品树或同步对应打包文件，否则测试可能读取源码，而 artifact 仍携带旧 profile。
+- 原生二进制不保证存在于源码树。打包前必须生成并检查 `bin/glibc/system.node`、`bin/musl/system.node`、`bin/landlock-run` 和 `node-pty`；只加载模块而不实际加锁不足以证明可用。
+- ELF 扫描在 qemu 下非常耗时。产品未变化时缓存 version-info 结果，后续实现可先过滤非 ELF 文件。
+- 默认 xz 压缩在这台 VM 上可能需要数十分钟。rc.3 构建使用较低 xz 等级，仍保持 dpkg 广泛兼容，并把压缩阶段降到约 17 分钟，产出 1.13 GB deb。
+- registry/CDN 超时优先按缓存缺陷处理：挂载 npm 与 pnpm 元数据缓存，复用锁定 store，最终 artifact 仍执行完整 smoke。
+- 运行时验收必须执行包内启动器而不是 grep 文本；覆盖重启后的陈旧 URL、完整浏览器参数、真实 native 锁和插件激活。
+
 ## 输出
 
 - `capex-harness_<version>_arm64.deb` — 安装包。它安装 `/usr/bin/dsh`（基于随包 Node.js 的源码构建闭包）、`/usr/bin/dsh-sdk`（随包 Python runtime wheel 的 console script，带默认 `DSH_HOME`）、`/usr/bin/dsh-python`（随包 CPython）、`/usr/bin/dsh-pip`（使用随包 wheelhouse 的离线 pip）、`/usr/bin/dsh-office-convert`（可感知 WPS 的 Office 转换），以及 `/usr/lib/capex-harness` 下的 payload。
-- 桌面集成：应用菜单项（`Capex Harness`）和启动器（`/usr/bin/dsh-web`）启动 `capex` profile，等待带认证的 URL，并在可用时通过 Chromium 应用窗口打开。入口通过 `%U` 接收文件 URI；`/usr/bin/dsh-web-register-file-types` 让当前用户选择支持文档的默认关联。以桌面用户（不要 sudo）运行桌面图标辅助命令。`--python-only` 不提供快捷方式，因为启动器运行随包 Node.js CLI。
+- 桌面集成：应用菜单项（`Capex Harness`）和启动器（`/usr/bin/dsh-web`）启动 `capex` profile，等待带认证的 URL，并在当前默认浏览器中打开。启动器优先使用 `DSH_BROWSER`，保留默认浏览器桌面条目中的参数，在 Chromium 兼容浏览器中请求 `--app`，随后回退到已安装的奇安信启动器，最后使用 `xdg-open`。打包 Web 的文档标题和应用框标题都使用 `Capex Harness`。入口通过 `%U` 接收文件 URI；`/usr/bin/dsh-web-register-file-types` 让当前用户选择支持文档的默认关联。以桌面用户（不要 sudo）运行桌面图标辅助命令。`--python-only` 不提供快捷方式，因为启动器运行随包 Node.js CLI。
+- 每个操作系统用户使用自己的 `$HOME/.dsh` 和 `$XDG_RUNTIME_DIR` 下的私有 runtime URL（或 `/tmp/capex-harness-<uid>`），共用主机时不会复用其他用户的 Host。设置壳显示 Host 进程所属账号。
+- `capex` profile 默认使用 `capexai` OpenAI Chat Completions 路由，地址为 `http://15.11.40.44:3100/v1`，默认模型为 `deepseek-flash`。凭据引用是 `CAPEXAI_API_KEY`，安装包不含密钥；用户可在设置页继续添加提供方。
+- ARM64 payload 包含 glibc 与 musl 的 `system.node`、静态 `landlock-run` 启动器和 `node-pty` addon。包内 smoke 会加载 `system.node` 并实际获取一次独占文件锁。
 - `DEPENDENCIES.md` — 构建解析出的每个 apt 包、npm tarball、PyPI 分发包、锁定归档、镜像和本地构建产物，包含版本、来源、摘要以及字节是否随包交付。
 - `manifest.json` — 同一清单的机器可读形式，包含源码 revision 与 payload 的 glibc 符号上限。
 - `verify-on-target.sh` — 安装后在目标机运行：检查架构、glibc、已安装命令，以及 seed 的资源缓存能在禁用下载时服务运行时。

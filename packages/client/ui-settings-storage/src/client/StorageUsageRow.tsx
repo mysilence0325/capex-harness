@@ -14,11 +14,11 @@ export type StorageUsageRowProps = PropsRuntime<'settings.general.item'>
   & PropsLocale<'settings.storage'>
   & InjectFace<StorageUsageInjected>
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${String(bytes)} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`
+function formatBytes(bytes: number, t: StorageUsageRowProps['t']): string {
+  if (bytes < 1024) return `${String(bytes)} ${t('bytes')}`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} ${t('kibibytes')}`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} ${t('mebibytes')}`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} ${t('gibibytes')}`
 }
 
 /**
@@ -45,11 +45,11 @@ export function StorageUsageRow({ readUsage, t }: StorageUsageRowProps) {
     return () => { current = false }
   }, [readUsage, revision])
   const bytes = (id: StorageUsage['categories'][number]['id']): string =>
-    formatBytes(usage?.categories.find(item => item.id === id)?.bytes ?? 0)
+    formatBytes(usage?.categories.find(item => item.id === id)?.bytes ?? 0, t)
   return <div className={css.row}>
     <div className={css.copy}>
       <div className={css.title}>{t('title')}</div>
-      <div className={css.description}>{usage === undefined ? t('description') : t('total', { size: formatBytes(usage.totalBytes) })}</div>
+      <div className={css.description}>{usage === undefined ? t('description') : t('total', { size: formatBytes(usage.totalBytes, t) })}</div>
       {usage !== undefined && <div className={css.metrics}>
         <span>{t('sessions', { size: bytes('sessions') })}</span>
         <span>{t('attachments', { size: bytes('attachments') })}</span>

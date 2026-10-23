@@ -27,6 +27,35 @@
 - id: tool-web
   disabled: true
 
+# The appliance has one known intranet model route. Credentials stay in the
+# shared local credential store; users can add further providers in Settings.
+- id: llm-pi-ai
+  config:
+    providers:
+      capexai:
+        displayName: capexai
+        apiKeyEnv: CAPEXAI_API_KEY
+        api: openai-completions
+        baseURL: http://15.11.40.44:3100/v1
+        models:
+          - id: deepseek-flash
+            name: DeepSeek Flash
+            contextWindow: 131072
+            maxTokens: 4096
+            input: [text, image]
+            reasoningEfforts:
+              off:
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+
+- id: agent-default-model
+  config:
+    provider: capexai
+    model: deepseek-flash
+
 - id: ui-sidebar-documentpreview
   config:
     office:

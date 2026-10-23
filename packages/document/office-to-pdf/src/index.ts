@@ -194,7 +194,9 @@ export class OfficeToPdf extends TypertRemoteService {
         throw error
       })
       await Promise.race([slot.converter, new Promise<never>((_resolve, reject) => {
-        signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+        signal.addEventListener('abort', () => {
+          reject(signal.reason instanceof Error ? signal.reason : new Error('Office prewarming cancelled'))
+        }, { once: true })
       })])
       signal.throwIfAborted()
     } finally {

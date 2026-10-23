@@ -116,10 +116,10 @@ export function apply(ctx: Context, config: Config['office']): void {
     })
     if (config.prewarmOnIdle) {
       const controller = new AbortController()
-      const request = (globalThis as typeof globalThis & {
+      const request: {
         requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
         cancelIdleCallback?: (handle: number) => void
-      })
+      } = globalThis
       const run = (): void => {
         void scope.remote.officeToPdf.prewarm(controller.signal).catch(() => {
           // Prewarming is speculative and never blocks or degrades an explicit preview.

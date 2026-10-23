@@ -72,7 +72,7 @@ else
 fi
 check 'dsh-python --version' dsh-python --version
 check 'import deepseek_harness' dsh-python -c 'import deepseek_harness'
-check 'bundled authoring and development modules' dsh-python -c \
+check 'bundled authoring and development modules' env GIT_PYTHON_REFRESH=quiet dsh-python -c \
   'import docx, pptx, openpyxl, xlsxwriter, pypdf, pdfplumber, pypdfium2, reportlab, markdown, markdown_it, mdit_py_plugins, pymdownx, frontmatter, bs4, markdownify, xlrd, pyxlsb, python_calamine, olefile, msoffcrypto, defusedxml, requests, httpx, yaml, tomlkit, orjson, jsonschema, jinja2, click, typer, rich, tqdm, dotenv, filelock, tenacity, git, sqlalchemy, pytest, pydantic, scipy, matplotlib, seaborn, pyarrow, tabulate'
 check 'dsh-pip --version' dsh-pip --version
 if [ -x /usr/bin/dsh-office-convert ]; then
@@ -81,6 +81,39 @@ else
   report 'dsh-office-convert --help' 'not installed (python-only package)'
 fi
 report 'WPS word/sheet/slides' "$(command -v wps || true) $(command -v et || true) $(command -v wpp || true)"
+
+printf '\n== native modules ==\n'
+native_root=/usr/lib/capex-harness/dsh/runtime/node/node_modules
+for file in \
+  "$native_root/@deepseek-ai/node-addon-system-linux-arm64/bin/glibc/system.node" \
+  "$native_root/@deepseek-ai/node-addon-system-linux-arm64/bin/musl/system.node" \
+  "$native_root/@deepseek-ai/node-addon-system-linux-arm64/bin/landlock-run" \
+  "$native_root/node-pty/build/Release/pty.node"
+do
+  if [ -f "$file" ]; then
+    report "$file" 'present'
+  else
+    report "$file" 'FAILED: missing native payload'
+    FAILED=1
+  fi
+done
+if ( cd /usr/lib/capex-harness/dsh/runtime/node && /usr/lib/capex-harness/node/bin/node --input-type=module -e '
+  import fs from "node:fs";
+  import os from "node:os";
+  import path from "node:path";
+  import { tryLockExclusive } from "@deepseek-ai/node-addon-system/flock";
+  const file = path.join(os.tmpdir(), `capex-flock-${process.pid}`);
+  const fd = fs.openSync(file, "w");
+  try { await tryLockExclusive(fd); } finally {
+    fs.closeSync(fd);
+    fs.rmSync(file, { force: true });
+  }
+'); then
+  report 'system.node exclusive flock' 'ok'
+else
+  report 'system.node exclusive flock' 'FAILED: native addon did not lock a file'
+  FAILED=1
+fi
 
 printf '\n== capex profile boot ==\n'
 if [ -x /usr/bin/dsh ]; then
@@ -154,17 +187,36 @@ if [ -x /usr/bin/dsh-web ]; then
   check 'launcher script parses' sh -n /usr/bin/dsh-web
   check 'file association helper parses' sh -n /usr/bin/dsh-web-register-file-types
   # A menu click runs this launcher, so the check runs the same script against a
-  # stub browser: it must start the server, wait for the authenticated URL, and
-  # hand that URL to the browser. The temporary HOME and state directory keep
-  # the check out of the invoking user's files.
+  # stub default-browser entry: it must start the server, wait for the
+  # authenticated URL, and preserve the desktop entry's security arguments.
   server_pattern='dsh/runtime/node/runtime-bootstrap.mjs capex'
   before_servers=$(pgrep -f "$server_pattern" 2>/dev/null | sort | tr '\n' ' ' || true)
   launcher_dir=$(mktemp -d)
-  mkdir -p "$launcher_dir/home" "$launcher_dir/state"
-  printf '#!/bin/sh\nprintf "%%s\\n" "$1" > "%s"\n' "$launcher_dir/opened-url" > "$launcher_dir/xdg-open"
-  chmod 0755 "$launcher_dir/xdg-open"
+  mkdir -p "$launcher_dir/bin" "$launcher_dir/home/.local/share/applications" "$launcher_dir/runtime" "$launcher_dir/state"
+  printf '#!/bin/sh\nprintf "%%s\\n" qaxbrowser.desktop\n' > "$launcher_dir/bin/xdg-settings"
+  printf '#!/bin/sh\nprintf "%%s\\n" qaxbrowser.desktop\n' > "$launcher_dir/bin/xdg-mime"
+  printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=QiAnXin Trusted Browser' \
+    "Exec=\"$launcher_dir/qaxbrowser-safe-stable\" --flag-switches-begin --flag-switches-end --qax-dsi --qax-dws %U" \
+    > "$launcher_dir/home/.local/share/applications/qaxbrowser.desktop"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    "printf '%s\\n' \"\$@\" > \"$launcher_dir/opened-args\"" \
+    'for arg in "$@"; do' \
+    '  case "$arg" in' \
+    "    --app=*) printf '%s\\n' \"\${arg#--app=}\" > \"$launcher_dir/opened-url\" ;;" \
+    '  esac' \
+    'done' \
+    > "$launcher_dir/qaxbrowser-safe-stable"
+  chmod 0755 "$launcher_dir/bin/xdg-settings" "$launcher_dir/bin/xdg-mime" "$launcher_dir/qaxbrowser-safe-stable"
+  mkdir -p "$launcher_dir/runtime"
+  chmod 0700 "$launcher_dir/runtime"
+  printf '%s\n' 'http://127.0.0.1:9/?token=stale-after-reboot' > "$launcher_dir/runtime/web-url"
   launcher_state='ran'
-  if ! HOME="$launcher_dir/home" XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir:$PATH" \
+  if ! HOME="$launcher_dir/home" XDG_DATA_HOME="$launcher_dir/home/.local/share" \
+    XDG_RUNTIME_DIR="$launcher_dir/runtime" XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir/bin:$PATH" \
     timeout 330 /usr/bin/dsh-web >"$launcher_dir/launcher.log" 2>&1; then
     launcher_state='failed'
   fi
@@ -193,6 +245,22 @@ if [ -x /usr/bin/dsh-web ]; then
     report 'click starts dsh capex' 'ok'[?25l
   else
     report 'click starts dsh capex' "FAILED: the opened URL answered $opened_status"
+    FAILED=1
+  fi
+  if [ -r "$launcher_dir/opened-url" ] && ! grep -q '127.0.0.1:9' "$launcher_dir/opened-url"; then
+    report 'cold start replaces a stale reboot URL' 'ok'
+  else
+    report 'cold start replaces a stale reboot URL' 'FAILED: the launcher reused an unreachable post-reboot URL'
+    FAILED=1
+  fi
+  if grep -Fxq -- '--flag-switches-begin' "$launcher_dir/opened-args" \
+    && grep -Fxq -- '--flag-switches-end' "$launcher_dir/opened-args" \
+    && grep -Fxq -- '--qax-dsi' "$launcher_dir/opened-args" \
+    && grep -Fxq -- '--qax-dws' "$launcher_dir/opened-args" \
+    && grep -q '^--app=' "$launcher_dir/opened-args"; then
+    report 'launcher preserves default-browser arguments' 'ok'
+  else
+    report 'launcher preserves default-browser arguments' 'FAILED: QiAnXin argv was changed'
     FAILED=1
   fi
   rm -rf "$launcher_dir"

@@ -20,9 +20,12 @@
 /linux-arm64-debian-package/stages:
   en: b414abd574c6de15
   zh: 1df3696ea3ffbdd5
+/linux-arm64-debian-package/build-performance:
+  en: 7fadfd0081bbf63d
+  zh: eeb4d5764c940a06
 /linux-arm64-debian-package/output:
-  en: 735d7d8891576ceb
-  zh: 72b870675c1204ce
+  en: 64f66751b24d7a7a
+  zh: 15f168695fc87831
 /linux-arm64-debian-package/offline-python-extras-and-wps-conversion:
   en: 23bbf1398b9cd4ec
   zh: d845e6ca3e6b93e8

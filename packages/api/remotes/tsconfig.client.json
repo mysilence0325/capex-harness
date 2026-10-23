@@ -67,6 +67,9 @@
       "path": "../../settings/settings"
     },
     {
+      "path": "../../storage/storage-maintenance"
+    },
+    {
       "path": "../../subagent/subagent"
     },
     {

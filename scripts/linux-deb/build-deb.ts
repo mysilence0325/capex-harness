@@ -228,6 +228,7 @@ const DOWNLOAD_CACHES = [
   ['pkg', '/root/.pkg-cache'],
   ['pip', '/root/.cache/pip'],
   ['npm', '/root/.npm'],
+  ['pnpm', '/root/.cache/pnpm'],
   ['uv', '/root/.cache/uv'],
 ] as const
 

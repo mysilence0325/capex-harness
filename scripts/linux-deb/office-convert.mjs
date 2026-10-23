@@ -248,7 +248,10 @@ function convertWithLibreOffice(input, output, directory, target) {
   const cli = libreOfficeCli(process.env)
   const node = libreOfficeNode(process.env)
   const converted = join(directory, basename(output))
-  run(node, [cli, 'convert', '--input', input, '--output', converted], directory)
+  run(node, [
+    cli, 'convert', '--input', input, '--output', converted,
+    '--timeout-ms', String(CONVERSION_TIMEOUT_MS),
+  ], directory)
   publish(converted, output, target)
 }
 

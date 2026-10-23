@@ -246,6 +246,8 @@ else
 fi
 
 step 'install'
+# The Debian product brands the browser document and app frame consistently.
+export DSH_CLIENT_TITLE='Capex Harness'
 install_marker=install
 if [ "$DSH_PHASE" = 'js' ]; then
   install_marker=install-js

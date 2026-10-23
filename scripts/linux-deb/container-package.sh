@@ -61,6 +61,19 @@ if [ -d "$DSH_OVERRIDES" ]; then
 else
   printf 'no native overrides present\n'
 fi
+if [ "$DSH_PYTHON_ONLY" = '0' ]; then
+  for native_path in \
+    "$DSH_PRODUCT/dsh/runtime/node/node_modules/@deepseek-ai/node-addon-system-linux-arm64/bin/glibc/system.node" \
+    "$DSH_PRODUCT/dsh/runtime/node/node_modules/@deepseek-ai/node-addon-system-linux-arm64/bin/musl/system.node" \
+    "$DSH_PRODUCT/dsh/runtime/node/node_modules/@deepseek-ai/node-addon-system-linux-arm64/bin/landlock-run" \
+    "$DSH_PRODUCT/dsh/runtime/node/node_modules/node-pty/build/Release/pty.node"
+  do
+    if [ ! -f "$native_path" ]; then
+      printf 'native payload is missing %s\n' "$native_path"
+      exit 1
+    fi
+  done
+fi
 
 step 'stage'
 rm -rf "$DSH_DEB_ROOT"
@@ -141,6 +154,10 @@ for path in ./usr/bin/dsh-sdk ./usr/bin/dsh-python ./usr/bin/dsh-pip ./usr/bin/d
   "$DSH_INSTALL_ROOT/python/bin/python3.12" \
   "$DSH_INSTALL_ROOT/resources" "$DSH_INSTALL_ROOT/wheelhouse" \
   "$DSH_INSTALL_ROOT/share/python-wheelhouse-NOTICES.md" "$DSH_INSTALL_ROOT/dsh/runtime/node/runtime-bootstrap.mjs" \
+  "$DSH_INSTALL_ROOT/dsh/runtime/node/node_modules/@deepseek-ai/node-addon-system-linux-arm64/bin/glibc/system.node" \
+  "$DSH_INSTALL_ROOT/dsh/runtime/node/node_modules/@deepseek-ai/node-addon-system-linux-arm64/bin/musl/system.node" \
+  "$DSH_INSTALL_ROOT/dsh/runtime/node/node_modules/@deepseek-ai/node-addon-system-linux-arm64/bin/landlock-run" \
+  "$DSH_INSTALL_ROOT/dsh/runtime/node/node_modules/node-pty/build/Release/pty.node" \
   "$DSH_INSTALL_ROOT/share/LICENSE"; do
   if ! grep -qF "$path" "$DSH_REPORT/deb-contents.txt"; then
     echo "container-package: $path is missing from the package" >&2
@@ -163,6 +180,16 @@ date -u +%FT%TZ > "$DSH_STATE/package-artifact.done"
 fi
 
 step 'smoke'
+if [ "$reuse_artifact" = '1' ]; then
+  rm -f /etc/apt/apt.conf.d/docker-clean
+  printf 'Acquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/99dsh-force-ipv4
+  if [ -n "${DSH_APT_MIRROR:-}" ] && [ -f /etc/apt/sources.list ]; then
+    sed -i -E "s#https?://(ports\.ubuntu\.com/ubuntu-ports|archive\.ubuntu\.com/ubuntu|security\.ubuntu\.com/ubuntu)#$DSH_APT_MIRROR#g" /etc/apt/sources.list
+  fi
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    binutils ca-certificates curl file fontconfig fonts-dejavu-core
+fi
 if [ -f "$DSH_STATE/package-smoke.done" ] && [ -s "$DSH_REPORT/smoke.txt" ] \
   && [ "$DSH_REPORT/smoke.txt" -nt "$DSH_ARTIFACT/$DSH_DEB_NAME" ]; then
   printf 'smoke already complete, reusing report\n'
@@ -234,6 +261,24 @@ else
         printf 'credentials-local must stay enabled for Web authentication\n'
         exit 1
       fi
+      for expected in \
+        'capexai:' \
+        'apiKeyEnv: CAPEXAI_API_KEY' \
+        'api: openai-completions' \
+        'baseURL: http://15.11.40.44:3100/v1' \
+        'id: deepseek-flash' \
+        'contextWindow: 131072' \
+        'maxTokens: 4096'
+      do
+        if ! grep -Fq -- "$expected" "$capex_patch"; then
+          printf 'the Capex default model configuration is missing %s\n' "$expected"
+          exit 1
+        fi
+      done
+      if grep -Eq 'sk-[A-Za-z0-9_-]{16,}' "$capex_patch"; then
+        printf 'the Capex profile contains a plaintext API key\n'
+        exit 1
+      fi
       if [ -z "$web_patch" ] \
         || ! grep -q -- '- id: workspace-dependencies' "$web_patch" \
         || ! grep -q -- '- id: skill-office' "$web_patch"; then
@@ -283,6 +328,23 @@ else
       grep -q '"dsh-offline-probe"' /tmp/dsh-home-web/profiles/capex/package.json
       rm -rf "$probe_dir"
       printf 'bundled pnpm installed a local tarball without a registry\n'
+      printf '== native system addon ==\n'
+      (
+        cd "$DSH_INSTALL_ROOT/dsh/runtime/node"
+        "$DSH_INSTALL_ROOT/node/bin/node" --input-type=module -e '
+          import fs from "node:fs";
+          import os from "node:os";
+          import path from "node:path";
+          import { tryLockExclusive } from "@deepseek-ai/node-addon-system/flock";
+          const file = path.join(os.tmpdir(), `capex-flock-${process.pid}`);
+          const fd = fs.openSync(file, "w");
+          try { await tryLockExclusive(fd); } finally {
+            fs.closeSync(fd);
+            fs.rmSync(file, { force: true });
+          }
+        '
+      )
+      printf 'native system.node loaded and locked a file\n'
     fi
     printf '== dsh-sdk --help ==\n'; DSH_HOME=/tmp/dsh-home dsh-sdk --help
     printf '== dsh-python ==\n'
@@ -309,11 +371,20 @@ else
       test "$(head -c 5 "$office_dir/result.pdf")" = '%PDF-'
       rm -rf "$office_dir"
     fi
+    printf '== product title ==\n'
+    web_index=$(find "$DSH_INSTALL_ROOT/dsh/runtime/node" \
+      -path '*/@deepseek-ai/dsh-web-frontend/dist/index.html' -print -quit)
+    if [ -z "$web_index" ] || ! grep -q '<title>Capex Harness</title>' "$web_index"; then
+      printf 'packaged Web title is not Capex Harness\n'
+      exit 1
+    fi
+    printf 'Capex Harness\n'
     printf '== seeded resources without network ==\n'
     DSH_RESOURCE_DOWNLOAD_TIMEOUT_MS=1 dsh-sdk --version
     printf '== desktop integration ==\n'
     if [ -x /usr/bin/dsh-web ] && [ -x /usr/bin/dsh-web-desktop-icon ] \
       && [ -x /usr/bin/dsh-web-register-file-types ] \
+      && sh -n /usr/bin/dsh-web \
       && grep -q '^Exec=/usr/bin/dsh-web %U$' /usr/share/applications/capex-harness-web.desktop \
       && grep -q '^MimeType=application/pdf;' /usr/share/applications/capex-harness-web.desktop \
       && [ -f /usr/share/icons/hicolor/512x512/apps/capex-harness.png ]; then

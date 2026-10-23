@@ -81,7 +81,7 @@ export async function maintenanceUsage(home: string): Promise<StorageUsage> {
 }
 
 async function archivedIds(home: string): Promise<ReadonlySet<string>> {
-  const value: unknown = JSON.parse(await readFile(join(home, 'storages', 'workspace.json'), 'utf8').catch((error) => {
+  const value: unknown = JSON.parse(await readFile(join(home, 'storages', 'workspace.json'), 'utf8').catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '{}'
     throw error
   }))
@@ -278,14 +278,16 @@ export async function applyMaintenancePlan(
 export async function restoreMaintenanceBatch(home: string, batch: string): Promise<MaintenanceResult> {
   assertInsideHome(home, join(home, 'trash', 'maintenance', batch))
   const root = join(home, 'trash', 'maintenance', batch)
-  const plan: MaintenanceManifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'))
+  const parsed: unknown = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'))
+  if (!isMaintenanceManifest(parsed)) throw new Error(`maintenance batch "${batch}" has an invalid manifest`)
+  const plan = parsed
   const completed: string[] = []
   const failed: { source: string; message: string }[] = []
   for (const item of [...plan.items].reverse()) {
     try {
       assertInsideHome(home, item.source)
       assertInsideHome(home, item.target)
-      await stat(item.source).then(() => { throw new Error(`restore target already exists: ${item.source}`) }, (error) => {
+      await stat(item.source).then(() => { throw new Error(`restore target already exists: ${item.source}`) }, (error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       })
       await mkdir(dirname(item.source), { recursive: true, mode: 0o700 })
@@ -296,6 +298,21 @@ export async function restoreMaintenanceBatch(home: string, batch: string): Prom
     }
   }
   return { batch, completed, failed }
+}
+
+function isMaintenanceManifest(value: unknown): value is MaintenanceManifest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.version !== 1 || typeof record.batch !== 'string' || typeof record.createdAt !== 'string'
+    || typeof record.cutoff !== 'string' || typeof record.home !== 'string' || !Array.isArray(record.items)) return false
+  return record.items.every((item) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) return false
+    const row = item as Record<string, unknown>
+    return (row.kind === 'session' || row.kind === 'attachment' || row.kind === 'cache')
+      && typeof row.source === 'string' && typeof row.target === 'string'
+      && typeof row.bytes === 'number' && typeof row.reason === 'string'
+      && (row.sessionId === undefined || typeof row.sessionId === 'string')
+  })
 }
 
 /**
