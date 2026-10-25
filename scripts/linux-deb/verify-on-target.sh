@@ -203,6 +203,8 @@ if [ -x /usr/bin/dsh-web ]; then
     > "$launcher_dir/home/.local/share/applications/qaxbrowser.desktop"
   printf '%s\n' \
     '#!/bin/sh' \
+    "count=\$(cat \"$launcher_dir/browser-count\" 2>/dev/null || printf 0)" \
+    "printf '%s\\n' \"\$((count + 1))\" > \"$launcher_dir/browser-count\"" \
     "printf '%s\\n' \"\$@\" > \"$launcher_dir/opened-args\"" \
     'for arg in "$@"; do' \
     '  case "$arg" in' \
@@ -210,41 +212,48 @@ if [ -x /usr/bin/dsh-web ]; then
     '  esac' \
     'done' \
     > "$launcher_dir/qaxbrowser-safe-stable"
-  chmod 0755 "$launcher_dir/bin/xdg-settings" "$launcher_dir/bin/xdg-mime" "$launcher_dir/qaxbrowser-safe-stable"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    "if [ \"\$1\" = '-lpx' ]; then" \
+    "  [ -f \"$launcher_dir/existing-window\" ] || exit 0" \
+    "  printf '0x00a0003d  0 %s host qaxbrowser-safe.Qaxbrowser-safe test-host 简单问候 - Capex Harness\\n' \"\$PPID\"" \
+    '  exit 0' \
+    'fi' \
+    "printf '%s\\n' \"\$@\" >> \"$launcher_dir/wmctrl-args\"" \
+    > "$launcher_dir/bin/wmctrl"
+  chmod 0755 "$launcher_dir/bin/xdg-settings" "$launcher_dir/bin/xdg-mime" \
+    "$launcher_dir/bin/wmctrl" "$launcher_dir/qaxbrowser-safe-stable"
   mkdir -p "$launcher_dir/runtime"
   chmod 0700 "$launcher_dir/runtime"
   printf '%s\n' 'http://127.0.0.1:9/?token=stale-after-reboot' > "$launcher_dir/runtime/web-url"
   launcher_state='ran'
-  if ! HOME="$launcher_dir/home" XDG_DATA_HOME="$launcher_dir/home/.local/share" \
-    XDG_RUNTIME_DIR="$launcher_dir/runtime" XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir/bin:$PATH" \
+  if ! HOME="$launcher_dir/home" DSH_HOME="$launcher_dir/home/.dsh" \
+    XDG_DATA_HOME="$launcher_dir/home/.local/share" XDG_RUNTIME_DIR="$launcher_dir/runtime" \
+    XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir/bin:$PATH" \
     timeout 330 /usr/bin/dsh-web >"$launcher_dir/launcher.log" 2>&1; then
     launcher_state='failed'
   fi
-  # The probe asks the server the launcher left running, so it runs before that
-  # server is stopped.
   opened_url=$(cat "$launcher_dir/opened-url" 2>/dev/null || true)
-  opened_status='000'
-  if [ -n "$opened_url" ]; then
-    opened_status=$(http_status "$opened_url")
-  fi
-  for pid in $(pgrep -f "$server_pattern" 2>/dev/null || true); do
-    case " $before_servers " in
-      *" $pid "*) ;;
-      *) kill "$pid" 2>/dev/null || true ;;
-    esac
-  done
   if [ "$launcher_state" != 'ran' ]; then
     report 'click starts dsh capex' 'FAILED: the launcher exited before serving'
     sed -n '1,20p' "$launcher_dir/launcher.log"
+    if [ -f "$launcher_dir/state/capex-harness/web.log" ]; then
+      report 'launcher web log' '---'
+      sed -n '1,80p' "$launcher_dir/state/capex-harness/web.log"
+    fi
     FAILED=1
   elif [ ! -s "$launcher_dir/opened-url" ]; then
     report 'click starts dsh capex' 'FAILED: no URL reached the browser'
     sed -n '1,20p' "$launcher_dir/launcher.log"
+    if [ -f "$launcher_dir/state/capex-harness/web.log" ]; then
+      report 'launcher web log' '---'
+      sed -n '1,80p' "$launcher_dir/state/capex-harness/web.log"
+    fi
     FAILED=1
-  elif [ "$opened_status" = '303' ] || [ "$opened_status" = 'unknown' ]; then
-    report 'click starts dsh capex' 'ok'[?25l
+  elif printf '%s\n' "$opened_url" | grep -Eq '^http://127\.0\.0\.1:[0-9]+/\?token='; then
+    report 'click starts dsh capex' 'ok'
   else
-    report 'click starts dsh capex' "FAILED: the opened URL answered $opened_status"
+    report 'click starts dsh capex' "FAILED: the opened URL is invalid: $opened_url"
     FAILED=1
   fi
   if [ -r "$launcher_dir/opened-url" ] && ! grep -q '127.0.0.1:9' "$launcher_dir/opened-url"; then
@@ -263,6 +272,41 @@ if [ -x /usr/bin/dsh-web ]; then
     report 'launcher preserves default-browser arguments' 'FAILED: QiAnXin argv was changed'
     FAILED=1
   fi
+  if [ "$launcher_state" = 'ran' ] && [ -s "$launcher_dir/opened-url" ]; then
+    # Leave the process token available for the second click: its Host probe
+    # is what proves the saved URL still answers before wmctrl may focus.
+    touch "$launcher_dir/existing-window"
+    focus_state='ran'
+    if ! HOME="$launcher_dir/home" DSH_HOME="$launcher_dir/home/.dsh" \
+      XDG_DATA_HOME="$launcher_dir/home/.local/share" XDG_RUNTIME_DIR="$launcher_dir/runtime" \
+      XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir/bin:$PATH" \
+      timeout 15 /usr/bin/dsh-web >"$launcher_dir/focus.log" 2>&1; then
+      focus_state='failed'
+    fi
+    browser_count=$(cat "$launcher_dir/browser-count" 2>/dev/null || printf 0)
+    if [ "$focus_state" = 'ran' ] \
+      && [ "$browser_count" = '1' ] \
+      && grep -Fxq -- '-i' "$launcher_dir/wmctrl-args" \
+      && grep -Fxq -- '0x00a0003d' "$launcher_dir/wmctrl-args" \
+      && grep -Fxq -- 'remove,hidden' "$launcher_dir/wmctrl-args"; then
+      report 'second click focuses the existing window' 'ok'
+    else
+      report 'second click focuses the existing window' \
+        "FAILED: launcher exited=$focus_state browser launches=$browser_count"
+      sed -n '1,20p' "$launcher_dir/focus.log"
+      sed -n '1,40p' "$launcher_dir/wmctrl-args" 2>/dev/null || true
+      FAILED=1
+    fi
+  else
+    report 'second click focuses the existing window' 'FAILED: the first click did not leave a running Host'
+    FAILED=1
+  fi
+  for pid in $(pgrep -f "$server_pattern" 2>/dev/null || true); do
+    case " $before_servers " in
+      *" $pid "*) ;;
+      *) kill "$pid" 2>/dev/null || true ;;
+    esac
+  done
   rm -rf "$launcher_dir"
 else
   report 'desktop shortcut' 'not installed (python-only package)'

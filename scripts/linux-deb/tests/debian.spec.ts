@@ -59,7 +59,7 @@ describe('renderControlFile', () => {
   it('declares the runtime dependencies the payload needs', () => {
     const control = renderControlFile(metadata)
     expect(control).toContain(`Depends: ${DEB_DEPENDS.join(', ')}\n`)
-    expect(control).toContain('Recommends: bubblewrap, git\n')
+    expect(control).toContain('Recommends: bubblewrap, git, wmctrl\n')
   })
 
   it('indents the long description and represents blank lines with a lone dot', () => {

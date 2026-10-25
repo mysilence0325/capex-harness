@@ -66,6 +66,37 @@ const LAUNCH_TARGET_RUNTIME = [
 ].join('')
 
 /**
+ * Find the first Capex window owned by the invoking desktop user.
+ *
+ * `wmctrl -lpx` rows contain the window id, desktop, PID, host, class, and
+ * title. The window class must name a known browser family. A Session may
+ * prefix the product title, so the final hostname-neutral rule accepts either
+ * the product title alone or a Session suffixed with it.
+ * @param windows Output from `wmctrl -lpx`.
+ * @param currentUid Numeric uid of the desktop user.
+ * @param uidForPid Resolve a window's process owner.
+ * @returns Matching X11 window id, if one exists.
+ */
+export function capexWindowId(
+  windows: string,
+  currentUid: number,
+  uidForPid: (pid: number) => number | undefined,
+): string | undefined {
+  for (const line of windows.split(/\r?\n/u)) {
+    const fields = /^(0x[0-9a-f]+)\s+\S+\s+(\d+)\s+\S+\s+(\S+)\s+(.+)$/iu.exec(line)
+    if (!fields) continue
+    const [, id, pidText, windowClass, title] = fields
+    if (!id || !pidText || !windowClass || !title) continue
+    if (!/(?:qaxbrowser|qianxin|chrome|chromium|firefox|microsoft-edge|brave)/iu.test(windowClass)) continue
+    if (title !== 'Capex Harness' && !/(?:^|\s)[-–—]\s+Capex Harness$/u.test(title)) continue
+    const pid = Number(pidText)
+    if (!Number.isSafeInteger(pid) || pid <= 0 || uidForPid(pid) !== currentUid) continue
+    return id
+  }
+  return undefined
+}
+
+/**
  * Resolve and optionally launch the system default browser.
  *
  * Desktop launchers pass the identifiers returned by `xdg-settings` and
@@ -75,7 +106,7 @@ const LAUNCH_TARGET_RUNTIME = [
  */
 export function desktopBrowserResolverRuntime(): string {
   return [
-    'const fs=require("node:fs"),path=require("node:path"),os=require("node:os"),{spawn}=require("node:child_process");',
+    'const fs=require("node:fs"),path=require("node:path"),os=require("node:os"),{spawn,spawnSync}=require("node:child_process");',
     'const env=process.env;',
     'const home=env.HOME||os.homedir();',
     'const dataDirs=(env.XDG_DATA_DIRS||"/usr/local/share:/usr/share").split(":").filter(Boolean);',
@@ -91,6 +122,28 @@ export function desktopBrowserResolverRuntime(): string {
     '    if(found)return found;',
     '  }',
     '  return undefined;',
+    '}',
+    `const capexWindowId=${capexWindowId.toString()};`,
+    'function uidForPid(pid){',
+    '  try{',
+    '    const status=fs.readFileSync(`/proc/${pid}/status`,"utf8");',
+    '    const match=/^Uid:\\s+(\\d+)/m.exec(status);',
+    '    return match?Number(match[1]):undefined;',
+    '  }catch{return undefined}',
+    '}',
+    'function focusCapexWindow(){',
+    '  if(!env.DISPLAY)return false;',
+    '  const wmctrl=fromPath("wmctrl");',
+    '  if(!wmctrl)return false;',
+    '  const listed=spawnSync(wmctrl,["-lpx"],{encoding:"utf8",timeout:2000});',
+    '  if(listed.status!==0||typeof listed.stdout!=="string")return false;',
+    '  const uid=process.getuid?.();',
+    '  if(uid===undefined)return false;',
+    '  const id=capexWindowId(listed.stdout,uid,uidForPid);',
+    '  if(!id)return false;',
+    '  spawnSync(wmctrl,["-i","-r",id,"-b","remove,hidden"],{encoding:"utf8",timeout:2000});',
+    '  const activated=spawnSync(wmctrl,["-i","-a",id],{encoding:"utf8",timeout:2000});',
+    '  return activated.status===0;',
     '}',
     'function tokens(line){',
     '  const out=[];let value="",quote="",escaped=false;',
@@ -156,11 +209,12 @@ export function desktopBrowserResolverRuntime(): string {
     '}',
     'function main(){',
     '  const mode=process.argv[1];',
+    '  if(mode==="focus"){process.exitCode=focusCapexWindow()?0:4;return}',
     '  const url=process.argv.at(-1);',
     '  const resolved=resolveBrowser(url);',
     '  if(!resolved){process.stderr.write("The default browser and xdg-open could not be resolved.\\n");process.exitCode=1;return}',
     '  if(mode==="resolve"){process.stdout.write(JSON.stringify(resolved));return}',
-    '  if(mode!=="launch"){process.stderr.write("browser resolver mode must be resolve or launch\\n");process.exitCode=2;return}',
+    '  if(mode!=="launch"){process.stderr.write("browser resolver mode must be focus, resolve, or launch\\n");process.exitCode=2;return}',
     '  const child=spawn(resolved.command,resolved.args,{detached:true,stdio:"ignore"});',
     '  child.on("error",error=>{process.stderr.write(`could not start ${resolved.command}: ${error.message}\\n`);process.exitCode=1});',
     '  child.unref();',
@@ -193,7 +247,7 @@ export function desktopLauncher(): string {
     '#!/bin/sh',
     '# Open the dsh web interface from a desktop session.',
     '#',
-    '# The launch URL carries a one-time token whose exchange answers 303 with the',
+    '# The launch URL carries the process token whose exchange answers 303 with the',
     '# session cookie, so a stored URL that still answers can be reopened as-is.',
     'set -eu',
     'umask 077',
@@ -214,6 +268,10 @@ export function desktopLauncher(): string {
     '  exit 1',
     'fi',
     'chmod 700 "$RUNTIME_DIR"',
+    '',
+    'focus_existing_window() {',
+    '  "$NODE" -e \'eval(Buffer.from(process.env.BROWSER_RESOLVER_B64, "base64").toString())\' focus >/dev/null 2>&1',
+    '}',
     '',
     'open_in_app() {',
     '  default_web_browser=',
@@ -247,6 +305,9 @@ export function desktopLauncher(): string {
     'if [ -f "$URL_FILE" ]; then',
     '  running_url=$(cat "$URL_FILE" 2>/dev/null || true)',
     '  if [ -n "${running_url:-}" ] && "$NODE" -e "fetch(process.argv[1], { redirect: \'manual\' }).then(r => process.exit(r.status === 303 ? 0 : 1), () => process.exit(1))" "$running_url" 2>/dev/null; then',
+    '    if [ -z "$launch_input" ] && focus_existing_window; then',
+    '      exit 0',
+    '    fi',
     '    target_url=$(launch_target "$running_url" "$launch_input") || exit 1',
     '    open_in_app "$target_url" || printf \'dsh web is already running: %s\\n\' "$target_url"',
     '    exit 0',

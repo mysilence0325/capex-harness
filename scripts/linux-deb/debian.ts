@@ -34,7 +34,7 @@ export const DEB_PRIORITY = 'optional'
 export const DEB_DEPENDS = ['libc6 (>= 2.28)', 'ca-certificates'] as const
 
 /** Optional integrations the payload probes at runtime. */
-export const DEB_RECOMMENDS = ['bubblewrap', 'git'] as const
+export const DEB_RECOMMENDS = ['bubblewrap', 'git', 'wmctrl'] as const
 
 /** Fields of the generated `DEBIAN/control` file. */
 export interface DebianPackageMetadata {

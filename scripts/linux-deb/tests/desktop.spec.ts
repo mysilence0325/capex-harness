@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  capexWindowId,
   DESKTOP_ENTRY_PATH,
   DESKTOP_ICON_HELPER_PATH,
   DESKTOP_FILE_ASSOCIATION_HELPER_PATH,
@@ -205,6 +206,54 @@ describe('desktopLauncher', () => {
     expect(launcher).toContain('notify-send "Capex Harness"')
     expect(launcher).toContain('searchParams.set(\\"open\\"')
     expect(launcher).toContain('searchParams.set(\\"workspace\\"')
+  })
+
+  it('focuses an existing window only when no document was passed', () => {
+    expect(launcher).toContain('if [ -z "$launch_input" ] && focus_existing_window; then')
+    expect(launcher).toContain('launch_input=${1:-}')
+    expect(launcher).toContain('focus_existing_window')
+  })
+
+  it('focuses only after proving the running Host still answers', () => {
+    const runningHost = launcher.indexOf('r.status === 303')
+    const focus = launcher.indexOf('if [ -z "$launch_input" ] && focus_existing_window; then')
+    const coldStart = launcher.indexOf('nohup "$NODE"')
+
+    expect(runningHost).toBeGreaterThan(-1)
+    expect(focus).toBeGreaterThan(runningHost)
+    expect(focus).toBeLessThan(coldStart)
+  })
+})
+
+describe('capexWindowId', () => {
+  it('selects the current user\'s Capex Harness window', () => {
+    const windows = [
+      '0x00a0001f  0 6100 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S 北信源安全保密套件管理系统-奇安信可信浏览器',
+      '0x00a0003d  0 6200 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S 简单问候 - Capex Harness',
+      '0x00a0004e  0 6300 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S 另一会话 — Capex Harness',
+    ].join('\n')
+
+    expect(capexWindowId(windows, 1000, pid => pid >= 6200 ? 1000 : 1001)).toBe('0x00a0003d')
+  })
+
+  it('ignores other users and windows without the product title suffix', () => {
+    const windows = [
+      '0x00a0001f  0 6100 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S Capex Harness',
+      '0x00a0002d  0 6200 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S 北信源安全保密套件管理系统-奇安信可信浏览器',
+    ].join('\n')
+
+    expect(capexWindowId(windows, 1000, pid => pid === 6200 ? 1000 : 1001)).toBeUndefined()
+  })
+
+  it('rejects malformed and unrelated window rows', () => {
+    const windows = [
+      'not a wmctrl row',
+      '0x00a0001f  0 0 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S Capex Harness',
+      '0x00a0002d  0 6200 host qaxbrowser-safe.Qaxbrowser-safe GCH-zhoulh-S Capex Harness archive',
+      '0x00a0003e  0 6300 host mate-terminal.Mate-terminal GCH-zhoulh-S 简单问候 - Capex Harness',
+    ].join('\n')
+
+    expect(capexWindowId(windows, 1000, () => 1000)).toBeUndefined()
   })
 })
 

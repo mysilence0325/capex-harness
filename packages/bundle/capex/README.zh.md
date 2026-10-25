@@ -30,7 +30,7 @@ kind: "package-bundle"
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-这是一个普通 bundle patch，在通用 Web 层之后应用。它不改变 Session 格式或 agent loop。本机用户行发布进程身份；desktop-open 消费启动文件参数；storage-maintenance 由 Client Remote 装配挂载，并向设置壳提供本地占用。清理始终是显式命令，不自动执行。Debian 构建把文档和应用框标题设为 `Capex Harness`。启动器使用系统默认浏览器，保留该桌面条目的参数，在 Chromium 兼容浏览器中请求应用窗口，并保留已安装的奇安信启动器作为回退。
+这是一个普通 bundle patch，在通用 Web 层之后应用。它不改变 Session 格式或 agent loop。本机用户行发布进程身份；desktop-open 消费启动文件参数；storage-maintenance 由 Client Remote 装配挂载，并向设置壳提供本地占用。清理始终是显式命令，不自动执行。Debian 构建把文档和应用框标题设为 `Capex Harness`。启动器使用系统默认浏览器，保留该桌面条目的参数，在 Chromium 兼容浏览器中请求应用窗口，并保留已安装的奇安信启动器作为回退。在 X11 上，不带文档参数的点击会聚焦当前用户已有的 Capex 窗口，不再打开第二个窗口。
 
 <a id="model-experience"></a>
 ## 模型体验
@@ -46,6 +46,8 @@ kind: "package-bundle"
 <a id="known-limitations-and-deferred-work"></a>
 
 - **同一账号内的进程身份。** 连接到同一 Host 的所有浏览器都显示启动它的操作系统账号；多个自然人共用一个账号时不会被区分。
+
+- **窗口聚焦取决于桌面协议。** X11 使用 `wmctrl` 恢复并聚焦已有窗口；Wayland compositor 可能拒绝其他应用的聚焦请求，此时启动器会正常创建窗口。
 - **设置按 profile 隔离。** 模型提供方和默认模型属于当前 profile；旧 `web` profile 中的设置不会自动复制到 `capex`。
 - **显式文件关联。** 安装 Debian 包不会覆盖每个用户的默认应用。
 - **维护需要显式执行。** Session 移动和 trash 永久回收都不会自动运行。
