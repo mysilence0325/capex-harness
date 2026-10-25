@@ -227,7 +227,7 @@ if [ -x /usr/bin/dsh-web ]; then
   chmod 0700 "$launcher_dir/runtime"
   printf '%s\n' 'http://127.0.0.1:9/?token=stale-after-reboot' > "$launcher_dir/runtime/web-url"
   launcher_state='ran'
-  if ! HOME="$launcher_dir/home" DSH_HOME="$launcher_dir/home/.dsh" \
+  if ! HOME="$launcher_dir/home" DSH_HOME="$launcher_dir/home/.dsh" DISPLAY=:0 \
     XDG_DATA_HOME="$launcher_dir/home/.local/share" XDG_RUNTIME_DIR="$launcher_dir/runtime" \
     XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir/bin:$PATH" \
     timeout 330 /usr/bin/dsh-web >"$launcher_dir/launcher.log" 2>&1; then
@@ -277,7 +277,7 @@ if [ -x /usr/bin/dsh-web ]; then
     # is what proves the saved URL still answers before wmctrl may focus.
     touch "$launcher_dir/existing-window"
     focus_state='ran'
-    if ! HOME="$launcher_dir/home" DSH_HOME="$launcher_dir/home/.dsh" \
+    if ! HOME="$launcher_dir/home" DSH_HOME="$launcher_dir/home/.dsh" DISPLAY=:0 \
       XDG_DATA_HOME="$launcher_dir/home/.local/share" XDG_RUNTIME_DIR="$launcher_dir/runtime" \
       XDG_STATE_HOME="$launcher_dir/state" PATH="$launcher_dir/bin:$PATH" \
       timeout 15 /usr/bin/dsh-web >"$launcher_dir/focus.log" 2>&1; then
