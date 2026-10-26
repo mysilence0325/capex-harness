@@ -127,6 +127,18 @@ describe('installer package files', () => {
     expect(runtime).not.toContain('apt-get install')
   })
 
+  it('reuses a complete payload after verifying its size and digest', () => {
+    const runtime = installerDataFiles(payload)
+      .find(file => file.path === '/usr/lib/capex-harness-installer/install-payload')?.content
+
+    expect(runtime).toContain('reuse_download=false')
+    expect(runtime).toContain('[ "$(stat -c %s "$DOWNLOAD_FILE")" = "$PAYLOAD_SIZE" ]')
+    expect(runtime).toContain('reuse_download=true')
+    expect(runtime).toContain('if [ "$reuse_download" = false ]; then')
+    expect(runtime).toContain('required_kib=$(( (PAYLOAD_SIZE * 4 + 67108863) / 1024 ))')
+    expect(runtime).toContain('required_kib=$(( (PAYLOAD_SIZE * 5 - partial_size + 67108863) / 1024 ))')
+  })
+
   it('prefers systemd and retains a detached fallback', () => {
     const scheduler = installerScheduler()
 
