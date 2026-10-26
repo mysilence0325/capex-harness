@@ -31,12 +31,17 @@ pnpm run deb:build -- --glibc-floor 2.28            # rebuild the glibc-linked a
 pnpm run deb:build -- --python-only                 # skip the Node.js CLI payload
 pnpm run deb:build -- --stage package               # rerun one stage against the existing work tree
 pnpm run deb:build -- --dry-run                     # print the container commands only
+pnpm run deb:build -- --stage installer \
+  --payload-url http://15.11.40.31:7009/public/capex/capex-harness_0.2.1~rc.3_arm64.deb \
+  --payload-user cape --payload-password-file /root/capex-installer-password
 ```
 
-Options: `--repo`, `--out`, `--work`, `--cache`, `--clean`, `--stage <all|prepare|natives|package|reports>`, `--base-image`, `--js-image`, `--natives-image`, `--emulator`, `--network`, `--glibc-floor`, `--maintainer`, `--revision`, `--python-only`, `--skip-smoke`, `--dry-run`.
+Options: `--repo`, `--out`, `--work`, `--cache`, `--clean`, `--stage <all|prepare|natives|package|reports|installer>`, `--base-image`, `--js-image`, `--natives-image`, `--emulator`, `--network`, `--glibc-floor`, `--maintainer`, `--revision`, `--python-only`, `--skip-smoke`, `--installer`, `--installer-image`, `--payload-url`, `--payload-user`, `--payload-password-file`, `--dry-run`.
 `--network host` gives every stage container the host network namespace and its resolver; use it when the Docker bridge cannot resolve names or reach the internet, which otherwise fails at the first apt or registry download.
 `--maintainer` sets the Debian `Maintainer` field and defaults to a local placeholder, so set it when the package leaves your machine.
 `--revision` is empty by default, so the artifact keeps the product version without a Debian revision suffix. Pass an explicit value only when a downstream repository needs one.
+`--installer` adds the small authenticated network installer after the payload package. It requires the exact payload URL, HTTP user, and a root-owned password file.
+The resulting installer embeds an extractable copy of that password, so distribute the artifact only through a controlled channel and rotate the password if it escapes.
 
 Downloaded dependencies are kept under `--cache` (default `<work>/cache`) and mounted into every stage: apt archives and indexes, the pnpm store inside the work tree, PyPI wheels, the packager's runtime cache, and the pip, npm, and uv caches. Rebuilding therefore reuses them; delete the cache only to force fresh downloads, and never delete it just to rerun a stage.
 
@@ -98,6 +103,7 @@ A full first build is dominated by arm64 execution under qemu, workspace install
 ## Output
 
 - `capex-harness_<version>_arm64.deb` — the package. It installs `/usr/bin/dsh` (source-built closure on the bundled Node.js), `/usr/bin/dsh-sdk` (the packaged Python runtime wheel's console script with a default `DSH_HOME`), `/usr/bin/dsh-python` (bundled CPython), `/usr/bin/dsh-pip` (offline pip over the bundled wheelhouse), `/usr/bin/dsh-office-convert` (WPS-aware Office conversion), and the payload under `/usr/lib/capex-harness`.
+- `capex-harness-installer_<version>_arm64.deb` — the optional few-KiB network installer. It downloads the exact payload URL after the installing package transaction completes, verifies its size, SHA-256, package name, version, and architecture, then installs it with `apt-get`. `capex-harness-install-status` reports progress and `sudo capex-harness-install` retries a failed download or installation.
 - Desktop integration: an application-menu entry (`Capex Harness`) and the launcher a click runs (`/usr/bin/dsh-web`) start the `capex` profile, wait for its authenticated URL, and open it in the current default browser. On X11, a click without a document first focuses the current user's existing window whose title ends in `Capex Harness`, including a minimized window, instead of opening another one. The launcher honors `DSH_BROWSER`, preserves the default browser's desktop-entry arguments, requests `--app` from Chromium-compatible browsers, retains the installed QiAnXin launcher as a fallback, and finally uses `xdg-open`. Packaged Web builds use `Capex Harness` for both the document and application-frame title. The entry accepts file URIs through `%U`; `/usr/bin/dsh-web-register-file-types` opts the current user into supported document associations. Run the desktop-icon helper as the desktop user, never with `sudo`. `--python-only` ships no shortcut, because the launcher runs the bundled Node.js CLI.
 - Each OS user gets a separate `$HOME/.dsh` and private runtime URL under `$XDG_RUNTIME_DIR` (or `/tmp/capex-harness-<uid>`), so a shared host does not reuse another user's Host. The Settings fallback identifies the Host process owner.
 - The `capex` profile defaults to the `capexai` OpenAI Chat Completions route at `http://15.11.40.44:3100/v1` and the `deepseek-flash` model. Its credential reference is `CAPEXAI_API_KEY`; the package contains no secret. Users can add further providers in Settings.
@@ -105,6 +111,7 @@ A full first build is dominated by arm64 execution under qemu, workspace install
 - `DEPENDENCIES.md` — every apt package, npm tarball, PyPI distribution, locked archive, image, and locally built artifact the build resolved, with versions, sources, digests, and whether the bytes ship inside the package.
 - `manifest.json` — the same inventory in machine-readable form, with the source revision and the payload's glibc symbol ceiling.
 - `verify-on-target.sh` — run it on the target machine after installing: it checks the architecture, glibc, installed commands, and that the seeded resource cache serves the runtime with downloads disabled.
+- `installer-manifest.json` — the network installer's package metadata, payload URL and expected digest, and artifact digest; it never contains the HTTP password.
 - `build-report/` — the container evidence: rendered control file, `dpkg-deb` inspection and contents, smoke-test output, and the ELF symbol capture.
 
 ## Offline Python extras and WPS conversion

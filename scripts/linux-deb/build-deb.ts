@@ -22,6 +22,7 @@ import { parseArgs } from 'node:util'
 import primaryRuntimeLock from '../primary-runtime/lock.json' with { type: 'json' }
 import { DEB_INSTALL_ROOT, debianArtifactName, deepseekHarnessPackage, renderControlFile } from './debian.ts'
 import { desktopPackageFiles, type PackageFile } from './desktop.ts'
+import { buildInstaller } from './build-installer.ts'
 import { assertGlibcFloor, compareGlibcVersions, maxGlibcVersion, parseVersionInfoDump } from './glibc.ts'
 import { hostNodeArchive } from './host-platform.ts'
 import {
@@ -75,7 +76,7 @@ const EMULATION_HELP = [
 ].join('\n')
 
 /** Build stages the operator can run individually from the work directory. */
-const STAGES = ['all', 'prepare', 'natives', 'package', 'reports'] as const
+const STAGES = ['all', 'prepare', 'natives', 'package', 'reports', 'installer'] as const
 
 type StageSelection = (typeof STAGES)[number]
 
@@ -103,6 +104,11 @@ interface BuildOptions {
   readonly skipSmoke: boolean
   readonly clean: boolean
   readonly dryRun: boolean
+  readonly installer: boolean
+  readonly installerImage: string
+  readonly payloadUrl: string
+  readonly payloadUser: string
+  readonly payloadPasswordFile: string
 }
 
 function readProductVersion(): string {
@@ -156,6 +162,11 @@ function parseOptions(argv: readonly string[]): BuildOptions {
       'python-url': { type: 'string' },
       'python-only': { type: 'boolean', default: false },
       'skip-smoke': { type: 'boolean', default: false },
+      installer: { type: 'boolean', default: false },
+      'installer-image': { type: 'string' },
+      'payload-url': { type: 'string' },
+      'payload-user': { type: 'string' },
+      'payload-password-file': { type: 'string' },
       clean: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
     },
@@ -191,6 +202,13 @@ function parseOptions(argv: readonly string[]): BuildOptions {
     skipSmoke: values['skip-smoke'],
     clean: values.clean,
     dryRun: values['dry-run'],
+    installer: values.installer || stage === 'installer',
+    installerImage: values['installer-image'] ?? 'ubuntu:20.04',
+    payloadUrl: values['payload-url'] ?? '',
+    payloadUser: values['payload-user'] ?? '',
+    payloadPasswordFile: values['payload-password-file'] === undefined
+      ? ''
+      : resolve(values['payload-password-file']),
   }
 }
 
@@ -560,7 +578,37 @@ function writeReports(
   console.log('copy the .deb and verify-on-target.sh to the arm64 machine and run the script there.')
 }
 
-function main(): void {
+function assertInstallerOptions(options: BuildOptions): void {
+  if (!options.installer) return
+  if (options.payloadUrl === '' || options.payloadUser === '' || options.payloadPasswordFile === '') {
+    throw new Error('deb: installer builds require --payload-url, --payload-user, and --payload-password-file')
+  }
+  if (!existsSync(options.payloadPasswordFile)) {
+    throw new Error(`deb: payload password file does not exist: ${options.payloadPasswordFile}`)
+  }
+}
+
+async function writeInstaller(options: BuildOptions, productVersion: string): Promise<void> {
+  const metadata = deepseekHarnessPackage(productVersion, {
+    maintainer: options.maintainer,
+    revision: options.revision,
+  })
+  await buildInstaller({
+    repo: options.repo,
+    packagePath: join(options.out, debianArtifactName(metadata)),
+    out: options.out,
+    work: options.work,
+    url: options.payloadUrl,
+    user: options.payloadUser,
+    passwordFile: options.payloadPasswordFile,
+    maintainer: options.maintainer,
+    revision: options.revision,
+    image: options.installerImage,
+    dryRun: options.dryRun,
+  })
+}
+
+async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2))
   const productVersion = readProductVersion()
   const metadata = deepseekHarnessPackage(productVersion, {
@@ -572,6 +620,12 @@ function main(): void {
   console.log(`deb: work ${options.work}`)
   console.log(`deb: dependency cache ${options.cache} (kept between runs)`)
   console.log(`deb: output ${options.out}`)
+  assertInstallerOptions(options)
+  if (options.stage === 'installer') {
+    requireDocker()
+    await writeInstaller(options, productVersion)
+    return
+  }
   rmSync(options.out, { recursive: true, force: true })
   if (options.clean) rmSync(options.work, { recursive: true, force: true })
   mkdirSync(options.work, { recursive: true })
@@ -651,6 +705,10 @@ function main(): void {
   const images = [...new Set([options.baseImage, ...(runPrepare ? [options.jsImage] : []), ...(runNatives ? [options.nativesImage] : [])])]
   const manifest = collectManifest(options, artifact, images, highest ?? options.glibcFloor)
   writeReports(options, manifest, entries)
+  if (options.installer) await writeInstaller(options, productVersion)
 }
 
-main()
+main().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+  process.exitCode = 1
+})

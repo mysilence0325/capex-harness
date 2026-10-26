@@ -31,12 +31,17 @@ pnpm run deb:build -- --glibc-floor 2.28            # rebuild the glibc-linked a
 pnpm run deb:build -- --python-only                 # skip the Node.js CLI payload
 pnpm run deb:build -- --stage package               # rerun one stage against the existing work tree
 pnpm run deb:build -- --dry-run                     # print the container commands only
+pnpm run deb:build -- --stage installer \
+  --payload-url http://15.11.40.31:7009/public/capex/capex-harness_0.2.1~rc.3_arm64.deb \
+  --payload-user cape --payload-password-file /root/capex-installer-password
 ```
 
-选项：`--repo`、`--out`、`--work`、`--cache`、`--clean`、`--stage <all|prepare|natives|package|reports>`、`--base-image`、`--js-image`、`--natives-image`、`--emulator`、`--network`、`--glibc-floor`、`--maintainer`、`--revision`、`--python-only`、`--skip-smoke`、`--dry-run`。
+选项：`--repo`、`--out`、`--work`、`--cache`、`--clean`、`--stage <all|prepare|natives|package|reports|installer>`、`--base-image`、`--js-image`、`--natives-image`、`--emulator`、`--network`、`--glibc-floor`、`--maintainer`、`--revision`、`--python-only`、`--skip-smoke`、`--installer`、`--installer-image`、`--payload-url`、`--payload-user`、`--payload-password-file`、`--dry-run`。
 `--network host` 把宿主机网络命名空间和解析器交给每个阶段容器；当 Docker bridge 无法解析名称或访问互联网时使用它，否则会在第一次 apt 或 registry 下载时失败。
 `--maintainer` 设置 Debian `Maintainer` 字段，默认是本地占位值；包要离开本机时应显式设置。
 `--revision` 默认为空，因此产物直接使用产品版本，不附加 Debian revision 后缀。只有下游仓库需要时才显式传入。
+`--installer` 在大负载包之后生成一个小的联网安装器；它要求负载的精确 URL、HTTP 用户名和 root-only 密码文件。
+小安装器包含可提取的密码副本，因此只能通过受控渠道分发；密码一旦泄漏应立即轮换。
 
 下载的依赖保存在 `--cache`（默认 `<work>/cache`），并挂载到每个阶段：apt 归档与索引、work tree 内的 pnpm store、PyPI wheel、打包器的运行时缓存，以及 pip、npm 和 uv 缓存。因此重建会复用它们；只有强制重新下载时才删除缓存，重跑阶段不要删除。
 
@@ -93,6 +98,7 @@ apt 镜像必须通过明文 HTTP 提供，因为构建会先安装 `ca-certific
 ## 输出
 
 - `capex-harness_<version>_arm64.deb` — 安装包。它安装 `/usr/bin/dsh`（基于随包 Node.js 的源码构建闭包）、`/usr/bin/dsh-sdk`（随包 Python runtime wheel 的 console script，带默认 `DSH_HOME`）、`/usr/bin/dsh-python`（随包 CPython）、`/usr/bin/dsh-pip`（使用随包 wheelhouse 的离线 pip）、`/usr/bin/dsh-office-convert`（可感知 WPS 的 Office 转换），以及 `/usr/lib/capex-harness` 下的 payload。
+- `capex-harness-installer_<version>_arm64.deb` — 可选的小型联网安装器。当前安装事务结束后，它从固定 URL 下载精确负载，校验大小、SHA-256、包名、版本和架构，再通过 `apt-get` 安装。`capex-harness-install-status` 显示进度，`sudo capex-harness-install` 可重试失败的下载或安装。
 - 桌面集成：应用菜单项（`Capex Harness`）和启动器（`/usr/bin/dsh-web`）启动 `capex` profile，等待带认证的 URL，并在当前默认浏览器中打开。在 X11 上，不带文档参数的点击会先聚焦当前用户标题以 `Capex Harness` 结尾的现有窗口，包括最小化窗口，不再打开第二个窗口。启动器优先使用 `DSH_BROWSER`，保留默认浏览器桌面条目中的参数，在 Chromium 兼容浏览器中请求 `--app`，随后回退到已安装的奇安信启动器，最后使用 `xdg-open`。打包 Web 的文档标题和应用框标题都使用 `Capex Harness`。入口通过 `%U` 接收文件 URI；`/usr/bin/dsh-web-register-file-types` 让当前用户选择支持文档的默认关联。以桌面用户（不要 sudo）运行桌面图标辅助命令。`--python-only` 不提供快捷方式，因为启动器运行随包 Node.js CLI。
 - 每个操作系统用户使用自己的 `$HOME/.dsh` 和 `$XDG_RUNTIME_DIR` 下的私有 runtime URL（或 `/tmp/capex-harness-<uid>`），共用主机时不会复用其他用户的 Host。设置壳显示 Host 进程所属账号。
 - `capex` profile 默认使用 `capexai` OpenAI Chat Completions 路由，地址为 `http://15.11.40.44:3100/v1`，默认模型为 `deepseek-flash`。凭据引用是 `CAPEXAI_API_KEY`，安装包不含密钥；用户可在设置页继续添加提供方。
@@ -100,6 +106,7 @@ apt 镜像必须通过明文 HTTP 提供，因为构建会先安装 `ca-certific
 - `DEPENDENCIES.md` — 构建解析出的每个 apt 包、npm tarball、PyPI 分发包、锁定归档、镜像和本地构建产物，包含版本、来源、摘要以及字节是否随包交付。
 - `manifest.json` — 同一清单的机器可读形式，包含源码 revision 与 payload 的 glibc 符号上限。
 - `verify-on-target.sh` — 安装后在目标机运行：检查架构、glibc、已安装命令，以及 seed 的资源缓存能在禁用下载时服务运行时。
+- `installer-manifest.json` — 联网安装器的包元数据、负载 URL 与预期摘要，以及产物摘要；其中不包含 HTTP 密码。
 - `build-report/` — 容器证据：渲染后的 control 文件、`dpkg-deb` 检查与内容列表、smoke 输出和 ELF 符号采集。
 
 ## 离线 Python extras 与 WPS 转换
