@@ -12,7 +12,7 @@ import {
 export const INSTALLER_PACKAGE_NAME = 'capex-harness-installer'
 
 /** Runtime packages required by the bootstrap commands. */
-export const INSTALLER_DEPENDS = ['apt', 'ca-certificates', 'coreutils', 'curl', 'util-linux'] as const
+export const INSTALLER_DEPENDS = ['ca-certificates', 'coreutils', 'curl', 'dpkg', 'util-linux'] as const
 
 /** Optional scheduler integration installed on desktop systems. */
 export const INSTALLER_RECOMMENDS = ['systemd'] as const
@@ -281,13 +281,13 @@ function installerRuntime(): string {
     '  fail "Downloaded payload Debian metadata does not match the installer."',
     'fi',
     'status installing "Installing the verified Capex Harness payload."',
-    'if ! DEBIAN_FRONTEND=noninteractive apt-get \\',
-    '  -o DPkg::Lock::Timeout=300 \\',
-    '  install --reinstall -y --no-install-recommends "$DOWNLOAD_FILE"; then',
+    'if ! DEBIAN_FRONTEND=noninteractive dpkg -i "$DOWNLOAD_FILE"; then',
     '  fail "Payload installation failed. Retry with: sudo capex-harness-install"',
     'fi',
-    `if [ "$(dpkg-query -W -f='\${Version}' ${DEB_PACKAGE_NAME} 2>/dev/null || true)" != "$PAYLOAD_VERSION" ]; then`,
-    '  fail "Payload package is not installed at the expected version."',
+    'installed_status=$(dpkg-query -W -f=\'${Status}\' capex-harness 2>/dev/null || true)',
+    'if [ "$installed_status" != "install ok installed" ] \\',
+    `  || [ "$(dpkg-query -W -f='\${Version}' ${DEB_PACKAGE_NAME} 2>/dev/null || true)" != "$PAYLOAD_VERSION" ]; then`,
+    '  fail "Payload package is not installed and configured at the expected version."',
     'fi',
     'printf \'%s\\n\' "$PAYLOAD_SHA256" > "$INSTALLED_MARKER"',
     'chmod 0600 "$INSTALLED_MARKER"',

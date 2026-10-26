@@ -33,7 +33,7 @@ describe('installer package metadata', () => {
     expect(control).toContain('Package: capex-harness-installer\n')
     expect(control).toContain('Version: 0.2.1~rc.3\n')
     expect(control).toContain('Architecture: arm64\n')
-    expect(control).toContain('Depends: apt, ca-certificates, coreutils, curl, util-linux\n')
+    expect(control).toContain('Depends: ca-certificates, coreutils, curl, dpkg, util-linux\n')
     expect(control).toContain('Recommends: systemd\n')
     expect(control).not.toContain('Depends: capex-harness')
   })
@@ -115,6 +115,16 @@ describe('installer package files', () => {
     expect(postinst).toContain('/usr/lib/capex-harness-installer/schedule')
     expect(postinst).not.toContain('dpkg --install')
     expect(postinst).not.toContain('apt-get')
+  })
+
+  it('installs the verified payload with dpkg and requires a configured package', () => {
+    const runtime = installerDataFiles(payload)
+      .find(file => file.path === '/usr/lib/capex-harness-installer/install-payload')?.content
+
+    expect(runtime).toContain('DEBIAN_FRONTEND=noninteractive dpkg -i "$DOWNLOAD_FILE"')
+    expect(runtime).toContain('installed_status=$(dpkg-query -W -f=\'${Status}\' capex-harness 2>/dev/null || true)')
+    expect(runtime).toContain('"$installed_status" != "install ok installed"')
+    expect(runtime).not.toContain('apt-get install')
   })
 
   it('prefers systemd and retains a detached fallback', () => {

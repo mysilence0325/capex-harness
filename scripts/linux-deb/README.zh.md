@@ -98,7 +98,7 @@ apt 镜像必须通过明文 HTTP 提供，因为构建会先安装 `ca-certific
 ## 输出
 
 - `capex-harness_<version>_arm64.deb` — 安装包。它安装 `/usr/bin/dsh`（基于随包 Node.js 的源码构建闭包）、`/usr/bin/dsh-sdk`（随包 Python runtime wheel 的 console script，带默认 `DSH_HOME`）、`/usr/bin/dsh-python`（随包 CPython）、`/usr/bin/dsh-pip`（使用随包 wheelhouse 的离线 pip）、`/usr/bin/dsh-office-convert`（可感知 WPS 的 Office 转换），以及 `/usr/lib/capex-harness` 下的 payload。
-- `capex-harness-installer_<version>_arm64.deb` — 可选的小型联网安装器。当前安装事务结束后，它从固定 URL 下载精确负载，校验大小、SHA-256、包名、版本和架构，再通过 `apt-get` 安装。`capex-harness-install-status` 显示进度，`sudo capex-harness-install` 可重试失败的下载或安装。
+- `capex-harness-installer_<version>_arm64.deb` — 可选的小型联网安装器。当前安装事务结束后，它从固定 URL 下载精确负载，校验大小、SHA-256、包名、版本和架构，再通过 `dpkg -i` 安装。`capex-harness-install-status` 显示进度，`sudo capex-harness-install` 可重试失败的下载或安装。
 - 桌面集成：应用菜单项（`Capex Harness`）和启动器（`/usr/bin/dsh-web`）启动 `capex` profile，等待带认证的 URL，并在当前默认浏览器中打开。在 X11 上，不带文档参数的点击会先聚焦当前用户标题以 `Capex Harness` 结尾的现有窗口，包括最小化窗口，不再打开第二个窗口。启动器优先使用 `DSH_BROWSER`，保留默认浏览器桌面条目中的参数，在 Chromium 兼容浏览器中请求 `--app`，随后回退到已安装的奇安信启动器，最后使用 `xdg-open`。打包 Web 的文档标题和应用框标题都使用 `Capex Harness`。入口通过 `%U` 接收文件 URI；`/usr/bin/dsh-web-register-file-types` 让当前用户选择支持文档的默认关联。以桌面用户（不要 sudo）运行桌面图标辅助命令。`--python-only` 不提供快捷方式，因为启动器运行随包 Node.js CLI。
 - 每个操作系统用户使用自己的 `$HOME/.dsh` 和 `$XDG_RUNTIME_DIR` 下的私有 runtime URL（或 `/tmp/capex-harness-<uid>`），共用主机时不会复用其他用户的 Host。设置壳显示 Host 进程所属账号。
 - `capex` profile 默认使用 `capexai` OpenAI Chat Completions 路由，地址为 `http://15.11.40.44:3100/v1`，默认模型为 `deepseek-flash`。凭据引用是 `CAPEXAI_API_KEY`，安装包不含密钥；用户可在设置页继续添加提供方。
