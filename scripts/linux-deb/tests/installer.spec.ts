@@ -65,6 +65,7 @@ describe('installer payload configuration', () => {
     expect(config).toContain('user = "cape:p\'ass@word"')
     expect(config).toContain('proto = "=http,https"')
     expect(config).toContain('continue-at = "-"')
+    expect(config).toContain('connect-timeout = "15"')
     expect(config).toContain('output = "/var/cache/capex-harness-installer/capex-harness_0.2.1~rc.3_arm64.deb.part"')
   })
 
@@ -102,6 +103,10 @@ describe('installer package files', () => {
     ])
     expect(byPath.get('/usr/bin/capex-harness-install-status')?.content)
       .not.toContain('. /usr/lib/capex-harness-installer/config')
+    expect(byPath.get('/usr/lib/capex-harness-installer/install-payload')?.content)
+      .toContain('available_kib=$(df -Pk "$CACHE_DIR"')
+    expect(byPath.get('/usr/lib/capex-harness-installer/install-payload')?.content)
+      .not.toContain('print $4 * 1024')
   })
 
   it('schedules a detached install without nesting dpkg in postinst', () => {
