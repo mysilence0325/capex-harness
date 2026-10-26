@@ -110,7 +110,7 @@ A full first build is dominated by arm64 execution under qemu, workspace install
 - The arm64 payload includes the glibc and musl `system.node` addons, the static `landlock-run` launcher, and the `node-pty` addon. Package smoke loads `system.node` and acquires a real exclusive file lock.
 - `DEPENDENCIES.md` — every apt package, npm tarball, PyPI distribution, locked archive, image, and locally built artifact the build resolved, with versions, sources, digests, and whether the bytes ship inside the package.
 - `manifest.json` — the same inventory in machine-readable form, with the source revision and the payload's glibc symbol ceiling.
-- `verify-on-target.sh` — run it on the target machine after installing: it checks the architecture, glibc, installed commands, and that the seeded resource cache serves the runtime with downloads disabled.
+- `verify-on-target.sh` — an optional diagnostic for the architecture, glibc, installed commands, and seeded resources. Host-specific desktop or sandbox checks can report unsupported conditions; acceptance uses the installer status, `dpkg-query`, and `dsh --version`.
 - `installer-manifest.json` — the network installer's package metadata, payload URL and expected digest, and artifact digest; it never contains the HTTP password.
 - `build-report/` — the container evidence: rendered control file, `dpkg-deb` inspection and contents, smoke-test output, and the ELF symbol capture.
 

@@ -105,7 +105,7 @@ apt 镜像必须通过明文 HTTP 提供，因为构建会先安装 `ca-certific
 - ARM64 payload 包含 glibc 与 musl 的 `system.node`、静态 `landlock-run` 启动器和 `node-pty` addon。包内 smoke 会加载 `system.node` 并实际获取一次独占文件锁。
 - `DEPENDENCIES.md` — 构建解析出的每个 apt 包、npm tarball、PyPI 分发包、锁定归档、镜像和本地构建产物，包含版本、来源、摘要以及字节是否随包交付。
 - `manifest.json` — 同一清单的机器可读形式，包含源码 revision 与 payload 的 glibc 符号上限。
-- `verify-on-target.sh` — 安装后在目标机运行：检查架构、glibc、已安装命令，以及 seed 的资源缓存能在禁用下载时服务运行时。
+- `verify-on-target.sh` — 可选的诊断脚本，检查架构、glibc、已安装命令和 seed 资源。主机相关的桌面或沙箱检查可能报告环境不支持；验收以安装器状态、`dpkg-query` 和 `dsh --version` 为准。
 - `installer-manifest.json` — 联网安装器的包元数据、负载 URL 与预期摘要，以及产物摘要；其中不包含 HTTP 密码。
 - `build-report/` — 容器证据：渲染后的 control 文件、`dpkg-deb` 检查与内容列表、smoke 输出和 ELF 符号采集。
 
